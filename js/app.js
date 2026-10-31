@@ -135,8 +135,9 @@ function vLogin(inviteCode) {
     <button class="btn b-amber">${demo ? 'Entrar (demo)' : 'Enviarme el código'}</button>
   </form>
   ${ui.codeSent && !demo ? `<form data-form="verify" class="card">
-    <p class="sub" style="margin:0">Te enviamos un correo a <b>${esc(ui.email)}</b>. Escribe el código de 6 dígitos, o toca el enlace del correo desde este mismo celular.</p>
-    <label class="field"><span>Código</span><input class="in num" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required style="font-size:22px;letter-spacing:.3em"></label>
+    <p class="sub" style="margin:0">Te enviamos un correo a <b>${esc(ui.email)}</b>. <b style="color:#fff">Ábrelo en este mismo celular y toca el enlace</b>: entrarás directo. Si no llega en 2 minutos, revisa Spam.</p>
+    <p class="muted" style="margin:0">¿Tu correo trae un código de 6 dígitos? Escríbelo aquí:</p>
+    <label class="field"><span>Código (opcional)</span><input class="in num" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required style="font-size:22px;letter-spacing:.3em"></label>
     <button class="btn b-amber">Entrar</button>
   </form>` : ''}
   </main></div>`;
