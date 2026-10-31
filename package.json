@@ -1,0 +1,8 @@
+{
+  "name": "registro-audiovisual",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}
