@@ -1,6 +1,6 @@
 // Estado de la app y operaciones del día a día.
 import { api, TABLES, isPractice, hasServer } from './api.js';
-import { at, addDays, payouts, attendanceStatus, memberStatus, videoState, limaDate, adminAbsent, preDueFor, meetingOf as rMeetingOf } from './rules.js';
+import { setRules, DEFAULT_PCT, DEFAULT_RULES, at, addDays, payouts, attendanceStatus, memberStatus, videoState, limaDate, adminAbsent, preDueFor, meetingOf as rMeetingOf } from './rules.js';
 
 export const S = {
   ready: false, session: null, teams: [], teamId: null, me: null, projectId: null,
@@ -36,8 +36,11 @@ export async function loadTeams() {
 
 export async function load() {
   if (!S.teamId) return;
-  const rows = await Promise.all(TABLES.map((t) => api.list(t, S.teamId)));
+  const OPTIONAL = { proposals: 1 };
+  const rows = await Promise.all(TABLES.map((t) => OPTIONAL[t] ? api.list(t, S.teamId).catch(() => []) : api.list(t, S.teamId)));
   TABLES.forEach((t, i) => { S.data[t] = rows[i] || []; });
+  try { S.settings = (await api.rpc('team_settings', { t: S.teamId })) || {}; } catch (e) { S.settings = S.settings || {}; }
+  setRules(S.settings.rules);
   S.me = S.data.members.find((m) => m.user_id === S.session.user.id) || null;
   const open = S.data.projects.filter((p) => p.status === 'abierto');
   if (!S.projectId || !S.data.projects.find((p) => p.id === S.projectId)) {
@@ -116,7 +119,8 @@ export const renameMember = (id, name) => run(() => api.update('members', id, { 
 
 // ---------- Proyectos y reparto ----------
 export async function createProject(p) {
-  const r = await run(() => api.insert('projects', Object.assign({ team_id: S.teamId, status: 'abierto' }, p)), 'Proyecto creado');
+  const pct = Object.assign({}, DEFAULT_PCT, (S.settings || {}).pct || {});
+  const r = await run(() => api.insert('projects', Object.assign({ team_id: S.teamId, status: 'abierto', pct }, p)), 'Proyecto creado');
   switchProject(r.id);
   return r;
 }
@@ -127,8 +131,8 @@ export function planWeek(w) {
     const rStart = at(w.rodaje_date, w.rodaje_time);
     const mStart = at(w.meeting_date, w.meeting_time);
     if (mStart >= preDueFor(rStart)) throw new Error('La reunión tiene que ser antes del plazo de preproducción (día antes del rodaje, 18:00)');
-    const rod = await api.insert('events', { team_id: S.teamId, project_id: S.projectId, kind: 'rodaje', status: 'activo', starts_at: rStart.toISOString(), tolerance_min: 45, video_ids: [] });
-    await api.insert('events', { team_id: S.teamId, project_id: S.projectId, kind: 'reunion', status: 'activo', rodaje_id: rod.id, starts_at: mStart.toISOString(), tolerance_min: 45, video_ids: [] });
+    const rod = await api.insert('events', { team_id: S.teamId, project_id: S.projectId, kind: 'rodaje', status: 'activo', starts_at: rStart.toISOString(), tolerance_min: rulesTol(), video_ids: [] });
+    await api.insert('events', { team_id: S.teamId, project_id: S.projectId, kind: 'reunion', status: 'activo', rodaje_id: rod.id, starts_at: mStart.toISOString(), tolerance_min: rulesTol(), video_ids: [] });
     return rod;
   }, 'Semana programada');
 }
@@ -138,7 +142,7 @@ export function extraMeeting(rodaje, date, time) {
     if (open) throw new Error('Ese rodaje ya tiene una reunión sin finalizar');
     const mStart = at(date, time);
     if (mStart >= preDueFor(rodaje.starts_at)) throw new Error('Tiene que ser antes del plazo de preproducción');
-    return api.insert('events', { team_id: S.teamId, project_id: rodaje.project_id, kind: 'reunion', status: 'activo', rodaje_id: rodaje.id, starts_at: mStart.toISOString(), tolerance_min: 45, video_ids: rodaje.video_ids });
+    return api.insert('events', { team_id: S.teamId, project_id: rodaje.project_id, kind: 'reunion', status: 'activo', rodaje_id: rodaje.id, starts_at: mStart.toISOString(), tolerance_min: rulesTol(), video_ids: rodaje.video_ids });
   }, 'Reunión agendada');
 }
 // Reparto de la reunión: crea los videos y los asigna al rodaje y a la reunión de esa semana.
@@ -147,7 +151,7 @@ export function reparto(rodaje, videos) {
     const p = project();
     let num = S.data.videos.filter((v) => v.project_id === p.id).reduce((m, v) => Math.max(m, v.num), 0);
     const ids = [];
-    for (const v of videos) { num++; ids.push((await api.insert('videos', { team_id: S.teamId, project_id: p.id, num, publish_date: v.publish_date, owner: v.owner })).id); }
+    for (const v of videos) { num++; ids.push((await api.insert('videos', Object.assign({ team_id: S.teamId, project_id: p.id, num, publish_date: v.publish_date, owner: v.owner }, v.title ? { title: v.title } : {}))).id); }
     const all = rodaje.video_ids.concat(ids);
     await api.update('events', rodaje.id, { video_ids: all });
     for (const m of S.data.events.filter((e) => e.kind === 'reunion' && e.rodaje_id === rodaje.id && (!e.status || e.status === 'activo'))) await api.update('events', m.id, { video_ids: all });
@@ -173,6 +177,18 @@ export function reprogramDay(e, date, time, note) {
 export const deleteProject = (p) => run(() => api.remove('projects', p.id), 'Proyecto borrado');
 export const archiveProject = (p, on) => run(() => api.update('projects', p.id, { status: on ? 'archivado' : 'abierto' }), on ? 'Proyecto archivado' : 'Proyecto reabierto');
 export const undoOwn = (taskId) => run(() => api.remove('tasks', taskId), 'Deshecho');
+
+// ---------- 1.2: ajustes del equipo, propuestas y tema del video ----------
+function rulesTol() { return Number(((S.settings || {}).rules || {}).tol) || DEFAULT_RULES.tol; }
+export const settings = () => S.settings || {};
+export const look = () => Object.assign({ main: '#FFB547', u0: '#FF6B5B', u1: '#FF9F2E', u2: '#5A5D67' }, (S.settings || {}).look || {});
+export const saveLook = (v) => run(() => api.rpc('save_settings', { t: S.teamId, k: 'look', v }), 'Apariencia guardada para los dos');
+export const saveReminders = (v) => run(() => api.rpc('save_settings', { t: S.teamId, k: 'reminders', v }), 'Recordatorios guardados');
+export const proposals = () => (S.data.proposals || []);
+export const pendingProposal = (kind) => proposals().find((p) => p.kind === kind && p.status === 'pendiente') || null;
+export const propose = (kind, data) => run(() => api.insert('proposals', { team_id: S.teamId, kind, data, status: 'pendiente', proposed_by: S.me.id, old: (S.settings || {})[kind] || null }), 'Propuesta enviada: tu socio la verá en su Inicio');
+export const decideProposal = (p, status) => run(() => api.update('proposals', p.id, { status }), status === 'aprobada' ? 'Aprobado: ya se aplica' : status === 'retirada' ? 'Propuesta retirada' : 'Propuesta rechazada');
+export const setTitle = (video, title) => run(() => api.update('videos', video.id, { title: title.trim() || null }), 'Tema guardado');
 
 // Modo práctica: la app usa la demo local aunque haya base de datos real.
 export const practice = () => isPractice;
@@ -237,7 +253,7 @@ export function reprogram(event, videoIds, date, time) {
     const starts = at(date, time).toISOString();
     let target = S.data.events.find((e) => e.kind === 'rodaje' && e.project_id === event.project_id && e.starts_at === starts);
     if (target) await api.update('events', target.id, { video_ids: Array.from(new Set(target.video_ids.concat(videoIds))) });
-    else await api.insert('events', { team_id: S.teamId, project_id: event.project_id, kind: 'rodaje', starts_at: starts, tolerance_min: 45, video_ids: videoIds });
+    else await api.insert('events', { team_id: S.teamId, project_id: event.project_id, kind: 'rodaje', starts_at: starts, tolerance_min: rulesTol(), video_ids: videoIds });
     await api.update('events', event.id, { video_ids: event.video_ids.filter((id) => videoIds.indexOf(id) === -1) });
   }, 'Videos reprogramados');
 }
@@ -255,7 +271,7 @@ export const hireOpen = (eventId) => S.data.hires.find((h) => h.event_id === eve
 // Reunión en la que se repartió un video (para saber si ahí trabajó Guillermo).
 export const meetingOf = (videoId) => { const v = S.data.videos.find((x) => x.id === videoId); return v ? rMeetingOf(v, ctx(v.project_id)) : null; };
 // Rodaje nuevo para videos que se quedaron sin rodaje (por ejemplo, si se canceló).
-export const newRodaje = (projectId, videoIds, date, time) => run(() => api.insert('events', { team_id: S.teamId, project_id: projectId, kind: 'rodaje', status: 'activo', starts_at: at(date, time).toISOString(), tolerance_min: 45, video_ids: videoIds }), 'Rodaje programado');
+export const newRodaje = (projectId, videoIds, date, time) => run(() => api.insert('events', { team_id: S.teamId, project_id: projectId, kind: 'rodaje', status: 'activo', starts_at: at(date, time).toISOString(), tolerance_min: rulesTol(), video_ids: videoIds }), 'Rodaje programado');
 
 // ---------- Cierre del proyecto (6.2 y liquidación) ----------
 export function sendSettlement(p) {

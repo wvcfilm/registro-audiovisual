@@ -45,6 +45,11 @@ export function money(n) {
 
 // ---------- Valor de cada tarea (cláusula cuarta) ----------
 export const DEFAULT_PCT = { pre: 25, rod: 35, mon: 16, aca: 24 };
+// Reglas de registro del equipo (las ajusta el administrador con aprobación del socio).
+export const DEFAULT_RULES = { open: 15, punt: 10, tol: 45, pre: 1080, mon: 2, fin: 1, undo: 10, avr: 1080, avm: 24 };
+export const RULES = Object.assign({}, DEFAULT_RULES);
+export function setRules(r) { Object.assign(RULES, DEFAULT_RULES, r || {}); }
+export const hm = (mins) => String(Math.floor(mins / 60)).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0');
 export const KINDS = ['guion', 'storyboard', 'rodaje', 'montaje', 'acabado'];
 export const KIND_LABEL = { guion: 'Guion', storyboard: 'Storyboard', rodaje: 'Rodaje', montaje: 'Montaje', acabado: 'Video final' };
 export const STAGE_OF = { guion: 'pre', storyboard: 'pre', rodaje: 'prod', montaje: 'post', acabado: 'post' };
@@ -73,15 +78,15 @@ export function meetingOf(video, ctx) {
   return (ctx.events || []).filter((e) => e.kind === 'reunion' && active(e) && (e.video_ids || []).indexOf(video.id) !== -1)
     .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at))[0] || null;
 }
-export function preDueFor(rodajeStart) { return at(addDays(limaDate(rodajeStart), -1), '18:00'); }
+export function preDueFor(rodajeStart) { return at(addDays(limaDate(rodajeStart), -1), hm(RULES.pre)); }
 
 export function deadlines(video, ownerMember, opts = {}) {
   const pub = video.publish_date;
   const collab = opts.collaborator;
-  const finalDue = collab ? at(addDays(pub, -1), '18:00') : at(addDays(pub, -1), '21:00');
+  const finalDue = collab ? at(addDays(pub, -1), '18:00') : at(addDays(pub, -RULES.fin), '21:00');
   let montajeDue = null;
   if (collab) montajeDue = at(addDays(pub, -3), '21:00');
-  else if (ownerMember && ownerMember.apoyo) montajeDue = at(addDays(pub, -2), '21:00');
+  else if (ownerMember && ownerMember.apoyo) montajeDue = at(addDays(pub, -RULES.mon), '21:00');
   const preDue = opts.rodaje ? preDueFor(opts.rodaje.starts_at) : (video.pre_due ? new Date(video.pre_due) : null);
   return { preDue, montajeDue, finalDue };
 }
@@ -175,7 +180,7 @@ export function payouts(project, ctx, now = new Date()) {
 
 // ---------- Asistencia (7.2, 7.3, 7.4, 7.7) ----------
 export function noticeDeadline(event) {
-  return event.kind === 'rodaje' ? preDueFor(event.starts_at) : new Date(new Date(event.starts_at).getTime() - 24 * 3600 * 1000);
+  return event.kind === 'rodaje' ? at(addDays(limaDate(event.starts_at), -1), hm(RULES.avr)) : new Date(new Date(event.starts_at).getTime() - RULES.avm * 3600 * 1000);
 }
 export function attendanceStatus(event, att, now = new Date()) {
   const start = new Date(event.starts_at);
@@ -194,7 +199,7 @@ export function attendanceStatus(event, att, now = new Date()) {
   if (att && att.claimed_at && !att.arrived_at) return { k: 'por_confirmar', label: 'Por confirmar · ' + limaTime(att.claimed_at), pts: 0 };
   if (att && att.arrived_at) {
     const mins = (new Date(att.arrived_at) - start) / 60000;
-    if (mins <= 10) return { k: 'puntual', label: 'Puntual', pts: 1, mins };
+    if (mins <= RULES.punt) return { k: 'puntual', label: 'Puntual', pts: 1, mins };
     if (mins <= tol) return { k: 'tarde', label: 'Tardanza · se paga', pts: -1, mins };
     return { k: 'ausente', label: 'Inasistencia', pts: -5, mins };
   }
@@ -224,7 +229,7 @@ export function meetingEnd(event) {
   return ts.length ? new Date(Math.min(auto, ...ts)) : auto;
 }
 export function meetingOpen(event, now = new Date()) {
-  return active(event) && now >= new Date(new Date(event.starts_at).getTime() - 15 * 60000) && now < meetingEnd(event) && !event.ended_at;
+  return active(event) && now >= new Date(new Date(event.starts_at).getTime() - RULES.open * 60000) && now < meetingEnd(event) && !event.ended_at;
 }
 
 export function memberStatus(event, memberId, ctx, now = new Date()) {
@@ -237,7 +242,7 @@ export function memberStatus(event, memberId, ctx, now = new Date()) {
 export function canCheckIn(event, now = new Date()) {
   const start = new Date(event.starts_at);
   const tol = Number(event.tolerance_min || 45);
-  return now >= new Date(start.getTime() - 15 * 60000) && now <= new Date(start.getTime() + tol * 60000);
+  return now >= new Date(start.getTime() - RULES.open * 60000) && now <= new Date(start.getTime() + tol * 60000);
 }
 
 // ---------- Racha (6.4) ----------
@@ -269,7 +274,7 @@ export function streakEvents(memberId, ctx, now = new Date()) {
       ev.push({ at: t, pts: st.preLate ? -3 : 1, why: st.preLate ? `Guion o storyboard del video ${v.num} fuera de plazo` : `Preproducción del video ${v.num} a tiempo` });
       const mt = meetingOf(v, ctx);
       const att = mt && (ctx.attendance || []).find((a) => a.event_id === mt.id && a.member_id === memberId);
-      if (mt && att && att.arrived_at && t >= new Date(new Date(mt.starts_at).getTime() - 15 * 60000) && t <= meetingEnd(mt)) {
+      if (mt && att && att.arrived_at && t >= new Date(new Date(mt.starts_at).getTime() - RULES.open * 60000) && t <= meetingEnd(mt)) {
         ev.push({ at: t, pts: 1, why: `Punto de reunión · video ${v.num}` });
       }
     }
@@ -345,14 +350,14 @@ export function canMark(video, kind, me, ctx, now = new Date(), opts = {}) {
   if (done) return { ok: false, why: 'Hecho' };
   if (PRE[kind]) {
     if (opts.hire) return { ok: true };
-    if (isOwner) return { ok: true, late: !!(st.d.preDue && now > st.d.preDue) };
+    if (isOwner) return st.d.preDue && now > st.d.preDue ? { ok: false, gone: true, why: 'Venció el plazo: pasó a tu compañero' } : { ok: true };
     if (st.d.preDue && now > st.d.preDue) return { ok: true, take: true };
     return { ok: false, why: st.d.preDue ? `Es de ${owner.name}. Si no la entrega, podrás tomarla después del ${fmtWhen(st.d.preDue)}` : `Es de ${owner.name}` };
   }
   if (kind === 'rodaje') {
     const r = st.rodaje;
     if (!r) return { ok: false, why: 'Primero agenda el rodaje' };
-    const open = new Date(new Date(r.starts_at).getTime() - 15 * 60000);
+    const open = new Date(new Date(r.starts_at).getTime() - RULES.open * 60000);
     if (now < open) return { ok: false, why: `Se habilita el ${fmtWhen(open)}` };
     if (limaDate(now) !== limaDate(r.starts_at)) return { ok: false, why: 'El día del rodaje ya pasó: reprográmalo' };
     if (!st.g || !st.s) return { ok: false, why: 'Primero se necesitan el guion y el storyboard' };
@@ -388,7 +393,7 @@ export function canUndo(task, me, ctx, now = new Date()) {
     const r = v ? rodajeOf(v, ctx) : null;
     return !r || now <= preDueFor(r.starts_at);
   }
-  return now - new Date(task.done_at) <= 10 * 60000;
+  return now - new Date(task.done_at) <= RULES.undo * 60000;
 }
 
 // Franja de urgencia para "Te toca": 0 urgente (vencido o hoy), 1 próximo (1-2 días), 2 con margen.

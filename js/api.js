@@ -1,7 +1,7 @@
 // Capa de datos. Misma interfaz para Supabase (real) y para el modo demo (en este navegador).
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
 
-const TABLES = ['members', 'projects', 'videos', 'tasks', 'events', 'attendance', 'hires', 'log', 'corrections'];
+const TABLES = ['members', 'projects', 'videos', 'tasks', 'events', 'attendance', 'hires', 'log', 'corrections', 'proposals'];
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(16).slice(2) + Date.now().toString(16));
 
 // ------------------------------------------------------------------
@@ -148,6 +148,13 @@ class DemoAPI {
       this.log(m.team_id, null, 'join', { name: m.name, role: m.role }, m.id);
       this.persist(); return m.team_id;
     }
+    if (fn === 'team_settings') { const t = this.db.teams.find((x) => x.id === a.t); return t ? (t.settings || {}) : null; }
+    if (fn === 'save_settings') {
+      const me = this.me(a.t); if (!me || me.role !== 'admin') throw new Error('Solo el administrador cambia los ajustes');
+      if (['look', 'reminders'].indexOf(a.k) === -1) throw new Error('Ese ajuste se cambia con una propuesta');
+      const t = this.db.teams.find((x) => x.id === a.t); t.settings = Object.assign({}, t.settings || {}); t.settings[a.k] = a.v;
+      this.log(a.t, null, 'settings.' + a.k, { new: a.v }); this.persist(); return t.settings;
+    }
     throw new Error('Función desconocida: ' + fn);
   }
   async list(table, teamId) {
@@ -179,6 +186,13 @@ class DemoAPI {
     if (table === 'tasks' && me.role !== 'admin') throw new Error('Solo el administrador corrige tareas');
     if (table === 'log') throw new Error('El historial no se edita');
     const old = JSON.parse(JSON.stringify(r));
+    if (table === 'proposals' && patch.status && patch.status !== old.status) {
+      if (old.status !== 'pendiente') throw new Error('Esa propuesta ya se decidió');
+      if (patch.status === 'retirada' && me.id !== old.proposed_by) throw new Error('Solo quien propuso puede retirarla');
+      if ((patch.status === 'aprobada' || patch.status === 'rechazada') && me.id === old.proposed_by) throw new Error('La aprueba tu compañero');
+      patch = Object.assign({}, patch, { decided_by: me.id, decided_at: new Date().toISOString() });
+      if (patch.status === 'aprobada') { const t = this.db.teams.find((x) => x.id === r.team_id); t.settings = Object.assign({}, t.settings || {}); t.settings[old.kind] = Object.assign({}, t.settings[old.kind] || {}, old.data); }
+    }
     Object.assign(r, patch);
     this.log(r.team_id, this.projectOf(table, r), table + '.update', { new: r, old });
     this.persist(); return JSON.parse(JSON.stringify(r));

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { payouts, streak, streakEvents, memberStatus, canMark, canUndo, band, meetingEnd, attendanceStatus, deliveries, contribution, addDays, at, rates, videoState } from '../js/rules.js';
+import { setRules, payouts, streak, streakEvents, memberStatus, canMark, canUndo, band, meetingEnd, attendanceStatus, deliveries, contribution, addDays, at, rates, videoState } from '../js/rules.js';
 
 // Escenario de noviembre: 16 videos, S/ 1,000. W y S tienen 8 videos cada uno.
 // S recibe apoyo en el acabado (5.5). El montaje de uno de sus videos no llega (5.7).
@@ -188,6 +188,12 @@ test('1.1 · solo se marca lo que ya puede haber pasado', () => {
   assert.equal(canMark(vx, 'acabado', W, ctx, now).ok, false); // no hay montaje
   // después del plazo (22 dic 18:00), Williams puede tomar la preproducción
   assert.equal(canMark(vx, 'guion', W, ctx, new Date('2026-12-22T18:01:00-05:00')).take, true);
+  // 1.2: el dueño ya no puede marcar su preproducción vencida
+  assert.equal(canMark(vx, 'guion', S, ctx, new Date('2026-12-22T18:01:00-05:00')).ok, false);
+  // con el plazo cambiado a las 20:00, a las 18:01 todavía es suya
+  setRules({ pre: 1200 });
+  assert.equal(canMark(vx, 'guion', S, ctx, new Date('2026-12-22T18:01:00-05:00')).ok, true);
+  setRules({});
   // el día del rodaje, con guion y storyboard y llegada confirmada
   ctx.tasks.push({ id: 'g', video_id: 'vx', kind: 'guion', done_by: 'S', done_at: '2026-12-21T11:00:00-05:00' });
   ctx.tasks.push({ id: 's', video_id: 'vx', kind: 'storyboard', done_by: 'S', done_at: '2026-12-21T11:30:00-05:00' });

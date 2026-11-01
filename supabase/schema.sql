@@ -568,3 +568,161 @@ drop policy if exists projects_delete on projects;
 create policy projects_delete on projects for delete using (is_admin(team_id));
 
 grant execute on function lima_day, lima_at, video_rodaje, pre_due, admin_absent, can_undo to authenticated;
+
+-- =====================================================================
+-- Versión 1.2: tema del video, ajustes del equipo, propuestas y reglas configurables
+-- =====================================================================
+alter table videos add column if not exists title text;
+alter table teams add column if not exists settings jsonb not null default '{}';
+
+-- Regla del equipo (con su valor por defecto si nadie la cambió).
+create or replace function rule_int(t uuid, k text, d int) returns int
+language sql stable security definer set search_path = public as $$
+  select coalesce((select (settings->'rules'->>k)::int from teams where id = t), d)
+$$;
+
+-- Plazo de preproducción: el día antes del rodaje, a la hora acordada (por defecto 18:00).
+create or replace function pre_due(v uuid) returns timestamptz
+language sql stable security definer set search_path = public as $$
+  select lima_at(lima_day(starts_at) - 1, '00:00') + make_interval(mins => rule_int(team_id, 'pre', 1080))
+  from events where kind = 'rodaje' and status = 'activo' and v = any(video_ids) order by starts_at limit 1
+$$;
+
+create or replace function guard_task() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  me uuid := my_member(new.team_id); mrole text; v videos; vowner members; r events; h hires;
+  due timestamptz; att attendance; oatt attendance; md timestamptz;
+begin
+  if new.done_by is distinct from me then raise exception 'Solo puedes marcar tus propias tareas'; end if;
+  select role into mrole from members where id = me;
+  select * into v from videos where id = new.video_id;
+  select * into vowner from members where id = v.owner;
+  if new.hire_id is not null then
+    select * into h from hires where id = new.hire_id;
+    if h.status <> 'aceptada' or h.present <> new.done_by then raise exception 'Contratación de Guillermo no válida'; end if;
+    if new.kind not in ('guion', 'storyboard') then raise exception 'Guillermo solo hace guiones y storyboards'; end if;
+  end if;
+  if new.kind in ('guion', 'storyboard') then
+    due := pre_due(v.id);
+    if me = v.owner and new.hire_id is null and due is not null and now() > due then
+      raise exception 'Venció el plazo: esta tarea pasó a tu compañero';
+    end if;
+    if me <> v.owner and new.hire_id is null and (due is null or now() <= due) then
+      raise exception 'La preproducción de tu compañero solo se puede tomar después de su plazo';
+    end if;
+  elsif new.kind = 'rodaje' then
+    r := video_rodaje(v.id);
+    if r.id is null then raise exception 'Este video no tiene rodaje agendado'; end if;
+    if now() < r.starts_at - make_interval(mins => rule_int(new.team_id, 'open', 15)) or lima_day(now()) <> lima_day(r.starts_at) then
+      raise exception 'El rodaje solo se marca el día del rodaje, desde que se abre la llegada';
+    end if;
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'guion') or not exists (select 1 from tasks where video_id = v.id and kind = 'storyboard') then
+      raise exception 'Primero se necesitan el guion y el storyboard';
+    end if;
+    select * into att from attendance where event_id = r.id and member_id = me;
+    if att.arrived_at is null then raise exception 'Primero tu llegada al rodaje tiene que estar confirmada'; end if;
+    if me <> v.owner then
+      select * into oatt from attendance where event_id = r.id and member_id = v.owner;
+      if oatt.arrived_at is not null then raise exception 'El dueño del video está en el rodaje: lo marca él'; end if;
+      if (oatt.notice->>'sent_at') is not null
+         and (oatt.notice->>'sent_at')::timestamptz <= lima_at(lima_day(r.starts_at) - 1, '00:00') + make_interval(mins => rule_int(new.team_id, 'avr', 1080))
+         and coalesce(oatt.notice->>'choice', '') <> 'other' then
+        raise exception 'Avisó a tiempo: sus videos se reprograman, salvo que acepte que los grabes';
+      end if;
+    end if;
+  elsif new.kind = 'montaje' then
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'rodaje') then raise exception 'Primero tiene que grabarse el video'; end if;
+    md := case when vowner.apoyo then lima_at(v.publish_date - rule_int(new.team_id, 'mon', 2), '21:00') end;
+    if me = v.owner then
+      if md is not null and now() > md then raise exception 'Venció el plazo del montaje: el video pasa al administrador (5.7)'; end if;
+    elsif mrole <> 'admin' or md is null or now() <= md then
+      raise exception 'Este montaje le corresponde al dueño del video';
+    end if;
+  elsif new.kind = 'acabado' then
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje') then raise exception 'Primero tiene que estar el montaje'; end if;
+    if me <> v.owner and mrole <> 'admin' then raise exception 'El video final lo hace el dueño o el administrador'; end if;
+  end if;
+  new.done_at := now();
+  return new;
+end $$;
+
+create or replace function can_undo(t uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from tasks k where k.id = t and k.done_by = my_member(k.team_id) and (
+    (k.kind in ('guion', 'storyboard') and (pre_due(k.video_id) is null or now() <= pre_due(k.video_id)))
+    or (k.kind not in ('guion', 'storyboard') and now() <= k.done_at + make_interval(mins => rule_int(k.team_id, 'undo', 10)))))
+$$;
+
+-- Ajustes que el administrador cambia solo (apariencia y recordatorios).
+create or replace function save_settings(t uuid, k text, v jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare s jsonb;
+begin
+  if not is_admin(t) then raise exception 'Solo el administrador cambia los ajustes'; end if;
+  if k not in ('look', 'reminders') then raise exception 'Ese ajuste se cambia con una propuesta'; end if;
+  update teams set settings = jsonb_set(coalesce(settings, '{}'), array[k], v) where id = t returning settings into s;
+  insert into log (team_id, actor, type, data) values (t, my_member(t), 'settings.' || k, jsonb_build_object('new', v));
+  return s;
+end $$;
+grant execute on function save_settings, rule_int to authenticated;
+
+create or replace function team_settings(t uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select case when is_partner(t) then (select settings from teams where id = t) end
+$$;
+grant execute on function team_settings to authenticated;
+
+-- Propuestas: reglas y porcentajes del acuerdo. Se aplican cuando el socio las aprueba.
+create table if not exists proposals (
+  id uuid primary key default gen_random_uuid(),
+  team_id uuid not null references teams(id) on delete cascade,
+  kind text not null check (kind in ('rules', 'pct')),
+  data jsonb not null,
+  old jsonb,
+  status text not null default 'pendiente' check (status in ('pendiente', 'aprobada', 'rechazada', 'retirada')),
+  proposed_by uuid references members(id),
+  decided_by uuid references members(id),
+  decided_at timestamptz,
+  created_at timestamptz not null default now()
+);
+alter table proposals enable row level security;
+drop policy if exists proposals_read on proposals;
+create policy proposals_read on proposals for select using (is_partner(team_id));
+drop policy if exists proposals_insert on proposals;
+create policy proposals_insert on proposals for insert with check (is_admin(team_id));
+drop policy if exists proposals_update on proposals;
+create policy proposals_update on proposals for update using (is_partner(team_id));
+
+create or replace function guard_proposal() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare me uuid := my_member(new.team_id); s int;
+begin
+  if tg_op = 'INSERT' then
+    if exists (select 1 from proposals where team_id = new.team_id and kind = new.kind and status = 'pendiente') then
+      raise exception 'Ya hay una propuesta pendiente de ese tipo: retírala primero';
+    end if;
+    if new.kind = 'pct' then
+      s := coalesce((new.data->>'pre')::int, 0) + coalesce((new.data->>'rod')::int, 0) + coalesce((new.data->>'mon')::int, 0) + coalesce((new.data->>'aca')::int, 0);
+      if s <> 100 then raise exception 'Los porcentajes tienen que sumar 100'; end if;
+    end if;
+    new.status := 'pendiente'; new.proposed_by := me; new.decided_by := null; new.decided_at := null; new.created_at := now();
+    new.old := (select settings->new.kind from teams where id = new.team_id);
+    return new;
+  end if;
+  if new.data is distinct from old.data or new.kind is distinct from old.kind then raise exception 'Una propuesta no se edita: retírala y haz otra'; end if;
+  if new.status is distinct from old.status then
+    if old.status <> 'pendiente' then raise exception 'Esa propuesta ya se decidió'; end if;
+    if new.status = 'retirada' and me <> old.proposed_by then raise exception 'Solo quien propuso puede retirarla'; end if;
+    if new.status in ('aprobada', 'rechazada') and me = old.proposed_by then raise exception 'La aprueba tu compañero'; end if;
+    new.decided_by := me; new.decided_at := now();
+    if new.status = 'aprobada' then
+      update teams set settings = jsonb_set(coalesce(settings, '{}'), array[new.kind], coalesce(settings->new.kind, '{}') || new.data) where id = new.team_id;
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists proposals_guard on proposals;
+create trigger proposals_guard before insert or update on proposals for each row execute function guard_proposal();
+drop trigger if exists proposals_log on proposals;
+create trigger proposals_log after insert or update on proposals for each row execute function log_change();
