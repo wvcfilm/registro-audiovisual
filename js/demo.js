@@ -30,14 +30,14 @@ export async function seedDemo() {
     let n = api.db.videos.filter((v) => v.project_id === p.id).length;
     for (let i = 0; i < pubs.length; i++) {
       n++;
-      vids.push(await api.insert('videos', { team_id: team, project_id: p.id, num: n, publish_date: pubs[i], owner: owners[i], pre_due: iso(addDays(meet, 1), '21:00') }));
+      vids.push(await api.insert('videos', { team_id: team, project_id: p.id, num: n, publish_date: pubs[i], owner: owners[i] }));
     }
-    const reu = await api.insert('events', { team_id: team, project_id: p.id, kind: 'reunion', starts_at: iso(meet, '10:00'), tolerance_min: 45, video_ids: vids.map((v) => v.id) });
-    const rod = await api.insert('events', { team_id: team, project_id: p.id, kind: 'rodaje', starts_at: iso(rodaje, '10:00'), tolerance_min: 45, video_ids: vids.map((v) => v.id) });
+    const rod = await api.insert('events', { team_id: team, project_id: p.id, kind: 'rodaje', status: 'activo', starts_at: iso(rodaje, '10:00'), tolerance_min: 45, video_ids: vids.map((v) => v.id) });
+    const reu = await api.insert('events', { team_id: team, project_id: p.id, kind: 'reunion', status: 'activo', rodaje_id: rod.id, starts_at: iso(meet, '10:00'), ended_at: iso(meet, '12:30'), tolerance_min: 45, video_ids: vids.map((v) => v.id) });
     return { vids, reu, rod };
   }
   async function task(by, v, kind, when) { as(by); await api.insert('tasks', { team_id: team, project_id: p.id, video_id: v.id, kind, done_by: by, done_at: when }); }
-  async function arrive(by, e, when) { as(by); await api.insert('attendance', { team_id: team, event_id: e.id, member_id: by, arrived_at: when }); }
+  async function arrive(by, e, when) { as(by); await api.insert('attendance', { team_id: team, event_id: e.id, member_id: by, claimed_at: when, arrived_at: when, confirmed_by: W }); }
 
   // Semana 1: ya grabada. El montaje del video 4 (de Socio) no llegó.
   const m1 = addDays(D, -9), r1 = addDays(D, -7);

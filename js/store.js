@@ -1,6 +1,6 @@
 // Estado de la app y operaciones del día a día.
-import { api, TABLES } from './api.js';
-import { at, addDays, payouts, attendanceStatus, memberStatus, videoState, limaDate } from './rules.js';
+import { api, TABLES, isPractice, hasServer } from './api.js';
+import { at, addDays, payouts, attendanceStatus, memberStatus, videoState, limaDate, adminAbsent, preDueFor, meetingOf as rMeetingOf } from './rules.js';
 
 export const S = {
   ready: false, session: null, teams: [], teamId: null, me: null, projectId: null,
@@ -121,48 +121,90 @@ export async function createProject(p) {
   return r;
 }
 
-export function scheduleMeeting(date, time) {
-  return run(() => api.insert('events', { team_id: S.teamId, project_id: S.projectId, kind: 'reunion', starts_at: at(date, time).toISOString(), tolerance_min: 45, video_ids: [] }), 'Reunión agendada');
+// Programar semana: primero el rodaje, luego su reunión de preproducción (antes del plazo).
+export function planWeek(w) {
+  return run(async () => {
+    const rStart = at(w.rodaje_date, w.rodaje_time);
+    const mStart = at(w.meeting_date, w.meeting_time);
+    if (mStart >= preDueFor(rStart)) throw new Error('La reunión tiene que ser antes del plazo de preproducción (día antes del rodaje, 18:00)');
+    const rod = await api.insert('events', { team_id: S.teamId, project_id: S.projectId, kind: 'rodaje', status: 'activo', starts_at: rStart.toISOString(), tolerance_min: 45, video_ids: [] });
+    await api.insert('events', { team_id: S.teamId, project_id: S.projectId, kind: 'reunion', status: 'activo', rodaje_id: rod.id, starts_at: mStart.toISOString(), tolerance_min: 45, video_ids: [] });
+    return rod;
+  }, 'Semana programada');
 }
-
-// Reunión semanal: crea los videos de la semana, la reunión (o usa la ya agendada) y el rodaje (5.8).
-export function addWeek(w) {
+export function extraMeeting(rodaje, date, time) {
+  return run(async () => {
+    const open = S.data.events.find((e) => e.kind === 'reunion' && e.rodaje_id === rodaje.id && (!e.status || e.status === 'activo') && !e.ended_at);
+    if (open) throw new Error('Ese rodaje ya tiene una reunión sin finalizar');
+    const mStart = at(date, time);
+    if (mStart >= preDueFor(rodaje.starts_at)) throw new Error('Tiene que ser antes del plazo de preproducción');
+    return api.insert('events', { team_id: S.teamId, project_id: rodaje.project_id, kind: 'reunion', status: 'activo', rodaje_id: rodaje.id, starts_at: mStart.toISOString(), tolerance_min: 45, video_ids: rodaje.video_ids });
+  }, 'Reunión agendada');
+}
+// Reparto de la reunión: crea los videos y los asigna al rodaje y a la reunión de esa semana.
+export function reparto(rodaje, videos) {
   return run(async () => {
     const p = project();
-    const existing = S.data.videos.filter((v) => v.project_id === p.id);
-    let num = existing.reduce((m, v) => Math.max(m, v.num), 0);
-    const preDue = at(addDays(w.meeting_date, 1), '21:00').toISOString();
-    const created = [];
-    for (const v of w.videos) {
-      num++;
-      created.push(await api.insert('videos', { team_id: S.teamId, project_id: p.id, num, publish_date: v.publish_date, owner: v.owner, pre_due: preDue }));
-    }
-    const sched = S.data.events.find((e) => e.kind === 'reunion' && e.project_id === p.id && limaDate(e.starts_at) === w.meeting_date && !e.video_ids.length);
-    if (sched) await api.update('events', sched.id, { video_ids: created.map((v) => v.id) });
-    else await api.insert('events', { team_id: S.teamId, project_id: p.id, kind: 'reunion', starts_at: at(w.meeting_date, w.meeting_time).toISOString(), tolerance_min: 45, video_ids: created.map((v) => v.id) });
-    if (w.rodaje_date) await api.insert('events', { team_id: S.teamId, project_id: p.id, kind: 'rodaje', starts_at: at(w.rodaje_date, w.rodaje_time).toISOString(), tolerance_min: 45, video_ids: created.map((v) => v.id) });
-    return created;
+    let num = S.data.videos.filter((v) => v.project_id === p.id).reduce((m, v) => Math.max(m, v.num), 0);
+    const ids = [];
+    for (const v of videos) { num++; ids.push((await api.insert('videos', { team_id: S.teamId, project_id: p.id, num, publish_date: v.publish_date, owner: v.owner })).id); }
+    const all = rodaje.video_ids.concat(ids);
+    await api.update('events', rodaje.id, { video_ids: all });
+    for (const m of S.data.events.filter((e) => e.kind === 'reunion' && e.rodaje_id === rodaje.id && (!e.status || e.status === 'activo'))) await api.update('events', m.id, { video_ids: all });
   }, 'Reparto guardado');
 }
+export function endMeeting(e) {
+  if (S.me.role === 'admin' || adminAbsent(e, ctx(e.project_id))) return run(() => api.update('events', e.id, { ended_at: new Date().toISOString() }), 'Reunión finalizada');
+  return run(() => api.update('events', e.id, { end_requested_at: new Date().toISOString(), end_requested_by: S.me.id }), 'Solicitud enviada al administrador');
+}
+export const confirmEnd = (e) => run(() => api.update('events', e.id, { ended_at: e.end_requested_at || new Date().toISOString() }), 'Reunión finalizada');
+export const cancelEvent = (e, note) => run(() => api.update('events', e.id, { status: 'cancelado', cancel_note: note || null }), 'Cancelado');
+export const deleteEvent = (e) => run(() => api.remove('events', e.id), 'Borrado');
+export const moveEvent = (e, date, time) => run(() => api.update('events', e.id, { starts_at: at(date, time).toISOString() }), 'Fecha cambiada');
+// Reprogramar el rodaje completo: nuevo rodaje con los mismos videos; el anterior queda como "reprogramado".
+export function reprogramDay(e, date, time, note) {
+  return run(async () => {
+    const nu = await api.insert('events', { team_id: S.teamId, project_id: e.project_id, kind: 'rodaje', status: 'activo', starts_at: at(date, time).toISOString(), tolerance_min: e.tolerance_min || 45, video_ids: e.video_ids, note: 'Reprogramado' });
+    await api.update('events', e.id, { status: 'reprogramado', replaced_by: nu.id, cancel_note: note || null });
+    for (const m of S.data.events.filter((x) => x.kind === 'reunion' && x.rodaje_id === e.id)) await api.update('events', m.id, { rodaje_id: nu.id });
+    return nu;
+  }, 'Rodaje reprogramado');
+}
+export const deleteProject = (p) => run(() => api.remove('projects', p.id), 'Proyecto borrado');
+export const archiveProject = (p, on) => run(() => api.update('projects', p.id, { status: on ? 'archivado' : 'abierto' }), on ? 'Proyecto archivado' : 'Proyecto reabierto');
+export const undoOwn = (taskId) => run(() => api.remove('tasks', taskId), 'Deshecho');
+
+// Modo práctica: la app usa la demo local aunque haya base de datos real.
+export const practice = () => isPractice;
+export const canPractice = () => hasServer;
+export function setPractice(on) { try { if (on) localStorage.setItem('ra-practice', '1'); else localStorage.removeItem('ra-practice'); } catch (e) { /* */ } location.hash = '#/'; location.reload(); }
+
+// Reunión semanal: crea los videos de la semana, la reunión (o usa la ya agendada) y el rodaje (5.8).
 
 export const changeOwner = (videoId, owner) => run(() => api.update('videos', videoId, { owner }), 'Intercambio registrado');
 
 // ---------- Tareas ----------
-export function markTask(video, kind, extra = {}) {
-  return run(() => api.insert('tasks', Object.assign({ team_id: S.teamId, project_id: video.project_id, video_id: video.id, kind, done_by: S.me.id, done_at: new Date().toISOString() }, extra)), 'Listo, quedó registrado');
+export function markTask(video, kind, extra = {}, msg) {
+  return run(() => api.insert('tasks', Object.assign({ team_id: S.teamId, project_id: video.project_id, video_id: video.id, kind, done_by: S.me.id, done_at: new Date().toISOString() }, extra)), msg === undefined ? 'Listo, quedó registrado' : msg);
 }
 export const undoTask = (taskId) => run(() => api.remove('tasks', taskId), 'Tarea desmarcada');
 
 // ---------- Asistencia y avisos (7.2 a 7.10) ----------
 function attOf(eventId, memberId) { return S.data.attendance.find((a) => a.event_id === eventId && a.member_id === memberId); }
 
-export function checkIn(event, photoPath) {
+// Llegada: el socio la marca y el administrador la confirma (si el administrador no está, vale sola).
+export function checkIn(event) {
   return run(async () => {
+    const now = new Date().toISOString();
     const a = attOf(event.id, S.me.id);
-    const patch = { arrived_at: new Date().toISOString(), photo: photoPath || null };
+    const patch = { claimed_at: now };
+    if (api.mode === 'demo' && (S.me.role === 'admin' || adminAbsent(event, ctx(event.project_id)))) patch.arrived_at = now;
     if (a) return api.update('attendance', a.id, patch);
     return api.insert('attendance', Object.assign({ team_id: S.teamId, event_id: event.id, member_id: S.me.id }, patch));
-  }, 'Llegada registrada');
+  }, S.me.role === 'admin' ? 'Llegada registrada' : 'Llegada enviada: el administrador la confirma');
+}
+export function confirmArrival(att, mode) {
+  return run(() => api.update('attendance', att.id, { arrived_at: mode === 'claimed' ? att.claimed_at : new Date().toISOString(), confirmed_by: S.me.id }), 'Llegada confirmada');
 }
 
 export function sendNotice(event, n) {
@@ -211,7 +253,9 @@ export const decideHire = (h, status) => run(() => api.update('hires', h.id, { s
 export const hireFor = (eventId, status = 'aceptada') => S.data.hires.find((h) => h.event_id === eventId && h.status === status) || null;
 export const hireOpen = (eventId) => S.data.hires.find((h) => h.event_id === eventId && (h.status === 'pendiente' || h.status === 'aceptada')) || null;
 // Reunión en la que se repartió un video (para saber si ahí trabajó Guillermo).
-export const meetingOf = (videoId) => S.data.events.find((e) => e.kind === 'reunion' && e.video_ids.indexOf(videoId) !== -1) || null;
+export const meetingOf = (videoId) => { const v = S.data.videos.find((x) => x.id === videoId); return v ? rMeetingOf(v, ctx(v.project_id)) : null; };
+// Rodaje nuevo para videos que se quedaron sin rodaje (por ejemplo, si se canceló).
+export const newRodaje = (projectId, videoIds, date, time) => run(() => api.insert('events', { team_id: S.teamId, project_id: projectId, kind: 'rodaje', status: 'activo', starts_at: at(date, time).toISOString(), tolerance_min: 45, video_ids: videoIds }), 'Rodaje programado');
 
 // ---------- Cierre del proyecto (6.2 y liquidación) ----------
 export function sendSettlement(p) {

@@ -203,5 +203,9 @@ class DemoAPI {
   reset() { localStorage.removeItem('ra-demo'); Object.keys(localStorage).filter((k) => k.startsWith('ra-file-')).forEach((k) => localStorage.removeItem(k)); }
 }
 
-export const api = SUPABASE_URL && SUPABASE_ANON_KEY ? new SupabaseAPI(SUPABASE_URL, SUPABASE_ANON_KEY) : new DemoAPI();
+let practice = false;
+try { practice = localStorage.getItem('ra-practice') === '1'; } catch (e) { /* sin almacenamiento */ }
+export const isPractice = practice;
+export const hasServer = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
+export const api = hasServer && !practice ? new SupabaseAPI(SUPABASE_URL, SUPABASE_ANON_KEY) : new DemoAPI();
 export { TABLES, uuid };
