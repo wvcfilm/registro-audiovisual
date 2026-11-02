@@ -2,7 +2,7 @@
 
 Léeme completo antes de cambiar algo. Aquí está qué es la app, cómo está hecha, todas las reglas y decisiones tomadas con el dueño (Williams, administrador), qué bocetos se eligieron y qué falta.
 
-Versión actual: **1.2** (31 oct 2026).
+Versión actual: **1.3** (2 nov 2026). Detalle de la 1.3 en los docs del proyecto de Claude: `claude/observaciones-1.3.md` (diseño y reglas) y `claude/version-1.3.md` (código).
 
 ---
 
@@ -21,7 +21,8 @@ App web instalable en el celular (PWA) para un equipo audiovisual de dos socios:
 | App publicada | https://wvcfilm.github.io/registro-audiovisual/ |
 | Código | GitHub `wvcfilm/registro-audiovisual` (rama `main`). GitHub Pages publica sola en 1–2 min tras cada push |
 | Base de datos y cuentas | Supabase, proyecto `kiufbnqsnjimprfzcqob` (plan gratis; se pausa si pasa 7 días sin uso) |
-| Bocetos (canvas de diseño) | https://claude.ai/artifact/X5LtzqC3sesmVdqUZ1NtJX |
+| Bocetos 1.3 (canvas activo) | https://claude.ai/artifact/DbXfffsgtv8LXrddzo5MST (slug `65ffd9e2-0a3c-4bbc-a65a-56e6536eaab4`) |
+| Bocetos hasta 1.2 (solo lectura) | https://claude.ai/artifact/X5LtzqC3sesmVdqUZ1NtJX |
 | Acuerdo de colaboración (doc) | https://claude.ai/artifact/BZpAwPE5xFXXWD2kCpsfRV |
 
 Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca pedir ni guardar la `service_role`/`secret`, el secreto de Google ni la contraseña de la base de datos.
@@ -39,9 +40,9 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 - `js/api.js`: conexión a Supabase y DemoAPI.
 - `js/app.js`: todas las pantallas (HTML en plantillas) y manejadores `ACT`/`FORM`. `VERSION` está arriba.
 - `css/app.css`: estilos. Variables de color en `:root`; modo día en `[data-theme=light]`. Desde la 1.2 hay clases con el diseño de los bocetos (`.racha`, `.hero`, `.dsq`, `.trow`, `.tbtn`, `.vcard`, `.meta`, `.wallet`, `.agrp`, `.srow`…).
-- `supabase/schema.sql`: todo el esquema, **idempotente** (se puede volver a pegar entero). Cada versión agrega una sección al final (v1.1, v1.2).
-- `sw.js`: caché sin conexión (`CACHE = 'registro-v5'`).
-- `tests/rules.test.js`: `node --test tests/*.test.js` (14 pruebas).
+- `supabase/schema.sql`: todo el esquema, **idempotente** (se puede volver a pegar entero). Cada versión agrega una sección al final (v1.1, v1.2, v1.3).
+- `sw.js`: caché sin conexión (`CACHE = 'registro-v6'`).
+- `tests/rules.test.js` y `tests/v13.test.js`: `node --test tests/*.test.js` (20 pruebas).
 
 ### Publicar una versión nueva
 1. Cambiar el código. Subir `VERSION` en `js/app.js` y `CACHE` en `sw.js` (si no, los celulares siguen con la versión vieja).
@@ -68,12 +69,20 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 - **Montaje**: 2 días antes de publicar a las 21:00 (si recibe apoyo); si no, junto con el final. Requiere rodaje.
 - **Video final**: 1 día antes de publicar a las 21:00. Requiere montaje.
 - **Deshacer** otras tareas: 10 min. El administrador siempre puede deshacer.
-- Valores por defecto en `R.DEFAULT_RULES` (`open 15, punt 10, tol 45, pre 1080 (=18:00), mon 2, fin 1, undo 10, avr 1080, avm 24`) y en SQL con `rule_int(team, clave, defecto)` leyendo `teams.settings.rules`.
+- Valores por defecto en `R.DEFAULT_RULES` (`open 15, punt 10, tol 45, pre 1080 (=18:00), mon 2, fin 1, undo 10, avr 1080, take 5, conf 12, madr 300`; `avm` ya no se usa) y en SQL con `rule_int(team, clave, defecto)` leyendo `teams.settings.rules`.
+
+### 1.3 · Tomar, confirmar asistencia y reparto del storyboard
+- **Tomar = comprometerse**: pasado el plazo del dueño, el otro socio "toma" (tabla `claims`, no paga) y luego marca "Hecho" (ahí cobra). Guion y storyboard: hasta **5 h antes del rodaje** (`take`). Montaje que pasó al administrador (5.7): hasta el plazo del video final. Entregar lo tomado **+3**; tomarlo y no entregarlo **−4**. Si el video se reprograma, el compromiso anterior ya no cuenta. Deshacer un "Tomar": 10 min y sin entregar. Al dueño le sale "Equipo que cumple: {nombre} hará el … y el rodaje sigue en pie".
+- **Sin guion no se graba**: botón "Reprogramar" (RPC `move_video`: pasa el video a otro rodaje; se reabre el plazo del dueño). **Sin storyboard sí se graba**: la base crea el storyboard "repartido" (`tasks.split`, `split_with`) y su valor va mitad y mitad (el centavo extra al dueño); queda cerrado. Al dueño −3.
+- **Confirmar asistencia** (`attendance.rsvp = 'voy'`; "no iré" es el aviso; "Guillermo" es la contratación): reunión hasta **12 h antes** (`conf`); si cae de **madrugada (00:00–04:59, `madr`)**, hasta las 23:59 del día anterior. Rodaje hasta las 18:00 del día anterior (`avr`). Ese mismo plazo vale para "avisar a tiempo". Sin responder: **−2** y botón de WhatsApp (puede ir igual). Solo cuenta desde el 2 nov 2026 (`V13_FROM`).
+- **Tarjeta de racha** (ventana): al rescatar algo, y al terminar todo lo tuyo de la semana en preproducción o en posproducción.
+- **WhatsApp** de cada integrante: `members.phone` (9 dígitos, empieza con 9), lo cambia el administrador o cada uno el suyo.
+- **Apariencia C**: `teams.settings.look.dark` y `.light` (principal, urgencia, cuadros de etapas con opacidades, racha por nivel, meta y billetera).
 
 ### Asistencia (7.7–7.10)
 - Llegada se marca desde 15 min antes. **Puntual ≤ 10 min**, **tardanza ≤ 45 min** (se paga), después es inasistencia.
 - **El socio marca "Llegué" y el administrador confirma** ("Sí, llegó a las HH:MM" o "Llegó ahora"). La llegada del administrador vale sola. Si el administrador no asiste, la del socio vale sola. Sin foto (en celulares daba "memoria insuficiente").
-- **Aviso de que no irá**: rodaje a tiempo **hasta las 18:00 del día anterior**; reunión con **24 h**. A tiempo: no resta racha; el otro elige **reprogramar el día completo** o **grabar solo sus propios videos** (los del que canceló no los toma sin su permiso). Fuera de plazo: el otro elige reprogramar o **tomar el día completo** (cobra esos rodajes) y resta 3. Fuerza mayor (7.4/7.9): hasta 24 h después; el otro la acepta y no cuenta como falta.
+- **Aviso de que no irá**: rodaje a tiempo **hasta las 18:00 del día anterior**; reunión con **12 h** (1.3; antes 24 h). A tiempo: no resta racha; el otro elige **reprogramar el día completo** o **grabar solo sus propios videos** (los del que canceló no los toma sin su permiso). Fuera de plazo: el otro elige reprogramar o **tomar el día completo** (cobra esos rodajes) y resta 3. Fuerza mayor (7.4/7.9): hasta 24 h después; el otro la acepta y no cuenta como falta.
 
 ### Semana y reuniones
 - **Programar semana**: primero el **rodaje**, luego **una reunión por rodaje** (antes del plazo de preproducción). El reparto de videos (2 y 2 por defecto) se hace en la reunión; cada video puede tener **tema** (nombre).
@@ -81,6 +90,7 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 - Borrar solo lo vacío (reunión o proyecto sin datos); lo demás se **cancela** (solo administrador) o se **archiva** (proyecto). Cambiar hora solo si nadie marcó llegada.
 
 ### Racha (motivación; nunca cambia el pago)
+- Niveles con colores 1.3 (sin rojo): ámbar, naranja, azul, violeta. +3 rescate · −4 tomar y no entregar · −2 no confirmar asistencia (1.3).
 - +1 entrega propia a tiempo o llegada puntual · **+1 punto de reunión** por video si guion y storyboard se terminan durante la reunión · −1 tardanza · −3 entrega tarde, video tomado o cancelación tardía · −5 inasistencia sin aviso · mínimo 0.
 - Niveles: **Cumplidor 1**, **Constante 5**, **Responsable 10**, **Imparable 20**. Se llama "puntos", no "bono".
 - El "aporte real" y la racha de cada uno son privados.
@@ -91,7 +101,11 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 - **Libres** (solo administrador, RPC `save_settings`): apariencia y recordatorios.
 - **Día/noche**: botón sol/luna arriba, por celular (`localStorage['ra-theme']`).
 
-## 5. Pantallas de la app (1.2) y su boceto
+## 5. Pantallas de la app y su boceto
+
+**1.3** (canvas 1.3): Inicio **M** (Te toca con botón directo: llegada → Entrar/Abrir, Tomar → Hecho, tarea de hoy, confirmar Voy/No iré/Guillermo, no confirmaste, todo al día) · Etapas **N** (pre y rodaje) y **P** (posproducción) · reunión por dentro **F + reparto G** · rodaje por dentro **G/H** + Rodajes pasados (`#/rodajes`) · Apariencia **C** · Integrantes **C** (WhatsApp, en Equipo) · Detalle del video: la 1.2 con los botones nuevos (el rediseño B "más moderno" sigue pendiente).
+
+Tabla de la 1.2:
 
 | Pantalla | Estado en la app | Boceto elegido |
 |---|---|---|
@@ -126,6 +140,7 @@ El canvas está en la cuenta de Williams (enlace arriba). Para leerlo o editarlo
 
 ## 7. Pendiente
 
+0. **1.3**: detalle del video más moderno (boceto B pendiente de rediseño); actualizar el acuerdo firmado con las reglas de la 1.3; manual de la app.
 1. **Notificaciones al celular** (la pantalla de Recordatorios ya guarda la configuración en `teams.settings.reminders`): Web Push con claves VAPID + Supabase Edge Function + tarea programada; en iPhone requiere la app instalada en la pantalla de inicio. Diseño elegido: `NotifSocioE`.
 2. **Rediseñar con el estilo de los bocetos**: reunión/rodaje por dentro (`ProduccionC`, `AvisoA`), Cierre (`CierreA`), Equipo/integrantes, Entrar.
 3. **Flujo del colaborador externo** (encargo, revisiones en checklist, Drive, "servicio finalizado", tope S/ 25): bocetos `EncargoA`, `AccesoB`, `NotifColabA`.
@@ -138,3 +153,4 @@ El canvas está en la cuenta de Williams (enlace arriba). Para leerlo o editarlo
 - **1.0**: primera versión real: equipo e invitaciones, proyectos, reparto, marcar tareas, avisos, Guillermo, resumen, cierre, historial con correcciones, Google y correo.
 - **1.1**: orden de marcado y ventanas (también en la base), llegada confirmada por el administrador, avisos de rodaje hasta las 18:00, programar semana (rodaje → reunión → reparto), finalizar reunión y puntos de reunión, pestaña Etapas, borrar/cancelar/archivar, modo práctica, Resumen como boceto O.
 - **1.2**: diseño de los bocetos en Inicio (K), Etapas (F) y detalle del video; Administrador (apariencia, reglas y porcentajes con propuesta, recordatorios, modo práctica); botón día/noche; tema de cada video; la preproducción vencida pasa al compañero.
+- **1.3**: Tomar = comprometerse (+3/−4, también el montaje 5.7), confirmar asistencia (12 h / 18:00, −2, WhatsApp), sin guion se reprograma y sin storyboard se reparte 50/50, Inicio M, Etapas N/P, reunión con reparto y entregables, rodaje por dentro nuevo, tarjeta de racha, Apariencia C con noche y día, WhatsApp de cada integrante, botones sin texto negro.
