@@ -510,6 +510,12 @@ function afterMark(v, k, cm, before) {
   const now = new Date();
   const after = R.streak(S.me.id, c, now).pts;
   let rot = 0; try { rot = Number(localStorage.getItem('ra-rot') || 0); localStorage.setItem('ra-rot', String(rot + 1)); } catch (e) { /* */ }
+  if (cm && cm.claimed && k === 'montaje') {
+    const T = ['¡Montaje rescatado!', 'Gracias a ti, la entrega sigue en pie', `Salvaste el montaje del video ${v.num}`];
+    ui.rpop = { title: T[rot % 3], from: before, to: after, chips: ['+' + R.PTS.rescue + ' rescate'] };
+    render(); return;
+  }
+  if (k === 'montaje' || k === 'acabado') { postDone(v, c, now, before, after, rot); return; }
   if (cm && cm.claimed && PRE[k]) {
     const T = ['¡Entregable rescatado!', 'Gracias a ti, el rodaje sigue en pie', `Salvaste el ${k} del video ${v.num}`];
     ui.rpop = { title: T[rot % 3], from: before, to: after, chips: ['+' + R.PTS.rescue + ' rescate'] };
@@ -527,6 +533,31 @@ function afterMark(v, k, cm, before) {
   ui.rpop = { title: T[rot % 4], from: before, to: after, chips: ['+' + mine.length + ' a tiempo'].concat(reu && mt ? ['+' + reu + ' de reunión'] : []) };
   render();
 }
+// Posproducción: al entregar lo último que te toca de los videos de ese rodaje, la misma tarjeta.
+function postDone(v, c, now, before, after, rot) {
+  const me = S.me;
+  const rod = R.rodajeOf(v, c) || c.events.find((e) => e.kind === 'rodaje' && e.video_ids.indexOf(v.id) !== -1);
+  const group = (rod ? rod.video_ids : [v.id]).map((id) => c.videos.find((x) => x.id === id)).filter(Boolean);
+  let own = 0, apoyo = 0, pend = 0;
+  for (const x of group) {
+    const s = R.videoState(x, c, now);
+    const o = st.member(x.owner);
+    const cl = R.claimOf(x, 'montaje', c);
+    const mineM = (x.owner === me.id && !s.montajeMissed) || (cl && cl.member_id === me.id);
+    const mineF = (x.owner === me.id && !o.apoyo) || (me.role === 'admin' && x.owner !== me.id && (o.apoyo || s.reassigned));
+    if (mineM) { if (s.mo) { if (x.owner === me.id) own++; } else pend++; }
+    if (mineF) { if (s.ac) { if (x.owner === me.id || s.reassigned) own++; else apoyo++; } else pend++; }
+  }
+  if (pend || !(own + apoyo)) return;
+  // La tarjeta muestra lo que sumó la entrega de esa semana (no solo el último toque).
+  const nums = group.map((x) => x.num);
+  const re = new RegExp('(Montaje del video|montaje del video|Video) (' + nums.join('|') + ')( |$)');
+  const got = R.streakEvents(me.id, c, now).filter((e) => re.test(e.why)).reduce((a, e) => a + e.pts, 0);
+  before = Math.max(0, after - Math.max(0, got));
+  const T = ['¡Videos entregados!', '¡Cumpliste!', '¡Semana entregada al cliente!', 'Tu parte está completa'];
+  ui.rpop = { title: T[rot % 4], from: before, to: after, chips: (own ? [own + (own === 1 ? ' entrega' : ' entregas')] : []).concat(apoyo ? [`Apoyo: ${apoyo} ${apoyo === 1 ? 'final' : 'finales'}`] : []) };
+  render();
+}
 function rachaPop(P) {
   const lvTo = R.level(P.to), lvFrom = R.level(P.from);
   const lv = LVS[lvTo.name] || LVS.Cumplidor;
@@ -540,7 +571,7 @@ function rachaPop(P) {
     <div class="rfire" style="width:120px;height:120px"><span class="rglow" style="background:${lv.color};width:96px;height:96px"></span>${up ? `<span class="rring" style="border-color:${lv.color}"></span>` : ''}${embers}
       <div class="${up ? 'burst' : ''}">${icon.flame(lv.color, lv.size + 14).replace('class="flame"', `class="flame" style="transform-origin:50% 90%;animation:flick ${lv.speed} ease-in-out infinite"`)}</div></div>
     <div><h2>${esc(up ? '¡Subiste a ' + lvTo.name + '!' : P.title)}</h2><p style="margin:6px 0 0;font-size:14px;color:${lv.text};line-height:1.4">${PHRASE[lv.n] || ''}</p></div>
-    <div class="row" style="gap:8px;align-items:baseline;justify-content:center"><b class="num" data-popcount="${P.to}" data-popfrom="${P.from}" style="font-size:52px;line-height:1;color:${lv.text}">${P.from}</b><span style="font-size:14px;color:${lv.text};opacity:.8">puntos</span><b class="num" style="margin-left:4px;font-size:18px;color:#C9F7E3">+${Math.max(0, P.to - P.from)}</b></div>
+    <div class="row" style="gap:8px;align-items:baseline;justify-content:center"><b class="num" data-popcount="${P.to}" data-popfrom="${P.from}" style="font-size:52px;line-height:1;color:${lv.text}">${P.from}</b><span style="font-size:14px;color:${lv.text};opacity:.8">puntos</span>${P.to > P.from ? `<b class="num" style="margin-left:4px;font-size:18px;color:#C9F7E3">+${P.to - P.from}</b>` : ''}</div>
     <span class="rlv" style="align-self:center;--lvc:${lv.color};--lvt:${lv.text};--lvchip:${LVCHIP[lv.n] || '#22242C'}">Nivel ${lv.n} · ${lvTo.name}</span>
     <div class="rdots" style="width:100%">${Array.from({ length: 10 }, (_, i) => `<i style="background:${i < lit ? lv.color : 'rgba(255,255,255,.1)'}"></i>`).join('')}</div>
     <div class="rchips">${P.chips.map((x) => `<span>${esc(x)}</span>`).join('')}</div>

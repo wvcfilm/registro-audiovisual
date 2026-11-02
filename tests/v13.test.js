@@ -100,3 +100,17 @@ test('1.3 · rodaje: sin guion no se graba; sin storyboard sí, y su valor se re
   const ev = streakEvents('W', c, T('2026-11-12', '12:00'));
   assert.equal(ev.find((e) => /video 1/.test(e.why)).pts, -3, 'al dueño se le cuenta como entrega vencida');
 });
+
+test('1.3 · montaje que pasó al administrador (5.7): tomarlo y entregarlo suma +3; tomarlo y no entregarlo resta 4', () => {
+  const c = week();
+  const v = c.videos[2]; // de Socio, con apoyo; publica el 20 nov → montaje vence el 18 a las 21:00
+  c.tasks.push({ id: 'r3', video_id: 'v3', kind: 'rodaje', done_by: 'S', done_at: T('2026-11-11', '11:00').toISOString() });
+  const now = T('2026-11-19', '10:00');
+  const r = canMark(v, 'montaje', W, c, now);
+  assert.equal(r.claim, true, 'el administrador lo puede tomar');
+  c.claims.push({ id: 'cm', video_id: 'v3', kind: 'montaje', member_id: 'W', rodaje_id: null, status: 'activa', limit_at: takeLimit(v, 'montaje', c).toISOString() });
+  assert.equal(canMark(v, 'montaje', W, c, now).claimed, true);
+  assert.equal(streakEvents('W', c, T('2026-11-20', '12:00')).find((e) => /montaje/.test(e.why)).pts, -4);
+  c.tasks.push({ id: 'm3', video_id: 'v3', kind: 'montaje', done_by: 'W', done_at: T('2026-11-19', '12:00').toISOString() });
+  assert.equal(streakEvents('W', c, T('2026-11-20', '12:00')).find((e) => /montaje/.test(e.why)).pts, 3);
+});

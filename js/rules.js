@@ -332,13 +332,13 @@ export function streakEvents(memberId, ctx, now = new Date()) {
     }
   }
   // 1.3: rescate (+3 por entregable tomado y entregado) y compromiso incumplido (−4).
-  for (const c of (ctx.claims || []).filter((x) => x.member_id === memberId && (x.status || 'activa') === 'activa' && PRE[x.kind])) {
+  for (const c of (ctx.claims || []).filter((x) => x.member_id === memberId && (x.status || 'activa') === 'activa')) {
     const v = ctx.videos.find((x) => x.id === c.video_id);
     if (!v) continue;
     const t = taskOf(ctx.tasks, v.id, c.kind);
     const rNow = rodajeOf(v, ctx);
-    if (!t && (!rNow || rNow.id !== c.rodaje_id)) continue; // se reprogramó: el compromiso anterior no cuenta
-    if (t && t.done_by === memberId && !t.split) ev.push({ at: new Date(t.done_at), pts: PTS.rescue, why: `Rescataste el ${c.kind} del video ${v.num}` });
+    if (!t && PRE[c.kind] && (!rNow || rNow.id !== c.rodaje_id)) continue; // se reprogramó: el compromiso anterior no cuenta
+    if (t && t.done_by === memberId && !t.split) ev.push({ at: new Date(t.done_at), pts: PTS.rescue, why: `Rescataste el ${c.kind} del video ${v.num}` }); // 1.3: también el montaje (5.7)
     else if (claimFailed(c, v, ctx, now)) ev.push({ at: new Date(c.limit_at || takeLimit(v, c.kind, ctx)), pts: PTS.claimFail, why: `Tomaste el ${c.kind} del video ${v.num} y no lo entregaste` });
   }
   const isPartner = (ctx.members || []).some((m) => m.id === memberId && (m.role === 'admin' || m.role === 'socio'));
