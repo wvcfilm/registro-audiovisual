@@ -2,7 +2,7 @@
 
 Léeme completo antes de cambiar algo. Aquí está qué es la app, cómo está hecha, todas las reglas y decisiones tomadas con el dueño (Williams, administrador), qué bocetos se eligieron y qué falta.
 
-Versión actual: **1.3** (2 nov 2026). Detalle de la 1.3 en los docs del proyecto de Claude: `claude/observaciones-1.3.md` (diseño y reglas) y `claude/version-1.3.md` (código).
+Versión actual: **1.3.1** (2 nov 2026). Detalle de la 1.3 en los docs del proyecto de Claude: `claude/observaciones-1.3.md` (diseño y reglas) y `claude/version-1.3.md` (código).
 
 ---
 
@@ -41,7 +41,7 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 - `js/app.js`: todas las pantallas (HTML en plantillas) y manejadores `ACT`/`FORM`. `VERSION` está arriba.
 - `css/app.css`: estilos. Variables de color en `:root`; modo día en `[data-theme=light]`. Desde la 1.2 hay clases con el diseño de los bocetos (`.racha`, `.hero`, `.dsq`, `.trow`, `.tbtn`, `.vcard`, `.meta`, `.wallet`, `.agrp`, `.srow`…).
 - `supabase/schema.sql`: todo el esquema, **idempotente** (se puede volver a pegar entero). Cada versión agrega una sección al final (v1.1, v1.2, v1.3).
-- `sw.js`: caché sin conexión (`CACHE = 'registro-v6'`).
+- `sw.js`: caché sin conexión (`CACHE = 'registro-v7'`).
 - `tests/rules.test.js` y `tests/v13.test.js`: `node --test tests/*.test.js` (20 pruebas).
 
 ### Publicar una versión nueva
@@ -154,3 +154,4 @@ El canvas está en la cuenta de Williams (enlace arriba). Para leerlo o editarlo
 - **1.1**: orden de marcado y ventanas (también en la base), llegada confirmada por el administrador, avisos de rodaje hasta las 18:00, programar semana (rodaje → reunión → reparto), finalizar reunión y puntos de reunión, pestaña Etapas, borrar/cancelar/archivar, modo práctica, Resumen como boceto O.
 - **1.2**: diseño de los bocetos en Inicio (K), Etapas (F) y detalle del video; Administrador (apariencia, reglas y porcentajes con propuesta, recordatorios, modo práctica); botón día/noche; tema de cada video; la preproducción vencida pasa al compañero.
 - **1.3**: Tomar = comprometerse (+3/−4, también el montaje 5.7), confirmar asistencia (12 h / 18:00, −2, WhatsApp), sin guion se reprograma y sin storyboard se reparte 50/50, Inicio M, Etapas N/P, reunión con reparto y entregables, rodaje por dentro nuevo, tarjeta de racha, Apariencia C con noche y día, WhatsApp de cada integrante, botones sin texto negro.
+- **1.3.1**: arreglo del parpadeo: la pantalla ya no se vuelve a dibujar si nada cambió (cada toque la redibujaba 4 veces y al volver a la app 1 vez), y las animaciones de entrada de las tarjetas solo corren la primera vez que se abre una pantalla (`#app[data-settled]` en `render()`).

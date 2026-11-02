@@ -3,7 +3,7 @@ import { S } from './store.js';
 import * as R from './rules.js';
 import { seedDemo } from './demo.js';
 
-export const VERSION = '1.3';
+export const VERSION = '1.3.1';
 const $app = document.getElementById('app');
 const $toast = document.getElementById('toast');
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -567,11 +567,12 @@ function rachaPop(P) {
   const lit = nx ? Math.round((P.to - min) / (nx.min - min) * 10) : 10;
   const lefts = [18, 70, 40, 82, 28, 58, 10, 48, 76];
   const embers = Array.from({ length: lv.embers }, (_, i) => `<span class="ember" style="left:${lefts[i]}%;background:${i % 2 ? '#FFF1C2' : lv.color};animation-duration:${(1.4 + (i % 3) * 0.4).toFixed(1)}s;animation-delay:${(i * 0.23).toFixed(2)}s"></span>`).join('');
-  return `<div class="rpop" role="dialog" aria-label="${esc(P.title)}"><section style="background:${box[0]};border-color:${box[1]}">
+  const fresh = !P.seen; P.seen = true;
+  return `<div class="rpop"${fresh ? ' data-fresh' : ''} role="dialog" aria-label="${esc(P.title)}"><section style="background:${box[0]};border-color:${box[1]}">
     <div class="rfire" style="width:120px;height:120px"><span class="rglow" style="background:${lv.color};width:96px;height:96px"></span>${up ? `<span class="rring" style="border-color:${lv.color}"></span>` : ''}${embers}
       <div class="${up ? 'burst' : ''}">${icon.flame(lv.color, lv.size + 14).replace('class="flame"', `class="flame" style="transform-origin:50% 90%;animation:flick ${lv.speed} ease-in-out infinite"`)}</div></div>
     <div><h2>${esc(up ? '¡Subiste a ' + lvTo.name + '!' : P.title)}</h2><p style="margin:6px 0 0;font-size:14px;color:${lv.text};line-height:1.4">${PHRASE[lv.n] || ''}</p></div>
-    <div class="row" style="gap:8px;align-items:baseline;justify-content:center"><b class="num" data-popcount="${P.to}" data-popfrom="${P.from}" style="font-size:52px;line-height:1;color:${lv.text}">${P.from}</b><span style="font-size:14px;color:${lv.text};opacity:.8">puntos</span>${P.to > P.from ? `<b class="num" style="margin-left:4px;font-size:18px;color:#C9F7E3">+${P.to - P.from}</b>` : ''}</div>
+    <div class="row" style="gap:8px;align-items:baseline;justify-content:center"><b class="num" data-popcount="${P.to}" data-popfrom="${P.from}"${P.counted ? ' data-done="1"' : ''} style="font-size:52px;line-height:1;color:${lv.text}">${P.counted ? P.to : P.from}</b><span style="font-size:14px;color:${lv.text};opacity:.8">puntos</span>${P.to > P.from ? `<b class="num" style="margin-left:4px;font-size:18px;color:#C9F7E3">+${P.to - P.from}</b>` : ''}</div>
     <span class="rlv" style="align-self:center;--lvc:${lv.color};--lvt:${lv.text};--lvchip:${LVCHIP[lv.n] || '#22242C'}">Nivel ${lv.n} · ${lvTo.name}</span>
     <div class="rdots" style="width:100%">${Array.from({ length: 10 }, (_, i) => `<i style="background:${i < lit ? lv.color : 'rgba(255,255,255,.1)'}"></i>`).join('')}</div>
     <div class="rchips">${P.chips.map((x) => `<span>${esc(x)}</span>`).join('')}</div>
@@ -583,7 +584,7 @@ function animatePop() {
   el.dataset.done = '1';
   const to = Number(el.dataset.popcount), from = Number(el.dataset.popfrom);
   const t0 = performance.now() + 450;
-  const step = (t) => { const k = Math.max(0, Math.min(1, (t - t0) / 1400)); const e = 1 - Math.pow(1 - k, 3); el.textContent = Math.round(from + (to - from) * e); if (k < 1 && document.body.contains(el)) requestAnimationFrame(step); };
+  const step = (t) => { const k = Math.max(0, Math.min(1, (t - t0) / 1400)); const e = 1 - Math.pow(1 - k, 3); el.textContent = Math.round(from + (to - from) * e); if (k < 1 && document.body.contains(el)) requestAnimationFrame(step); else if (ui.rpop) ui.rpop.counted = true; };
   requestAnimationFrame(step);
 }
 
@@ -2082,10 +2083,17 @@ function render() {
     html = layout(tab, fn());
   }
   if (sheetHtml) html += `<div class="sheet" data-act="closeBg"><div>${sheetHtml}</div></div>`;
-  $app.innerHTML = html;
+  if (ui.rpop) html += rachaPop(ui.rpop);
   const u = ui.undo && Date.now() < ui.undo.until && !(S.toast && S.toast.kind === 'bad') ? ui.undo : null;
-  $toast.innerHTML = u ? `<div class="t-ok undo"><span>${u.text ? esc(u.text) : 'Registrado'}</span><button data-act="undoQuick">Deshacer</button></div>` : S.toast ? `<div class="t-${S.toast.kind}">${esc(S.toast.msg)}</div>` : '';
-  if (ui.rpop) $app.insertAdjacentHTML('beforeend', rachaPop(ui.rpop));
+  const toastHtml = u ? `<div class="t-ok undo"><span>${u.text ? esc(u.text) : 'Registrado'}</span><button data-act="undoQuick">Deshacer</button></div>` : S.toast ? `<div class="t-${S.toast.kind}">${esc(S.toast.msg)}</div>` : '';
+  if ($toast.innerHTML !== toastHtml) $toast.innerHTML = toastHtml;
+  // 1.3: no volver a dibujar si nada cambió, y las animaciones de entrada solo la primera vez
+  // que se abre una pantalla (si no, las tarjetas "parpadean" en cada actualización).
+  if (html === ui.lastHtml) return;
+  const key = r.join('/') + '|' + (S.me ? S.me.id : '') + '|' + (sheetHtml ? 's' : '');
+  if (key === ui.lastKey) $app.setAttribute('data-settled', ''); else $app.removeAttribute('data-settled');
+  ui.lastKey = key; ui.lastHtml = html;
+  $app.innerHTML = html;
   syncOpts();
   syncOwn();
   animateCounts();

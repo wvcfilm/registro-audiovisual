@@ -574,3 +574,7 @@ nav.tabs a.on{color:var(--amber)}
 [data-theme=light] .hero.h-calm .hdot{background:#C27A0E}[data-theme=light] .hero.h-calm .hwhen{color:#9A5B05}
 [data-theme=light] .hero.h-miss .hdot{background:#D92D20}[data-theme=light] .hero.h-miss .hwhen{color:#B42318}
 .postweek{background:color-mix(in srgb,var(--st-post) 10%,var(--s1));border-color:color-mix(in srgb,var(--st-post) 32%,transparent)}
+/* 1.3: al actualizar una pantalla ya abierta, las tarjetas no repiten su animación de entrada */
+#app[data-settled] .hero,#app[data-settled] .trow,#app[data-settled] .vcard,#app[data-settled] .vcard13,#app[data-settled] .hb,#app[data-settled] .okrow,
+#app[data-settled] .propbar,#app[data-settled] .mbar>div,#app[data-settled] .rpop:not([data-fresh]),#app[data-settled] .rpop:not([data-fresh]) section,
+#app[data-settled] .anim .receipt .paper,#app[data-settled] .anim .stamp,#app[data-settled] .anim .coin,#app[data-settled] .anim .rg,#app[data-settled] .anim .fill,#app[data-settled] .anim .mv,#app[data-settled] .anim .badge{animation:none}
