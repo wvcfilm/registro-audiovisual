@@ -726,3 +726,274 @@ drop trigger if exists proposals_guard on proposals;
 create trigger proposals_guard before insert or update on proposals for each row execute function guard_proposal();
 drop trigger if exists proposals_log on proposals;
 create trigger proposals_log after insert or update on proposals for each row execute function log_change();
+
+-- =====================================================================
+-- Versión 1.3: Tomar = comprometerse, confirmación de asistencia, storyboard repartido,
+-- reprogramar un video y WhatsApp de cada integrante
+-- =====================================================================
+alter table tasks add column if not exists split boolean not null default false;   -- storyboard repartido mitad y mitad
+alter table tasks add column if not exists split_with uuid references members(id);
+alter table attendance add column if not exists rsvp text;                          -- 'voy' (el "no iré" es el aviso)
+alter table attendance add column if not exists rsvp_at timestamptz;
+alter table members add column if not exists phone text;                            -- WhatsApp: 9 dígitos, empieza con 9
+alter table hires add column if not exists created_at timestamptz not null default now();
+do $$ begin
+  alter table attendance add constraint attendance_rsvp_chk check (rsvp is null or rsvp in ('voy'));
+exception when duplicate_object then null; end $$;
+do $$ begin
+  alter table members add constraint members_phone_chk check (phone is null or phone ~ '^9[0-9]{8}$');
+exception when duplicate_object then null; end $$;
+grant update (name, active, phone) on members to authenticated;
+
+-- El número de WhatsApp lo cambia el administrador o cada uno el suyo.
+create or replace function guard_member() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.phone is distinct from old.phone and not is_admin(new.team_id) and old.user_id is distinct from auth.uid() then
+    raise exception 'Solo el administrador o el propio integrante cambian su WhatsApp';
+  end if;
+  return new;
+end $$;
+drop trigger if exists members_guard on members;
+create trigger members_guard before update on members for each row execute function guard_member();
+
+-- Plazo para confirmar asistencia (y para avisar a tiempo que no irá).
+-- Rodaje: día anterior a las 18:00. Reunión: 12 h antes; si cae de madrugada (antes de las 05:00), 23:59 del día anterior.
+create or replace function confirm_due(e uuid) returns timestamptz
+language sql stable security definer set search_path = public as $$
+  select case when ev.kind = 'rodaje'
+    then lima_at(lima_day(ev.starts_at) - 1, '00:00') + make_interval(mins => rule_int(ev.team_id, 'avr', 1080))
+    else (select case when (x.t at time zone 'America/Lima')::time < time '00:00' + make_interval(mins => rule_int(ev.team_id, 'madr', 300))
+                      then lima_at(lima_day(x.t) - 1, '23:59') else x.t end
+          from (select ev.starts_at - make_interval(hours => rule_int(ev.team_id, 'conf', 12)) as t) x)
+  end
+  from events ev where ev.id = e
+$$;
+
+-- Hasta cuándo se puede tomar (y entregar) lo del compañero.
+create or replace function take_limit(v uuid, k text) returns timestamptz
+language sql stable security definer set search_path = public as $$
+  select case when k in ('guion', 'storyboard')
+    then (select r.starts_at - make_interval(hours => rule_int(r.team_id, 'take', 5)) from events r where r.kind = 'rodaje' and r.status = 'activo' and v = any(r.video_ids) order by r.starts_at limit 1)
+    else (select lima_at(vv.publish_date - rule_int(vv.team_id, 'fin', 1), '21:00') from videos vv where vv.id = v)
+  end
+$$;
+
+-- ---------- Tomar = comprometerse ----------
+create table if not exists claims (
+  id uuid primary key default gen_random_uuid(),
+  team_id uuid not null references teams(id) on delete cascade,
+  project_id uuid not null references projects(id) on delete cascade,
+  video_id uuid not null references videos(id) on delete cascade,
+  kind text not null check (kind in ('guion', 'storyboard', 'montaje')),
+  member_id uuid not null references members(id),
+  rodaje_id uuid references events(id) on delete set null,
+  limit_at timestamptz,
+  status text not null default 'activa' check (status in ('activa')),
+  created_at timestamptz not null default now()
+);
+create unique index if not exists claims_one on claims (video_id, kind, coalesce(rodaje_id, '00000000-0000-0000-0000-000000000000'::uuid));
+alter table claims enable row level security;
+drop policy if exists claims_read on claims;
+create policy claims_read on claims for select using (is_partner(team_id));
+drop policy if exists claims_insert on claims;
+create policy claims_insert on claims for insert with check (is_partner(team_id) and member_id = my_member(team_id));
+-- Deshacer un "Tomar" solo en los primeros minutos y si todavía no se entregó.
+drop policy if exists claims_delete on claims;
+create policy claims_delete on claims for delete using (member_id = my_member(team_id)
+  and now() <= created_at + make_interval(mins => rule_int(team_id, 'undo', 10))
+  and not exists (select 1 from tasks t where t.video_id = claims.video_id and t.kind = claims.kind));
+drop trigger if exists claims_log on claims;
+create trigger claims_log after insert or delete on claims for each row execute function log_change();
+
+create or replace function guard_claim() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare me uuid := my_member(new.team_id); mrole text; v videos; vowner members; r events; md timestamptz;
+begin
+  select role into mrole from members where id = me;
+  select * into v from videos where id = new.video_id;
+  select * into vowner from members where id = v.owner;
+  if mrole not in ('admin', 'socio') then raise exception 'Solo los socios toman tareas'; end if;
+  if me = v.owner then raise exception 'Es tu propia tarea'; end if;
+  if exists (select 1 from tasks where video_id = v.id and kind = new.kind) then raise exception 'Esa tarea ya está hecha'; end if;
+  if new.kind in ('guion', 'storyboard') then
+    r := video_rodaje(v.id);
+    if r.id is null then raise exception 'Este video no tiene rodaje agendado'; end if;
+    if now() <= pre_due(v.id) then raise exception 'Todavía está en el plazo de tu compañero'; end if;
+    new.rodaje_id := r.id;
+  else
+    md := case when vowner.apoyo then lima_at(v.publish_date - rule_int(new.team_id, 'mon', 2), '21:00') end;
+    if mrole <> 'admin' or md is null or now() <= md then raise exception 'Este montaje le corresponde al dueño del video'; end if;
+    new.rodaje_id := null;
+  end if;
+  new.limit_at := take_limit(v.id, new.kind);
+  if now() > new.limit_at then raise exception 'Pasó el límite para tomarlo'; end if;
+  new.member_id := me; new.project_id := v.project_id; new.status := 'activa'; new.created_at := now();
+  return new;
+end $$;
+drop trigger if exists claims_guard on claims;
+create trigger claims_guard before insert on claims for each row execute function guard_claim();
+
+-- Compromiso vigente de una persona sobre una tarea (el de un rodaje anterior ya no cuenta).
+create or replace function has_claim(v uuid, k text, m uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from claims c where c.video_id = v and c.kind = k and c.member_id = m and c.status = 'activa'
+    and (k = 'montaje' or c.rodaje_id = (video_rodaje(v)).id) and now() <= c.limit_at)
+$$;
+
+-- ---------- Tareas (1.3) ----------
+create or replace function guard_task() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  me uuid := my_member(new.team_id); mrole text; v videos; vowner members; r events; h hires;
+  due timestamptz; att attendance; oatt attendance; md timestamptz;
+begin
+  -- El storyboard repartido lo crea la base al grabar (no se marca desde la app).
+  if new.split then
+    if pg_trigger_depth() < 2 then raise exception 'El storyboard repartido lo registra la app al grabar'; end if;
+    new.done_at := now();
+    return new;
+  end if;
+  if new.done_by is distinct from me then raise exception 'Solo puedes marcar tus propias tareas'; end if;
+  select role into mrole from members where id = me;
+  select * into v from videos where id = new.video_id;
+  select * into vowner from members where id = v.owner;
+  if new.hire_id is not null then
+    select * into h from hires where id = new.hire_id;
+    if h.status <> 'aceptada' or h.present <> new.done_by then raise exception 'Contratación de Guillermo no válida'; end if;
+    if new.kind not in ('guion', 'storyboard') then raise exception 'Guillermo solo hace guiones y storyboards'; end if;
+  end if;
+  if new.kind in ('guion', 'storyboard') then
+    due := pre_due(v.id);
+    if me = v.owner and new.hire_id is null and due is not null and now() > due then
+      raise exception 'Venció el plazo: esta tarea pasó a tu compañero';
+    end if;
+    if me <> v.owner and new.hire_id is null then
+      if due is null or now() <= due then raise exception 'La preproducción de tu compañero solo se puede tomar después de su plazo'; end if;
+      if not has_claim(v.id, new.kind, me) then raise exception 'Primero tómala (o pasó el límite para entregarla)'; end if;
+    end if;
+  elsif new.kind = 'rodaje' then
+    r := video_rodaje(v.id);
+    if r.id is null then raise exception 'Este video no tiene rodaje agendado'; end if;
+    if now() < r.starts_at - make_interval(mins => rule_int(new.team_id, 'open', 15)) or lima_day(now()) <> lima_day(r.starts_at) then
+      raise exception 'El rodaje solo se marca el día del rodaje, desde que se abre la llegada';
+    end if;
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'guion') then
+      raise exception 'Sin guion no se graba: reprograma el video';
+    end if;
+    select * into att from attendance where event_id = r.id and member_id = me;
+    if att.arrived_at is null then raise exception 'Primero tu llegada al rodaje tiene que estar confirmada'; end if;
+    if me <> v.owner then
+      select * into oatt from attendance where event_id = r.id and member_id = v.owner;
+      if oatt.arrived_at is not null then raise exception 'El dueño del video está en el rodaje: lo marca él'; end if;
+      if (oatt.notice->>'sent_at') is not null
+         and (oatt.notice->>'sent_at')::timestamptz <= confirm_due(r.id)
+         and coalesce(oatt.notice->>'choice', '') <> 'other' then
+        raise exception 'Avisó a tiempo: sus videos se reprograman, salvo que acepte que los grabes';
+      end if;
+    end if;
+  elsif new.kind = 'montaje' then
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'rodaje') then raise exception 'Primero tiene que grabarse el video'; end if;
+    md := case when vowner.apoyo then lima_at(v.publish_date - rule_int(new.team_id, 'mon', 2), '21:00') end;
+    if me = v.owner then
+      if md is not null and now() > md then raise exception 'Venció el plazo del montaje: el video pasa al administrador (5.7)'; end if;
+    elsif mrole <> 'admin' or md is null or now() <= md then
+      raise exception 'Este montaje le corresponde al dueño del video';
+    elsif not has_claim(v.id, 'montaje', me) then
+      raise exception 'Primero toma el montaje';
+    end if;
+  elsif new.kind = 'acabado' then
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje') then raise exception 'Primero tiene que estar el montaje'; end if;
+    if me <> v.owner and mrole <> 'admin' then raise exception 'El video final lo hace el dueño o el administrador'; end if;
+  end if;
+  new.split := false; new.split_with := null;
+  new.done_at := now();
+  return new;
+end $$;
+
+-- Al grabar sin storyboard: su valor se reparte mitad y mitad y el storyboard queda cerrado.
+-- Si se deshace el rodaje, se deshace también el reparto.
+create or replace function split_storyboard() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v videos; oth uuid;
+begin
+  if tg_op = 'INSERT' then
+    if new.kind = 'rodaje' and not exists (select 1 from tasks where video_id = new.video_id and kind = 'storyboard') then
+      select * into v from videos where id = new.video_id;
+      select id into oth from members where team_id = new.team_id and role in ('admin', 'socio') and active and id <> v.owner order by created_at limit 1;
+      insert into tasks (team_id, project_id, video_id, kind, done_by, split, split_with)
+      values (new.team_id, new.project_id, new.video_id, 'storyboard', v.owner, true, coalesce(oth, v.owner));
+    end if;
+  elsif tg_op = 'DELETE' then
+    if old.kind = 'rodaje' then delete from tasks where video_id = old.video_id and kind = 'storyboard' and split; end if;
+  end if;
+  return null;
+end $$;
+drop trigger if exists tasks_split on tasks;
+create trigger tasks_split after insert or delete on tasks for each row execute function split_storyboard();
+
+-- ---------- Confirmación de asistencia ----------
+create or replace function guard_attendance() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare me uuid := my_member(new.team_id); mrole text; ev events;
+begin
+  select role into mrole from members where id = me;
+  select * into ev from events where id = new.event_id;
+  if new.rsvp is distinct from (case when tg_op = 'INSERT' then null else old.rsvp end) then
+    if new.member_id <> me then raise exception 'Solo puedes confirmar tu propia asistencia'; end if;
+    if now() > confirm_due(ev.id) then raise exception 'Venció el plazo para confirmar'; end if;
+    new.rsvp_at := now();
+  end if;
+  if new.claimed_at is not null and (tg_op = 'INSERT' or old.claimed_at is distinct from new.claimed_at) then
+    if new.member_id <> me then raise exception 'Solo puedes registrar tu propia llegada'; end if;
+    if now() < ev.starts_at - make_interval(mins => rule_int(new.team_id, 'open', 15)) then raise exception 'El registro se abre 15 minutos antes'; end if;
+    new.claimed_at := now();
+    if mrole = 'admin' or admin_absent(new.event_id) then new.arrived_at := new.claimed_at; end if;
+  end if;
+  if new.arrived_at is not null and (tg_op = 'INSERT' or new.arrived_at is distinct from old.arrived_at) then
+    if mrole = 'admin' and new.member_id <> me then
+      if new.claimed_at is null or new.arrived_at is distinct from new.claimed_at then new.arrived_at := now(); end if;
+      new.confirmed_by := me;
+    elsif new.member_id = me and (mrole = 'admin' or admin_absent(new.event_id)) then
+      new.arrived_at := coalesce(new.claimed_at, now());
+    else
+      raise exception 'Tu llegada la confirma el administrador';
+    end if;
+  end if;
+  if new.notice ? 'sent_at' and (new.notice->>'sent_at') is not null
+     and (tg_op = 'INSERT' or (old.notice->>'sent_at') is distinct from (new.notice->>'sent_at')) then
+    if new.member_id <> me then raise exception 'Solo puedes enviar tu propio aviso'; end if;
+    new.notice := jsonb_set(new.notice, '{sent_at}', to_jsonb(now()));
+  end if;
+  -- Retirar el "no iré" (cambiar a "voy") solo dentro del plazo.
+  if tg_op = 'UPDATE' and (old.notice->>'sent_at') is not null and (new.notice is null or (new.notice->>'sent_at') is null) then
+    if new.member_id <> me then raise exception 'Solo puedes cambiar tu propio aviso'; end if;
+    if now() > confirm_due(ev.id) then raise exception 'Venció el plazo para cambiar tu respuesta'; end if;
+  end if;
+  if tg_op = 'UPDATE' and (new.notice->>'decision') is not null and (old.notice->>'decision') is distinct from (new.notice->>'decision') then
+    if new.member_id = me then raise exception 'El aviso lo responde tu compañero'; end if;
+    new.notice := jsonb_set(new.notice, '{decided_at}', to_jsonb(now()));
+  end if;
+  return new;
+end $$;
+
+-- ---------- Reprogramar un video (sin guion no se graba) ----------
+-- Lo pasa a otro rodaje activo del mismo proyecto que aún no empezó; así se reabre el plazo de su dueño.
+create or replace function move_video(v uuid, to_rodaje uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare vv videos; src events; dst events;
+begin
+  select * into vv from videos where id = v;
+  if vv.id is null or not is_partner(vv.team_id) then raise exception 'Sin permiso'; end if;
+  if exists (select 1 from tasks where video_id = v and kind = 'rodaje') then raise exception 'Ese video ya se grabó'; end if;
+  select * into dst from events where id = to_rodaje and kind = 'rodaje' and status = 'activo' and project_id = vv.project_id;
+  if dst.id is null then raise exception 'Elige un rodaje activo del mismo proyecto'; end if;
+  if dst.starts_at <= now() then raise exception 'Ese rodaje ya empezó'; end if;
+  src := video_rodaje(v);
+  if src.id = dst.id then raise exception 'El video ya está en ese rodaje'; end if;
+  update events set video_ids = array_remove(video_ids, v) where kind = 'rodaje' and status = 'activo' and v = any(video_ids) and id <> dst.id;
+  update events set video_ids = array_append(video_ids, v) where id = dst.id;
+  insert into log (team_id, project_id, actor, type, data) values (vv.team_id, vv.project_id, my_member(vv.team_id), 'video.reprogramado', jsonb_build_object('video', vv.num, 'from', src.starts_at, 'to', dst.starts_at));
+end $$;
+
+grant execute on function confirm_due, take_limit, has_claim, move_video to authenticated;

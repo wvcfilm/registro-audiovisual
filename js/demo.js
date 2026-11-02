@@ -5,7 +5,7 @@ import { at, addDays, limaDate } from './rules.js';
 export async function seedDemo() {
   if (api.mode !== 'demo') return;
   api.reset();
-  api.db = { teams: [], users: [], who: null, members: [], projects: [], videos: [], tasks: [], events: [], attendance: [], log: [], corrections: [] };
+  api.db = { teams: [], users: [], who: null, members: [], projects: [], videos: [], tasks: [], events: [], attendance: [], hires: [], log: [], corrections: [], proposals: [], claims: [] };
   api.logId = 0;
   api.seeding = true;
   await api.verifyCode('williams@demo');
@@ -65,6 +65,15 @@ export async function seedDemo() {
     await task(v.owner, v, 'storyboard', iso(m2, '11:50'));
   }
   await task(S, w2.vids[3], 'guion', iso(m2, '12:10'));
+  // 1.3: Socio ya confirmó el rodaje de mañana; Williams todavía no.
+  as(S); await api.insert('attendance', { team_id: team, event_id: w2.rod.id, member_id: S, rsvp: 'voy', rsvp_at: iso(m2, '13:00') });
+  // Semana 3: reunión en 3 días (los videos se reparten ahí) y rodaje en 5 días.
+  as(W);
+  const m3 = addDays(D, 3), r3 = addDays(D, 5);
+  const rod3 = await api.insert('events', { team_id: team, project_id: p.id, kind: 'rodaje', status: 'activo', starts_at: iso(r3, '10:00'), tolerance_min: 45, video_ids: [] });
+  await api.insert('events', { team_id: team, project_id: p.id, kind: 'reunion', status: 'activo', rodaje_id: rod3.id, starts_at: iso(m3, '10:00'), tolerance_min: 45, video_ids: [] });
+  // WhatsApp de ejemplo
+  for (const m of api.db.members) m.phone = m.id === W ? '987654321' : '912345678';
   as(W);
   api.seeding = false;
   api.db.log.sort((a, b) => new Date(a.at) - new Date(b.at)).forEach((l, i) => { l.id = i + 1; });

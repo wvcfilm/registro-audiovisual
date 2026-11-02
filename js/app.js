@@ -3,7 +3,7 @@ import { S } from './store.js';
 import * as R from './rules.js';
 import { seedDemo } from './demo.js';
 
-export const VERSION = '1.2';
+export const VERSION = '1.3';
 const $app = document.getElementById('app');
 const $toast = document.getElementById('toast');
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -91,7 +91,10 @@ function taskItems(now) {
         const t = `${R.KIND_LABEL[k]} · ${vname}`;
         if (byG) { if (hire.present === me.id) push(k, vs.d.preDue, t, `De ${first(owner)} · con Guillermo (80 %)`, { viaHire: true }); continue; }
         if (v.owner === me.id) push(k, vs.d.preDue, t, v.title ? esc(v.title) : 'Tu preproducción');
-        else if (vs.d.preDue && now > vs.d.preDue && me.role !== 'colaborador') push(k, vs.d.preDue, t, `De ${first(owner)} · no llegó a tiempo`, { take: true });
+        else if (vs.d.preDue && now > vs.d.preDue && me.role !== 'colaborador') {
+          const cm = R.canMark(v, k, me, c, now);
+          if (cm.claim || cm.claimed) push(k, cm.limit || vs.d.preDue, t, cm.claimed ? 'Lo tomaste' : `De ${first(owner)} · no llegó a tiempo`, { take: true });
+        }
       }
     } else if (!vs.r) {
       if (!rod) { if (v.owner === me.id) out.push({ type: 'norod', video: v, due: null, title: `Video ${v.num} sin rodaje`, sub: 'Prográmalo en Etapas → Rodaje' }); }
@@ -172,7 +175,8 @@ function rowBtn(x, now) {
   const ev = x.event;
   if (x.type === 'task') {
     const cm = x.cm;
-    if (cm.ok) return `<button class="tbtn ${x.take ? 't-take' : x.hire ? 't-g' : 't-done'}" data-act="quick" data-v="${x.video.id}" data-k="${x.kind}"${x.hire ? ` data-h="${x.hire.id}"` : ''}>${x.take ? 'Tomar' : 'Hecho'}</button>`;
+    if (cm.claim) return `<button class="tbtn t-take" data-act="claim" data-v="${x.video.id}" data-k="${x.kind}">Tomar</button>`;
+    if (cm.ok) return `<button class="tbtn ${x.hire ? 't-g' : 't-done'}" data-act="quick" data-v="${x.video.id}" data-k="${x.kind}"${x.hire ? ` data-h="${x.hire.id}"` : ''}>Hecho</button>`;
     if (cm.gone) return `<span class="tbtn t-gone">Venció</span>`;
     const r = x.rod;
     const lockTxt = x.kind === 'rodaje' && r ? (R.limaDate(now) === R.limaDate(r.starts_at) ? R.limaTime(new Date(new Date(r.starts_at).getTime() - R.RULES.open * 60000)) : dowShort(r.starts_at)) : 'Espera';
@@ -197,6 +201,8 @@ function rowHref(x) {
 function dueLine(x, now) {
   if (x.type !== 'task' && x.type !== 'event') return '';
   if (x.type === 'task' && x.cm.gone) return `<span class="due-l u0">Venció ${R.fmtWhen(x.due)} · pasó a tu compañero</span>`;
+  if (x.type === 'task' && x.cm.claim) return `<span class="due-l u0">Puedes tomarlo hasta ${R.fmtWhen(x.cm.limit)}</span>`;
+  if (x.type === 'task' && x.cm.claimed) return `<span class="due-l u0">Entrégalo antes de ${R.fmtWhen(x.cm.limit)}</span>`;
   if (x.type === 'task' && !x.cm.ok && x.cm.why) return `<span class="due-l">${esc(x.cm.why)}</span>`;
   if (!x.due) return '';
   return `<span class="due-l u${x.band}">${x.type === 'event' ? '' : 'Entrega: '}${R.fmtWhen(x.due)} · ${countdown(x.due, now)}</span>`;
@@ -205,7 +211,7 @@ function pendItem(x, now = new Date(), i = 0) {
   const k = stageOf(x);
   return `<div class="trow" style="animation-delay:${(i * 0.04).toFixed(2)}s">
     <a class="tic tint-${k}" href="${rowHref(x)}" aria-label="Ver detalle">${stageIc(k)}</a>
-    <a class="ttx" href="${rowHref(x)}"><b${x.type === 'task' && (x.cm.gone || (!x.cm.ok)) ? ' class="dim"' : ''}>${x.title}${x.repro ? ' <em class="tag-red">Reprogramado</em>' : ''}</b><span>${x.sub || ''}</span>${dueLine(x, now)}</a>
+    <a class="ttx" href="${rowHref(x)}"><b${x.type === 'task' && (x.cm.gone || (!x.cm.ok && !x.cm.claim)) ? ' class="dim"' : ''}>${x.title}${x.repro ? ' <em class="tag-red">Reprogramado</em>' : ''}</b><span>${x.sub || ''}</span>${dueLine(x, now)}</a>
     ${rowBtn(x, now)}</div>`;
 }
 const DOW = ['DOM', 'LUN', 'MAR', 'MIÉ', 'JUE', 'VIE', 'SÁB'];
@@ -303,7 +309,7 @@ function vAccept(code) {
       <div>✓ Ver las etapas de todos los videos y marcar los tuyos.</div>
       <div>✓ Aprobar la liquidación de cada proyecto.</div>
       <div>🔒 Tu racha y tu aporte real solo los ves tú.</div></div>
-      <div class="banner bn-warn"><div><b>Antes de entrar</b><p>La app sigue el acuerdo que firmaron: pago por etapa (guion y storyboard S/ 7.81, rodaje S/ 21.88, montaje S/ 10, acabado S/ 15 por video de S/ 62.50), plazos a las 21:00, tolerancia de 10 y 45 min, avisos de rodaje hasta las 18:00 del día anterior y de reunión con 24 h. La racha nunca cambia lo que cobras.</p></div></div>
+      <div class="banner bn-warn"><div><b>Antes de entrar</b><p>La app sigue el acuerdo que firmaron: pago por etapa (guion y storyboard S/ 7.81, rodaje S/ 21.88, montaje S/ 10, acabado S/ 15 por video de S/ 62.50), plazos a las 21:00, tolerancia de 10 y 45 min, confirmar el rodaje hasta las 18:00 del día anterior y la reunión con 12 h. La racha nunca cambia lo que cobras.</p></div></div>
       <label class="row small" style="gap:10px"><input type="checkbox" name="ok" required style="width:20px;height:20px"> Leí las reglas y son las mismas del acuerdo que firmé</label>` : ''}
     <label class="field"><span>Tu nombre (así aparecerás)</span><input class="in" name="name" value="${esc(info.name)}" required></label>
     <button class="btn b-blue">Entrar al equipo</button>
@@ -315,35 +321,31 @@ const LVS = {
   'Sin racha': { n: 0, color: '#6B6B75', text: 'var(--tx2)', size: 40, speed: '2.2s', embers: 0, cls: 'lv0' },
   Cumplidor: { n: 1, color: '#FFB547', text: '#FFD08A', size: 44, speed: '1.8s', embers: 2, cls: 'lv1' },
   Constante: { n: 2, color: '#FF9F2E', text: '#FFC978', size: 52, speed: '1.3s', embers: 4, cls: 'lv2' },
-  Responsable: { n: 3, color: '#FF5A36', text: '#FF9B7E', size: 62, speed: '.9s', embers: 7, cls: 'lv3' },
+  Responsable: { n: 3, color: '#5CC8FF', text: '#A8E1FF', size: 62, speed: '.9s', embers: 7, cls: 'lv3' },
   Imparable: { n: 4, color: '#B98CFF', text: '#D6C2FF', size: 66, speed: '.7s', embers: 9, cls: 'lv4' }
 };
+const LVCHIP = { 0: '#22242C', 1: '#2A2010', 2: '#2E1D0A', 3: '#0E2533', 4: '#221838' };
 function rachaCard(sk) {
-  const lv = LVS[sk.level.name] || LVS.Cumplidor;
+  const lv0 = LVS[sk.level.name] || LVS.Cumplidor;
+  const rc = lv0.n ? lookFor(theme())['r' + lv0.n] : null;
+  const lv = rc ? Object.assign({}, lv0, { color: rc[2], text: rc[3] }) : lv0;
   const min = sk.level.min || 0;
   const lit = sk.next ? Math.round((sk.pts - min) / (sk.next.min - min) * 10) : 10;
   const lefts = [18, 70, 40, 82, 28, 58, 10, 48, 76];
   const embers = Array.from({ length: lv.embers }, (_, i) => `<span class="ember" style="left:${lefts[i]}%;background:${i % 2 ? '#FFF1C2' : lv.color};animation-duration:${(1.4 + (i % 3) * 0.4).toFixed(1)}s;animation-delay:${(i * 0.23).toFixed(2)}s"></span>`).join('');
   const burst = ui.burst && Date.now() - ui.burst < 2200;
   const left = sk.next ? sk.next.min - sk.pts : 0;
-  return `<section class="racha ${lv.cls}">
+  return `<section class="racha ${lv.cls}"${rc ? ` style="background:${rc[0]};border-color:${rc[1]}"` : ''}>
     <div class="rfire"><span class="rglow" style="background:${lv.color}"></span>${burst ? `<span class="rring" style="border-color:${lv.color}"></span>` : ''}${embers}
       <div class="${burst ? 'burst' : ''}">${icon.flame(lv.color, lv.size).replace('class="flame"', `class="flame" style="transform-origin:50% 90%;animation:flick ${lv.speed} ease-in-out infinite"`)}</div></div>
     <div class="rtx"><p class="lbl" style="color:${lv.text}">Tu racha</p>
       <div class="row" style="align-items:baseline;gap:8px"><b class="num" style="font-size:44px;line-height:1;color:${lv.text}">${sk.pts}</b><span class="small" style="color:var(--r-sub)">puntos</span></div>
-      <span class="rlv" style="background:${lv.color}">Nivel ${lv.n} · ${sk.level.name}</span>
+      <span class="rlv" style="--lvc:${lv.color};--lvt:${lv.text};--lvchip:color-mix(in srgb,${lv.color} 16%,transparent)">Nivel ${lv.n} · ${sk.level.name}</span>
       <div class="rdots">${Array.from({ length: 10 }, (_, i) => `<i style="background:${i < lit ? lv.color : 'var(--r-off)'}"></i>`).join('')}</div>
       <span style="font-size:11px;color:var(--r-sub)">${sk.next ? `${left} ${left === 1 ? 'punto más' : 'puntos más'} para ser ${sk.next.name.toLowerCase()}` : 'Nivel máximo: sigue así'}</span></div>
-    ${burst ? '<span class="rplus">+1 punto</span>' : ''}</section>`;
+</section>`;
 }
-function heroOf(items, now) {
-  const arrive = items.find((x) => x.type === 'event' && R.canCheckIn(x.event, now));
-  if (arrive) return arrive;
-  const order = ['claim', 'endreq', 'proposal', 'notice', 'hire', 'settle', 'corr'];
-  for (const t of order) { const f = items.find((x) => x.type === t); if (f) return f; }
-  return items.find((x) => x.type === 'task' && x.band === 0 && x.cm.ok) || null;
-}
-function heroCard(x, now) {
+function heroItemCard(x, now) {
   const k = stageOf(x);
   const ev = x.event;
   let when, btn, urgent = true;
@@ -369,6 +371,191 @@ function heroCard(x, now) {
       <div style="flex:1;min-width:0"><b class="num" style="font-size:20px;line-height:1.2;display:block">${x.title}</b><p class="sub" style="margin:4px 0 0">${x.sub || ''}</p></div></div>
     ${btn}</section>`;
 }
+// ---------- 1.3 · "Te toca" con botón directo según el momento ----------
+const byStart = (a, b) => new Date(a.starts_at) - new Date(b.starts_at);
+const evTitle = (e, c) => {
+  const nums = e.video_ids.map((id) => (c.videos.find((v) => v.id === id) || {}).num).filter(Boolean).sort((a, b) => a - b);
+  const vt = nums.length ? (nums.length === 1 ? 'video ' + nums[0] : 'videos ' + (nums.length > 2 && nums[nums.length - 1] - nums[0] === nums.length - 1 ? nums[0] + ' a ' + nums[nums.length - 1] : nums.slice(0, -1).join(', ') + ' y ' + nums[nums.length - 1])) : '';
+  return { t: e.kind === 'rodaje' ? 'Rodaje' + (vt ? ' · ' + vt : '') : 'Reunión de preproducción', vt };
+};
+const goTxt = (e) => e.kind === 'rodaje' ? 'Abrir rodaje' : 'Entrar a la reunión';
+const arrow = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>';
+const waIc = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8.5 8.5 0 0 1-12.6 7.4L3 21l1.6-5.2A8.5 8.5 0 1 1 21 12z"/></svg>';
+const pinIc = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>';
+const handIc = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 11V6.5a1.5 1.5 0 0 1 3 0V11M10 10V5a1.5 1.5 0 0 1 3 0v5M13 10V6a1.5 1.5 0 0 1 3 0v6M16 9.5a1.5 1.5 0 0 1 3 0V14a7 7 0 0 1-7 7h-1a6 6 0 0 1-5-2.7L3.6 15a1.6 1.6 0 0 1 2.6-1.9L7 14"/></svg>';
+const xIc = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+const isPartner = (m) => !!m && (m.role === 'admin' || m.role === 'socio');
+const otherPartner = () => st.partners().find((m) => m.id !== S.me.id) || null;
+// Qué respondió cada uno (para la insignia del compañero).
+function rsvpLabel(e, m, c, now) {
+  if (!m) return { t: '', cls: 'wait' };
+  const r = R.rsvpOf(e, m.id, c);
+  const n = first(m);
+  if (r.k === 'voy') return { t: `${n} confirmó asistencia`, cls: '', k: 'voy' };
+  if (r.k === 'no') return { t: `${n} no irá`, cls: 'wait', k: 'no' };
+  if (r.k === 'guillermo') return { t: `${n} envía a Guillermo`, cls: 'wait', k: 'g' };
+  return { t: `${n} aún no confirma`, cls: 'wait', k: null };
+}
+function heroOf(items, now) {
+  const me = S.me, c = st.ctx();
+  const evs = c.events.filter(active).sort(byStart);
+  // 1. Llegada (desde 15 min antes) y, ya marcada, el botón para entrar
+  for (const e of evs) {
+    const s = st.eventStatus(e, me.id, now);
+    const start = new Date(e.starts_at);
+    if (s.k === 'pendiente' && R.canCheckIn(e, now)) return { kind: 'arr', event: e };
+    const live = e.kind === 'reunion' ? R.meetingOpen(e, now) : R.limaDate(now) === R.limaDate(start) && now >= new Date(start.getTime() - R.RULES.open * 60000) && e.video_ids.some((id) => !S.data.tasks.find((t) => t.video_id === id && t.kind === 'rodaje'));
+    if (live && ['puntual', 'tarde', 'por_confirmar'].indexOf(s.k) !== -1) return { kind: 'in', event: e, s };
+  }
+  // 2. Confirmaciones que solo puede dar el administrador
+  for (const t of ['claim', 'endreq']) { const f = items.find((x) => x.type === t); if (f) return { kind: 'item', item: f }; }
+  // 3. Tomar lo del compañero (o entregar lo que ya tomaste)
+  const take = items.find((x) => x.type === 'task' && (x.cm.claim || x.cm.claimed));
+  if (take) return { kind: 'take', item: take };
+  // 4. Tarea propia que vence hoy
+  const today = items.find((x) => x.type === 'task' && x.band === 0 && x.cm.ok);
+  if (today) return { kind: 'task', item: today };
+  if (isPartner(me) && st.partners().length > 1) {
+    // 5. Confirmar asistencia (la más próxima a vencer)
+    const conf = evs.map((e) => ({ e, rs: R.rsvpState(e, me.id, c, now) })).filter((x) => x.rs.open && !x.rs.k).sort((a, b) => a.rs.due - b.rs.due)[0];
+    if (conf) return { kind: 'conf', event: conf.e, rs: conf.rs };
+    // 6. No confirmaste a tiempo
+    const miss = evs.map((e) => ({ e, rs: R.rsvpState(e, me.id, c, now) })).find((x) => x.rs.missed && now < new Date(new Date(x.e.starts_at).getTime() + x.e.tolerance_min * 60000) && R.rsvpOf(x.e, me.id, c).k !== 'no');
+    if (miss) return { kind: 'miss', event: miss.e, rs: miss.rs };
+  }
+  // 7. Lo demás que espera tu respuesta
+  for (const t of ['notice', 'hire', 'proposal', 'settle', 'corr']) { const f = items.find((x) => x.type === t); if (f) return { kind: 'item', item: f }; }
+  // 8. Todo al día: lo próximo
+  const next = evs.find((e) => new Date(e.starts_at) > now);
+  return next ? { kind: 'idle', event: next } : null;
+}
+function heroCard(h, now) {
+  const c = st.ctx();
+  const me = S.me;
+  if (h.kind === 'item') return heroItemCard(h.item, now);
+  const card = (tone, when, ic, title, sub, body) => `<section class="hero ${tone}">
+    <div class="row" style="gap:8px"><span class="hdot"></span><span class="lbl hwhen">${when}</span></div>
+    <div class="row" style="gap:12px;align-items:flex-start"><span class="tic big tint-${ic === 'miss' ? 'post' : ic}">${stageIc(ic === 'miss' ? 'post' : ic, 20)}</span>
+      <div style="flex:1;min-width:0"><b class="num" style="font-size:20px;line-height:1.2;display:block">${title}</b>${sub ? `<p class="sub" style="margin:4px 0 0">${sub}</p>` : ''}</div></div>${body}</section>`;
+  if (h.kind === 'take' || h.kind === 'task') {
+    const x = h.item;
+    const k = stageOf(x);
+    if (x.cm.claim) return card('h-calm', `Puedes tomarlo hasta ${R.limaTime(x.cm.limit)}`, k, x.title, `De ${first(st.member(x.video.owner))} · no llegó a tiempo`,
+      `<button class="hb x-blue" data-act="claim" data-v="${x.video.id}" data-k="${x.kind}">${handIc}Tomar</button>`);
+    if (x.cm.claimed) return card('h-calm', `Lo tomaste · hasta ${R.fmtWhen(x.cm.limit)}`, k, x.title, `De ${first(st.member(x.video.owner))}`,
+      `<div class="claimrow">${av(me, 22)}Entrégalo antes de ${R.fmtWhen(x.cm.limit)}</div><button class="hb x-green" data-act="quick" data-v="${x.video.id}" data-k="${x.kind}">${icon.check}Hecho</button>`);
+    const when = (x.due < now ? countdown(x.due, now).replace(/^v/, 'V') : 'Vence ' + countdown(x.due, now)) + ' · ' + R.limaTime(x.due);
+    return card('h-urg', when, k, x.title, x.sub, `<button class="hb ${x.hire ? 'x-violet' : 'x-green'}" data-act="quick" data-v="${x.video.id}" data-k="${x.kind}"${x.hire ? ` data-h="${x.hire.id}"` : ''}>${icon.check}${x.hire ? 'Hecho con Guillermo' : 'Hecho'}</button>`);
+  }
+  const e = h.event;
+  const T = evTitle(e, c);
+  const ic = e.kind === 'rodaje' ? 'prod' : 'pre';
+  const start = new Date(e.starts_at);
+  const go = (primary) => `<a class="hb ${primary ? 'x-amber' : 'x-ghost'}" href="#/e/${e.id}" style="font-size:15px">${goTxt(e)}${arrow}</a>`;
+  if (h.kind === 'arr') {
+    const punt = R.limaTime(new Date(start.getTime() + R.RULES.punt * 60000));
+    return card('h-urg', (start <= now ? 'Empezó a las ' : 'Empieza a las ') + R.limaTime(start), ic, T.t, (e.kind === 'reunion' && T.vt ? T.vt.charAt(0).toUpperCase() + T.vt.slice(1) + ' · ' : '') + 'puntual hasta ' + punt,
+      `<button class="hb x-green" data-act="checkin" data-e="${e.id}">${pinIc}Llegué</button>${go(false)}`);
+  }
+  if (h.kind === 'in') {
+    const a = st.attOf(e.id, me.id);
+    const t = a && a.arrived_at ? `Llegaste ${R.limaTime(a.arrived_at)} · ${h.s.k === 'puntual' ? 'puntual' : 'con tardanza'}` : `Marcaste ${R.limaTime(a.claimed_at)} · ${first(st.admin() || { name: 'el administrador' })} la confirma`;
+    return card('h-ok', e.kind === 'rodaje' ? 'Rodaje en curso' : 'Reunión en curso', ic, T.t, '', `<div class="okrow">${icon.check}${t}</div>${go(true)}`);
+  }
+  if (h.kind === 'conf') {
+    const o = otherPartner();
+    const pl = rsvpLabel(e, o, c, now);
+    const g = e.kind === 'reunion' && now < start;
+    return card('h-calm', 'Confirma hasta ' + R.fmtWhen(h.rs.due), ic, T.t, R.fmtWhen(e.starts_at) + (e.kind === 'reunion' && T.vt ? ' · ' + T.vt : ''),
+      `<div style="display:flex;flex-direction:column;gap:10px"><div class="row" style="gap:8px"><span class="confbadge">CONFIRMA</span><b class="num" style="font-size:17px">¿Asistirás?</b></div>
+      ${o ? `<div class="partner ${pl.cls}">${av(o, 26)}<span>${pl.t}</span></div>` : ''}
+      ${rsvpButtons(e, g)}</div>`);
+  }
+  if (h.kind === 'miss') {
+    const o = otherPartner();
+    const msg = `Hola ${o ? first(o) : ''}, sobre ${e.kind === 'rodaje' ? 'el rodaje' : 'la reunión'} del ${R.fmtWhen(e.starts_at)}: `;
+    return card('h-miss', 'No confirmaste · venció ' + R.fmtWhen(h.rs.due), ic, T.t, R.fmtWhen(e.starts_at),
+      `<div class="missrow">${icon.bell('#FF8A7A', 18)}<p>Avisa a ${o ? first(o) : 'tu compañero'} si asistirás o no.</p><span class="pts-neg">−2</span></div>
+      <a class="hb x-green" href="${st.waLink(o, msg)}" target="_blank" rel="noopener" style="font-size:14px">${waIc}Escribir a ${o ? first(o) : 'tu compañero'} por WhatsApp</a>${go(false)}`);
+  }
+  if (h.kind === 'idle') return card('h-idle', 'Al día · lo próximo', ic, T.t, R.fmtWhen(e.starts_at), `<a class="hb x-ghost" href="#/videos" style="font-size:15px">Ver en etapas${arrow}</a>`);
+  return '';
+}
+// Voy · No iré · Guillermo (Guillermo solo en reuniones)
+function rsvpButtons(e, withG) {
+  return `<div class="rsrow">
+    <button class="rs x-green" data-act="rsvp" data-e="${e.id}" data-k="voy">${icon.check}Voy</button>
+    <button class="rs x-ghost" data-act="rsvp" data-e="${e.id}" data-k="no">${xIc}${e.kind === 'rodaje' ? 'No podré ir' : 'No iré'}</button>
+    ${withG ? `<button class="rs x-violet" data-act="rsvp" data-e="${e.id}" data-k="guillermo"><span class="gav">G</span>Guillermo</button>` : ''}</div>`;
+}
+// Aviso positivo al dueño cuando su compañero toma lo suyo.
+function teamMsgs(now) {
+  const me = S.me, c = st.ctx();
+  return (c.claims || []).filter((cl) => cl.member_id !== me.id && (cl.status || 'activa') === 'activa').map((cl) => {
+    const v = c.videos.find((x) => x.id === cl.video_id);
+    if (!v || v.owner !== me.id) return null;
+    if (R.claimOf(v, cl.kind, c) !== cl) return null;
+    if (S.data.tasks.find((t) => t.video_id === v.id && t.kind === cl.kind)) return null;
+    const what = cl.kind === 'montaje' ? 'el montaje' : 'el ' + cl.kind;
+    return `Equipo que cumple: ${first(st.member(cl.member_id))} hará ${what} del video ${v.num} y ${cl.kind === 'montaje' ? 'la entrega' : 'el rodaje'} sigue en pie.`;
+  }).filter(Boolean);
+}
+const msgCard = (t) => `<section class="msgcard"><span class="tic" style="background:#1D2638">${icon.bell('#8AB4FF', 18)}</span><p>${esc(t)}</p></section>`;
+
+// ---------- 1.3 · Tarjeta de racha al cumplir (solo al rescatar o al terminar tu última entrega de la semana) ----------
+const LVBOX = { 0: ['#15161C', '#262830'], 1: ['#17130C', '#3A3220'], 2: ['#1C130A', '#4A3414'], 3: ['#0C1720', '#1E3A52'], 4: ['#160F22', '#3E2C63'] };
+const PHRASE = { 0: 'Cada entrega a tiempo suma.', 1: 'Buen comienzo: cada entrega a tiempo suma.', 2: 'Vas constante. ¡Sigue así!', 3: 'El equipo puede contar contigo.', 4: 'Imparable. Nada te detiene.' };
+function afterMark(v, k, cm, before) {
+  const c = st.ctx(v.project_id);
+  const now = new Date();
+  const after = R.streak(S.me.id, c, now).pts;
+  let rot = 0; try { rot = Number(localStorage.getItem('ra-rot') || 0); localStorage.setItem('ra-rot', String(rot + 1)); } catch (e) { /* */ }
+  if (cm && cm.claimed && PRE[k]) {
+    const T = ['¡Entregable rescatado!', 'Gracias a ti, el rodaje sigue en pie', `Salvaste el ${k} del video ${v.num}`];
+    ui.rpop = { title: T[rot % 3], from: before, to: after, chips: ['+' + R.PTS.rescue + ' rescate'] };
+    render(); return;
+  }
+  if (!PRE[k] || v.owner !== S.me.id) return;
+  const rod = R.rodajeOf(v, c);
+  if (!rod) return;
+  const mine = rod.video_ids.map((id) => c.videos.find((x) => x.id === id)).filter((x) => x && x.owner === S.me.id);
+  const allDone = mine.every((x) => { const s = R.videoState(x, c, now); return s.g && s.s; });
+  if (!allDone) return;
+  const mt = R.meetingOf(v, c);
+  const reu = R.streakEvents(S.me.id, c, now).filter((e) => /Punto de reunión/.test(e.why) && mine.some((x) => e.why.endsWith('video ' + x.num))).length;
+  const T = ['¡Entregables listos!', '¡Cumpliste!', '¡Listo para el rodaje!', 'Tu parte está completa'];
+  ui.rpop = { title: T[rot % 4], from: before, to: after, chips: ['+' + mine.length + ' a tiempo'].concat(reu && mt ? ['+' + reu + ' de reunión'] : []) };
+  render();
+}
+function rachaPop(P) {
+  const lvTo = R.level(P.to), lvFrom = R.level(P.from);
+  const lv = LVS[lvTo.name] || LVS.Cumplidor;
+  const box = LVBOX[lv.n] || LVBOX[1];
+  const up = (LVS[lvTo.name] || {}).n > (LVS[lvFrom.name] || {}).n;
+  const min = lvTo.min || 0; const nx = R.nextLevel(P.to);
+  const lit = nx ? Math.round((P.to - min) / (nx.min - min) * 10) : 10;
+  const lefts = [18, 70, 40, 82, 28, 58, 10, 48, 76];
+  const embers = Array.from({ length: lv.embers }, (_, i) => `<span class="ember" style="left:${lefts[i]}%;background:${i % 2 ? '#FFF1C2' : lv.color};animation-duration:${(1.4 + (i % 3) * 0.4).toFixed(1)}s;animation-delay:${(i * 0.23).toFixed(2)}s"></span>`).join('');
+  return `<div class="rpop" role="dialog" aria-label="${esc(P.title)}"><section style="background:${box[0]};border-color:${box[1]}">
+    <div class="rfire" style="width:120px;height:120px"><span class="rglow" style="background:${lv.color};width:96px;height:96px"></span>${up ? `<span class="rring" style="border-color:${lv.color}"></span>` : ''}${embers}
+      <div class="${up ? 'burst' : ''}">${icon.flame(lv.color, lv.size + 14).replace('class="flame"', `class="flame" style="transform-origin:50% 90%;animation:flick ${lv.speed} ease-in-out infinite"`)}</div></div>
+    <div><h2>${esc(up ? '¡Subiste a ' + lvTo.name + '!' : P.title)}</h2><p style="margin:6px 0 0;font-size:14px;color:${lv.text};line-height:1.4">${PHRASE[lv.n] || ''}</p></div>
+    <div class="row" style="gap:8px;align-items:baseline;justify-content:center"><b class="num" data-popcount="${P.to}" data-popfrom="${P.from}" style="font-size:52px;line-height:1;color:${lv.text}">${P.from}</b><span style="font-size:14px;color:${lv.text};opacity:.8">puntos</span><b class="num" style="margin-left:4px;font-size:18px;color:#C9F7E3">+${Math.max(0, P.to - P.from)}</b></div>
+    <span class="rlv" style="align-self:center;--lvc:${lv.color};--lvt:${lv.text};--lvchip:${LVCHIP[lv.n] || '#22242C'}">Nivel ${lv.n} · ${lvTo.name}</span>
+    <div class="rdots" style="width:100%">${Array.from({ length: 10 }, (_, i) => `<i style="background:${i < lit ? lv.color : 'rgba(255,255,255,.1)'}"></i>`).join('')}</div>
+    <div class="rchips">${P.chips.map((x) => `<span>${esc(x)}</span>`).join('')}</div>
+    <button class="hb x-ghost" data-act="popClose" style="color:#F4F4F5!important">Seguir</button></section></div>`;
+}
+function animatePop() {
+  const el = document.querySelector('[data-popcount]');
+  if (!el || el.dataset.done) return;
+  el.dataset.done = '1';
+  const to = Number(el.dataset.popcount), from = Number(el.dataset.popfrom);
+  const t0 = performance.now() + 450;
+  const step = (t) => { const k = Math.max(0, Math.min(1, (t - t0) / 1400)); const e = 1 - Math.pow(1 - k, 3); el.textContent = Math.round(from + (to - from) * e); if (k < 1 && document.body.contains(el)) requestAnimationFrame(step); };
+  requestAnimationFrame(step);
+}
+
 function vHome() {
   const me = S.me;
   const now = new Date();
@@ -382,7 +569,7 @@ function vHome() {
   // Los videos de un rodaje aún no habilitado se representan con el rodaje mismo.
   items = items.filter((x) => !(x.type === 'task' && x.kind === 'rodaje' && !x.cm.ok));
   const hero = heroOf(items, now);
-  const rest = items.filter((x) => x !== hero);
+  const rest = items.filter((x) => !hero || (x !== hero.item && !(hero.event && x.type === 'event' && x.event === hero.event)));
   const today = R.limaDate(now);
   const idx = (x) => { if (!x.due || x.urgent) return 0; const d = dayDiff(today, R.limaDate(x.due)); return d < 0 ? 0 : d > 4 ? 5 : d; };
   const days = [[], [], [], [], [], []];
@@ -392,6 +579,7 @@ function vHome() {
   const sel = Math.min(ui.day, nDays - 1);
   const pendCount = items.length;
   html += `<div class="between" style="margin-top:2px;align-items:baseline"><p class="num" style="margin:0;font-size:20px;font-weight:700">Te toca</p><span class="muted">${pendCount ? pendCount + (pendCount === 1 ? ' pendiente' : ' pendientes') : 'Todo al día'}</span></div>`;
+  html += teamMsgs(now).map(msgCard).join('');
   if (hero) html += heroCard(hero, now);
   const sq = Array.from({ length: nDays }, (_, i) => {
     const d = R.addDays(today, i);
@@ -417,7 +605,7 @@ function vHome() {
   const T = p.videos_total;
   const delivered = cnt((s) => s.delivered);
   const pct = Math.round(delivered / T * 100);
-  html += `<section class="meta"><div class="between" style="align-items:center"><span class="lbl" style="color:var(--amber)">Meta del equipo</span><div style="display:flex">${st.partners().map((m, i) => `<span style="margin-left:${i ? -8 : 0}px;border:2px solid var(--meta-bg);border-radius:50%">${av(m, 26)}</span>`).join('')}</div></div>
+  html += `<section class="meta"><div class="between" style="align-items:center"><span class="lbl" style="color:var(--meta-bar,var(--amber))">Meta del equipo</span><div style="display:flex">${st.partners().map((m, i) => `<span style="margin-left:${i ? -8 : 0}px;border:2px solid var(--meta-bg);border-radius:50%">${av(m, 26)}</span>`).join('')}</div></div>
     <div class="between" style="align-items:baseline"><b class="num" style="font-size:44px;line-height:1">${pct}%</b><span class="small" style="color:var(--meta-sub);text-align:right">${delivered} de ${T} videos<br>entregados al cliente</span></div>
     <div class="mbar"><div style="width:${pct}%"><span class="sheen"></span></div></div>
     <div class="mstats">
@@ -429,7 +617,7 @@ function vHome() {
   const total = myTotal(p);
   const prev = ui.wallet == null ? 0 : ui.wallet;
   ui.walletFrom = prev; ui.wallet = total;
-  html += `<section class="wallet"><div class="between" style="align-items:center"><span class="lbl" style="color:var(--mint)">En la billetera</span><span class="muted" style="color:var(--w-sub)">${icon.lock} Solo tú</span></div>
+  html += `<section class="wallet"><div class="between" style="align-items:center"><span class="lbl" style="color:var(--w-title,var(--mint))">En la billetera</span><span class="muted" style="color:var(--w-sub)">${icon.lock} Solo tú</span></div>
     <b class="num wmoney" data-wallet="${total.toFixed(2)}" data-from="${prev.toFixed(2)}">${R.money(prev)}</b>
     <p class="small" style="margin:0;color:var(--w-sub)">${esc(p.client)} · ${esc(p.name)} · se cobra al cerrar el proyecto</p></section>`;
   return html;
@@ -483,6 +671,92 @@ function vrow(v, c, now, stage) {
     <span class="vsteps">${steps.map(([sh, name, k]) => `<i class="vs vs-${k}" title="${name}">${k === 'ok' || k === 'late' ? icon.tick : sh}</i>`).join('')}</span>
     ${icon.chev}</a>`;
 }
+
+// ---------- Etapas 1.3 (N y O): cuadros de etapa, solo esta semana, confirmaciones que se minimizan ----------
+const STC = {
+  pre: { t: 'Preproducción', ic: 'pre', c: 'var(--st-pre-c)', solid: 'var(--st-pre)', bg: '#12271E', bd: '#2F6B4F' },
+  rod: { t: 'Rodaje', ic: 'prod', c: 'var(--st-rod-c)', solid: 'var(--st-rod)', bg: '#2A2416', bd: '#6B4A1A' },
+  post: { t: 'Posproducción', ic: 'post', c: 'var(--st-post-c)', solid: 'var(--st-post)', bg: '#2A1810', bd: '#6B3A22' }
+};
+const DOWL = ['DOM', 'LUN', 'MAR', 'MIÉ', 'JUE', 'VIE', 'SÁB'];
+const calTile = (iso, cls) => { const d = R.limaDate(iso); const dt = new Date(d + 'T12:00:00-05:00'); return `<span class="calt ${cls}"><small>${DOWL[dt.getUTCDay()]}</small><b>${Number(d.slice(8, 10))}</b></span>`; };
+// Rodaje de "esta semana": el próximo (o el de hoy) que aún tiene algo por grabar.
+function weekRodaje(c, now) {
+  const today = R.limaDate(now);
+  const rods = c.events.filter((e) => e.kind === 'rodaje' && active(e)).sort(byStart);
+  return rods.find((e) => R.limaDate(e.starts_at) >= today) || null;
+}
+function meetingFor(rod) { return rod ? S.data.events.filter((x) => x.kind === 'reunion' && x.rodaje_id === rod.id && active(x)).sort(byStart).pop() || null : null; }
+// Avatares con su respuesta (✓ va · ✗ no va · G Guillermo).
+function whoMini(e, c) {
+  return st.partners().map((m) => {
+    const r = R.rsvpOf(e, m.id, c);
+    const dot = r.k === 'voy' ? `<i style="background:#133626">${icon.tick.replace('width="13" height="13"', 'width="8" height="8"').replace('currentColor', '#6EE7B7')}</i>` : r.k === 'no' ? '<i style="background:#2A1212;color:#FF8A7A;font-size:9px;font-weight:700">×</i>' : r.k === 'guillermo' ? '<i style="background:#C9B2FF;color:#160F22;font-size:8px;font-weight:700">G</i>' : '<i style="background:#22242C"></i>';
+    return `<span class="avd">${av(m, 28)}${dot}</span>`;
+  }).join('');
+}
+// Tarjeta de confirmación (reunión o rodaje). Al responder se minimiza; al tocarla se abre.
+function confCard(e, now, bare) {
+  const c = st.ctx(e.project_id);
+  const me = S.me;
+  const isR = e.kind === 'rodaje';
+  const cls = isR ? 'rod' : 'pre';
+  const rs = R.rsvpState(e, me.id, c, now);
+  const start = new Date(e.starts_at);
+  const open = (ui.evOpen || {})[e.id];
+  const started = now >= new Date(start.getTime() - R.RULES.open * 60000);
+  const rod = isR ? null : S.data.events.find((x) => x.id === e.rodaje_id);
+  const title = isR ? `Rodaje · ${R.limaTime(start)}` : `Reunión · ${R.fmtDay(R.limaDate(start))}, ${R.limaTime(start)}`;
+  const sub = isR ? evTitle(e, c).vt || 'Sin videos aún' : rod ? 'Para el rodaje del ' + R.fmtDay(R.limaDate(rod.starts_at)) : '';
+  const ic = stageIc(isR ? 'prod' : 'pre', 20);
+  const go = (primary) => `<a class="hb ${primary ? 'x-amber' : 'x-ghost'}" href="#/e/${e.id}" style="font-size:15px">${goTxt(e)}${arrow}</a>`;
+  const o = otherPartner();
+  const ask = isPartner(me) && rs.open && (!rs.k || open === 'ask');
+  // Minimizada: ya respondió (o ya no hay nada que responder) y no la abrió.
+  if (!ask && !rs.missed && !open && !started && !bare) {
+    return `<button class="evmin ${cls}" data-act="evToggle" data-e="${e.id}" aria-expanded="false">${calTile(e.starts_at, cls)}
+      <span style="flex:1;min-width:0"><b style="display:block;font-size:14px">${title}</b><span class="muted" style="display:block;margin-top:2px">${sub}</span></span>
+      <span class="row" style="gap:4px">${whoMini(e, c)}</span>${icon.down}</button>`;
+  }
+  let body = '';
+  if (ask) {
+    const pl = rsvpLabel(e, o, c, now);
+    body = `<div style="display:flex;flex-direction:column;gap:8px"><div class="row" style="gap:8px"><span class="confbadge">CONFIRMA</span><b class="num" style="font-size:17px">¿Asistirás?</b></div>
+      ${o ? `<div class="partner ${pl.cls}">${av(o, 24)}<span>${pl.t}</span></div>` : ''}
+      <p class="muted" style="margin:0;font-weight:600">Confirma hasta ${R.fmtWhen(rs.due)}</p>${rsvpButtons(e, !isR && now < start)}</div>`;
+  } else if (rs.missed && !rs.k) {
+    const msg = `Hola ${o ? first(o) : ''}, sobre ${isR ? 'el rodaje' : 'la reunión'} del ${R.fmtWhen(e.starts_at)}: `;
+    body = `<div class="missrow">${icon.bell('#FF8A7A', 18)}<p>No confirmaste. Avisa por WhatsApp a tu compañero si asistirás o no.</p><span class="pts-neg">−2</span></div>
+      <a class="hb x-green" href="${st.waLink(o, msg)}" target="_blank" rel="noopener" style="font-size:14px">${waIc}Escribir a ${o ? first(o) : 'tu compañero'} por WhatsApp</a>${go(started)}`;
+  } else {
+    const k = rs.k;
+    const t = k === 'voy' ? 'Vas' : k === 'no' ? (isR ? 'No podrás ir' : 'No irás') : k === 'guillermo' ? 'Va Guillermo por ti' : 'Sin respuesta';
+    const SH = { voy: 'Va', no: 'No va', g: 'Guillermo' };
+    body = `<div class="row" style="gap:8px">${st.partners().map((m) => { const l = rsvpLabel(e, m, c, now); return `<span class="partner ${m.id === me.id ? (k === 'voy' ? '' : 'wait') : l.cls}" style="flex:1">${av(m, 22)}<span>${m.id === me.id ? t : (SH[l.k] || 'Sin respuesta')}</span></span>`; }).join('')}</div>
+      <div class="row" style="gap:8px"><span style="flex:1">${go(k === 'voy' || started)}</span>${rs.open && isPartner(me) ? `<button class="btn sm b-ghost" data-act="rsvpChange" data-e="${e.id}" style="min-height:52px">Cambiar</button>` : ''}</div>
+      ${rs.open ? `<p class="muted" style="margin:0;font-weight:600">Puedes cambiar hasta ${R.fmtWhen(rs.due)}</p>` : ''}`;
+  }
+  if (bare) return `<section class="evcard ${rs.missed && !rs.k ? 'late' : cls}">${body}</section>`;
+  return `<section class="evcard ${rs.missed && !rs.k ? 'late' : cls}">
+    <div class="row" style="gap:12px">${calTile(e.starts_at, cls)}<div style="flex:1;min-width:0"><b style="display:block;font-size:15px">${title}</b><span class="muted" style="display:block;margin-top:2px">${sub}</span></div>
+    ${open && !ask ? `<button class="ibtn" data-act="evToggle" data-e="${e.id}" aria-label="Minimizar" style="transform:rotate(180deg)">${icon.down}</button>` : ''}</div>${body}</section>`;
+}
+// Línea de avance de un video: guion, storyboard, cámara, tijera, estrella.
+function vTrack(v, c, now) {
+  const s = R.videoState(v, c, now);
+  const steps = [['g', 'pre'], ['s', 'pre'], ['r', 'prod'], ['mo', 'post'], ['ac', 'star']];
+  let cur = steps.findIndex(([k]) => !s[k]);
+  return `<div class="vtrack" aria-hidden="true">${steps.map(([k, ic], i) => {
+    const done = !!s[k];
+    const miss = !done && ((k === 'g' || k === 's') && s.d.preDue && now > s.d.preDue || (k === 'mo' && s.montajeMissed));
+    const isCur = i === cur;
+    const bg = done ? '#12271E' : miss ? '#2A1212' : 'transparent';
+    const ring = done ? '#2F6B4F' : miss ? '#FF6B5B' : isCur ? '#FFB547' : '#3A3D46';
+    const col = done ? '#6EE7B7' : miss ? '#FF9B8F' : isCur ? '#FFB547' : '#5A5D67';
+    const svg = (ic === 'pre' ? icon.pen(col, 14) : ic === 'prod' ? icon.cam(col, 14) : ic === 'post' ? icon.cut(col, 14) : icon.star(col, 14));
+    return `<div style="flex:${i < 4 ? 1 : 0}"><span class="tc" style="background:${bg};border-color:${ring};border-style:${done || miss || isCur ? 'solid' : 'dashed'}">${svg}</span>${i < 4 ? `<span class="tl" style="background:${done ? '#2F6B4F' : '#2C2F38'}"></span>` : ''}</div>`;
+  }).join('')}</div>`;
+}
 function vEtapas() {
   const p = st.project();
   if (!p) return `<div class="card">${banner('wait', 'Sin proyecto', 'Crea un proyecto para empezar.')}${isAdminBtn('<a class="btn b-amber" href="#/proyecto/nuevo">Crear proyecto</a>')}</div>`;
@@ -491,52 +765,115 @@ function vEtapas() {
   const tab = ui.stage || 'pre';
   const open = p.status === 'abierto';
   const left = p.videos_total - c.videos.length;
-  const byStart = (a, b) => new Date(a.starts_at) - new Date(b.starts_at);
+  const items = pending(now);
+  const nOf = (k) => items.filter((x) => (x.type === 'task' && stageOf(x) === (k === 'rod' ? 'prod' : k) && (x.cm.ok || x.cm.claim)) || (x.event && x.event.kind === (k === 'pre' ? 'reunion' : k === 'rod' ? 'rodaje' : '-'))).length;
   const vOf = (ids) => ids.map((id) => c.videos.find((v) => v.id === id)).filter(Boolean).sort((a, b) => a.num - b.num);
-  const rods = c.events.filter((e) => e.kind === 'rodaje').sort(byStart);
-  const week = (rod) => { const act = rods.filter(active); const i = act.indexOf(rod); return i === -1 ? null : i + 1; };
-  const group = (k, title, sub, chip, rows, extra = '', dim = false) => `<section class="vgroup${dim ? ' dim' : ''}"><div class="vghead"><span class="tic tint-${k}">${stageIc(k, 17)}</span><div style="flex:1;min-width:0"><b class="num" style="font-size:16px">${title}</b>${sub ? `<p class="muted" style="margin:1px 0 0">${sub}</p>` : ''}</div>${chip}</div>${rows}${extra}</section>`;
-  const chip = (t, k) => `<span class="gchip g-${k}">${t}</span>`;
-  const evState = (e) => e.status === 'cancelado' ? chip('Cancelado', 'past') : e.status === 'reprogramado' ? chip('Reprogramado', 'past') : e.kind === 'reunion' && e.ended_at ? chip('Finalizada', 'done') : e.kind === 'reunion' && R.meetingOpen(e, now) ? chip('En curso', 'live') : new Date(e.starts_at) < now ? chip(e.kind === 'rodaje' ? 'Pasó' : 'Pasó', 'past') : R.band(new Date(e.starts_at), now) <= 1 ? chip(R.limaDate(e.starts_at) === R.limaDate(now) ? 'Hoy' : 'Pronto', 'live') : chip('Programado', 'next');
-  let html = `<div class="between" style="align-items:center"><div><h1 style="font-size:28px">Etapas</h1><p class="sub" style="margin:2px 0 0">${c.videos.length} de ${p.videos_total} videos repartidos</p></div>${open && left > 0 ? `<a class="btn sm b-amber" href="#/semana">${icon.plus}Programar semana</a>` : ''}</div>`;
-  html += `<div class="stabs" role="tablist">${[['pre', 'Preproducción', 'pre'], ['rod', 'Rodaje', 'prod'], ['post', 'Posproducción', 'post']].map(([k, t, ic]) => `<button role="tab" aria-selected="${tab === k}" class="${tab === k ? 'on' : ''}" data-act="stage" data-k="${k}">${stageIc(ic, 20)}<span>${t}</span></button>`).join('')}</div>`;
+  let html = `<div class="between" style="align-items:center"><h1 style="font-size:28px">Etapas</h1>${open && left > 0 && isPartner(S.me) ? `<a class="btn sm x-amber" href="#/semana" style="border-radius:13px">${icon.plus}Programar semana</a>` : ''}</div>`;
+  html += `<div class="stiles" role="tablist" aria-label="Etapa">${['pre', 'rod', 'post'].map((k) => {
+    const T = STC[k]; const on = k === tab; const n = nOf(k);
+    return `<button role="tab" aria-selected="${on}" class="stile" data-act="stage" data-k="${k}" style="background:color-mix(in srgb,${T.solid} ${on ? 'var(--st-on)' : 'var(--st-off)'},transparent);border-color:color-mix(in srgb,${T.c} ${on ? '100%' : 'var(--st-bdop)'},transparent);color:${on ? 'var(--st-fg-on)' : 'var(--tx)'};box-shadow:${on ? '0 10px 24px -10px ' + T.c : 'none'}">
+      ${(T.ic === 'pre' ? icon.pen : T.ic === 'prod' ? icon.cam : icon.cut)(on ? 'var(--st-fg-on)' : T.c, 26).replace(/stroke="(var\([^)]*\))"/, 'stroke="currentColor" style="color:$1"')}<span>${T.t}</span>${n ? `<b class="sn" style="background:${on ? 'var(--st-fg-on)' : 'var(--u0)'};color:${on ? T.solid : '#FFFFFF'}">${n}</b>` : ''}</button>`;
+  }).join('')}</div>`;
   html += `<div class="legend wrapl"><span><i class="vs vs-ok mini">${icon.tick}</i>Hecho</span><span><i class="vs vs-late mini"></i>Tarde</span><span><i class="vs vs-p mini"></i>Pendiente</span><span>${st.partners().map((m) => { const col = COLOR[m.role]; return `<i class="vins mini" style="background:${col[0]};color:${col[1]}">${esc(ini(m.name)).charAt(0)}</i>`; }).join('')}de quién es</span></div>`;
+  const rod = weekRodaje(c, now);
+  const pastBtn = (t, n, href, k) => `<${href ? `a href="${href}"` : `button data-act="pastToggle" data-k="${k}"`} class="pastbtn">${icon.hist.replace('width="22" height="22"', 'width="18" height="18"')}${t}<span class="cnt">${n}</span>${icon.chev}</${href ? 'a' : 'button'}>`;
   if (tab === 'pre') {
-    const meets = c.events.filter((e) => e.kind === 'reunion').sort(byStart).reverse();
-    if (!meets.length) html += `<div class="card"><p class="empty">Todavía no hay reuniones. Usa "Programar semana": primero el rodaje, luego la reunión.</p></div>`;
-    for (const e of meets) {
-      const rod = S.data.events.find((x) => x.id === e.rodaje_id);
-      const w = rod ? week(rod) : null;
-      const vs = vOf(e.video_ids);
-      html += group('pre', `${w ? 'Semana ' + w + ' · ' : ''}reunión ${R.fmtDay(R.limaDate(e.starts_at))}`, rod ? 'Para el rodaje del ' + R.fmtWhen(rod.starts_at) : 'Sin rodaje', evState(e),
-        vs.map((v) => vrow(v, c, now, 'pre')).join(''),
-        !vs.length && active(e) && open && rod ? `<a class="dashadd" href="#/semana/${rod.id}">${icon.plus}Repartir los videos de esta semana</a>` : '', !active(e) || !!e.ended_at);
+    const nextMt = c.events.filter((e) => e.kind === 'reunion' && active(e) && !e.ended_at && R.meetingEnd(e) > now).sort(byStart)[0];
+    const mt = nextMt || meetingFor(rod);
+    const rodM = mt ? S.data.events.find((x) => x.id === mt.rodaje_id) || rod : rod;
+    html += `<div class="between" style="align-items:baseline"><b class="num" style="font-size:20px">Esta semana</b><span class="muted">${rodM ? evTitle(rodM, c).vt.replace(/^v/, 'V') : ''}</span></div>`;
+    if (!rodM) html += `<div class="card"><p class="empty">${isPartner(S.me) && open ? 'No hay rodaje programado. Usa "Programar semana": primero el rodaje, luego la reunión.' : 'No hay nada programado esta semana.'}</p></div>`;
+    else if (!mt) html += `<div class="card"><p class="empty">Este rodaje todavía no tiene reunión de preproducción.</p></div>`;
+    else {
+      html += confCard(mt, now);
+      const vs = vOf(mt.video_ids.length ? mt.video_ids : rodM.video_ids);
+      html += `<div class="slots">${vs.length ? vs.map((v) => { const s = R.videoState(v, c, now); const done = s.g && s.s; const miss = !done && s.d.preDue && now > s.d.preDue; return `<a class="slot ${done ? 'ok' : miss ? 'miss' : 'p'}" href="#/v/${v.id}"><small>VIDEO</small><b>${v.num}</b></a>`; }).join('') : Array.from({ length: Math.min(4, Math.max(left, 0)) }, (_, i) => `<span class="slot empty"><small>VIDEO</small><b>${c.videos.length + i + 1}</b></span>`).join('')}</div>`;
+      const faltan = c.videos.filter((v) => { const s = R.videoState(v, c, now); return !s.r && !(s.g && s.s) && s.d.preDue && now > s.d.preDue; });
+      html += faltan.map((v) => vrow(v, c, now, 'pre')).join('');
     }
-    const loose = c.videos.filter((v) => !R.meetingOf(v, c));
-    if (loose.length) html += group('pre', 'Sin reunión', '', '', loose.map((v) => vrow(v, c, now, 'pre')).join(''));
+    const pastM = c.events.filter((e) => e.kind === 'reunion' && (!mt || e.id !== mt.id) && (e.ended_at || !active(e) || new Date(e.starts_at) < now)).sort(byStart).reverse();
+    if (pastM.length) {
+      html += pastBtn('Reuniones pasadas', pastM.length, null, 'pre');
+      if ((ui.past || {}).pre) html += pastM.map((e) => `<section class="vgroup dim"><div class="vghead"><span class="tic tint-pre">${stageIc('pre', 17)}</span><div style="flex:1;min-width:0"><b class="num" style="font-size:15px">${R.fmtDay(R.limaDate(e.starts_at))} · ${evTitle(e, c).vt}</b></div><a href="#/e/${e.id}" class="gchip g-done" style="text-decoration:none">${e.ended_at ? 'Finalizada' : !active(e) ? 'Cancelada' : 'Pasó'}</a></div>${vOf(e.video_ids).map((v) => vrow(v, c, now, 'pre')).join('')}</section>`).join('');
+    }
   } else if (tab === 'rod') {
-    if (!rods.length) html += `<div class="card"><p class="empty">Todavía no hay rodajes.</p></div>`;
-    for (const e of rods.slice().reverse()) {
-      const vs = vOf(e.video_ids);
-      html += group('prod', `Rodaje ${R.fmtWhen(e.starts_at)}${wasReprogrammed(e) ? ' <em class="tag-red">Reprogramado</em>' : ''}`, `${vs.length} videos · tolerancia hasta ${R.limaTime(new Date(new Date(e.starts_at).getTime() + e.tolerance_min * 60000))}`, `<a href="#/e/${e.id}" style="text-decoration:none">${evState(e)}</a>`,
-        vs.map((v) => vrow(v, c, now, 'rod')).join('') + (vs.length ? `<a class="dashadd solid" href="#/e/${e.id}">${icon.cam('var(--c-prod)', 16)}Abrir rodaje: llegadas y grabación</a>` : ''),
-        !vs.length && active(e) && open ? `<a class="dashadd" href="#/semana/${e.id}">${icon.plus}Repartir los videos de esta semana</a>` : '', !active(e) || new Date(e.starts_at) < now && vs.every((v) => R.videoState(v, c, now).r));
+    html += `<div class="between" style="align-items:baseline"><b class="num" style="font-size:20px">Esta semana</b><span class="muted">${rod ? R.fmtWhen(rod.starts_at) : ''}</span></div>`;
+    if (!rod) html += `<div class="card"><p class="empty">No hay rodaje programado.</p></div>`;
+    else {
+      html += confCard(rod, now);
+      if (!(ui.evOpen || {})[rod.id] && !R.rsvpState(rod, S.me.id, c, now).missed) html += `<a class="hb x-amber" href="#/e/${rod.id}" style="font-size:15px">Abrir rodaje${arrow}</a>`;
+      html += vOf(rod.video_ids).map((v) => { const o = st.member(v.owner); const col = COLOR[o.role] || ['#22242C', '#C9C9D1']; const s = R.videoState(v, c, now); const miss = !s.g || (s.d.preDue && now > s.d.preDue && !s.s);
+        return `<a class="vcard13${miss ? ' miss' : ''}" href="#/v/${v.id}" style="text-decoration:none;color:inherit"><div class="vhead"><span class="vnum"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span class="vins" style="background:${col[0]};color:${col[1]}">${esc(ini(o.name)).charAt(0)}</span></span><span class="ttl"><p>${v.title ? esc(v.title) : 'Video ' + v.num}</p></span>${icon.chev}</div>${vTrack(v, c, now)}</a>`; }).join('');
     }
+    const pastR = c.events.filter((e) => e.kind === 'rodaje' && (!rod || e.id !== rod.id) && R.limaDate(e.starts_at) < R.limaDate(now)).length;
     const loose = c.videos.filter((v) => !R.rodajeOf(v, c) && !R.videoState(v, c, now).r);
-    if (loose.length) html += group('prod', 'Videos sin rodaje', 'Se cancelaron o reprogramaron', chip('Atención', 'live'), loose.map((v) => vrow(v, c, now, 'rod')).join(''), open ? `<button class="btn sm b-amber" data-act="newRod" style="align-self:stretch">Programar rodaje para estos videos</button>` : '');
+    if (loose.length) html += `<section class="vgroup"><div class="vghead"><span class="tic tint-prod">${stageIc('prod', 17)}</span><div style="flex:1"><b class="num" style="font-size:16px">Videos sin rodaje</b><p class="muted" style="margin:1px 0 0">Se cancelaron o reprogramaron</p></div></div>${loose.map((v) => vrow(v, c, now, 'rod')).join('')}${open && isPartner(S.me) ? `<button class="btn sm x-amber" data-act="newRod" style="align-self:stretch">Programar rodaje para estos videos</button>` : ''}</section>`;
+    if (pastR) html += pastBtn('Rodajes pasados', pastR, '#/rodajes');
   } else {
-    const all = c.videos.slice();
-    const states = new Map(all.map((v) => [v.id, R.videoState(v, c, now)]));
-    const nextDue = (v) => { const s = states.get(v.id); return s.mo ? s.d.finalDue : (s.d.montajeDue || s.d.finalDue); };
-    const done = all.filter((v) => states.get(v.id).ac).sort((a, b) => a.num - b.num);
-    const pend = all.filter((v) => !states.get(v.id).ac).sort((a, b) => nextDue(a) - nextDue(b));
-    const soon = pend.filter((v) => states.get(v.id).r && R.band(nextDue(v), now) <= 1 || states.get(v.id).montajeMissed);
-    const later = pend.filter((v) => soon.indexOf(v) === -1);
-    if (!all.length) html += `<div class="card"><p class="empty">Todavía no hay videos.</p></div>`;
-    if (soon.length) html += group('post', 'Entregas de estos días', 'Montaje y video final', chip('Urgente', 'live'), soon.map((v) => vrow(v, c, now, 'post')).join(''));
-    if (later.length) html += group('post', 'Próximas', 'Se habilitan después del rodaje', chip('Con tiempo', 'next'), later.map((v) => vrow(v, c, now, 'post')).join(''));
-    if (done.length) html += group('post', 'Entregados al cliente', '', chip(done.length + (done.length === 1 ? ' video' : ' videos'), 'done'), done.map((v) => vrow(v, c, now, 'post')).join(''), '', true);
+    html += vPost(c, now);
   }
+  return html;
+}
+// Posproducción (O): montaje y video final por video, con el apoyo y el "Tomar" del 5.7.
+function vPost(c, now) {
+  const me = S.me;
+  const shot = c.videos.filter((v) => R.videoState(v, c, now).r);
+  const last = c.events.filter((e) => e.kind === 'rodaje' && active(e) && new Date(e.starts_at) <= now).sort(byStart).pop();
+  const weekIds = last ? last.video_ids : [];
+  const weekV = c.videos.filter((v) => weekIds.indexOf(v.id) !== -1).sort((a, b) => a.num - b.num);
+  const older = shot.filter((v) => weekIds.indexOf(v.id) === -1 && !R.videoState(v, c, now).ac).sort((a, b) => a.num - b.num);
+  const delivered = shot.filter((v) => weekIds.indexOf(v.id) === -1 && R.videoState(v, c, now).ac).sort((a, b) => b.num - a.num);
+  const ent = weekV.filter((v) => R.videoState(v, c, now).ac).length;
+  let html = '';
+  if (weekV.length) html += `<section class="card postweek" style="gap:10px"><div class="between"><b class="num" style="font-size:18px">Esta semana</b><b class="num" style="font-size:15px">${ent}<span class="muted" style="font-size:15px"> / ${weekV.length} entregados</span></b></div>
+    <div class="ebar" style="background:color-mix(in srgb,var(--st-post) 18%,transparent)"><i style="width:${Math.round(ent / weekV.length * 100)}%;background:#FF8A65"></i></div><span class="muted">Rodaje del ${R.fmtDay(R.limaDate(last.starts_at))} · ${evTitle(last, c).vt}</span></section>`;
+  else html += `<div class="card"><p class="empty">Todavía no hay videos grabados.</p></div>`;
+  html += teamMsgs(now).filter((t) => /montaje/.test(t)).map(msgCard).join('');
+  const card = (v) => {
+    const s = R.videoState(v, c, now);
+    const o = st.member(v.owner);
+    const col = COLOR[o.role] || ['#22242C', '#C9C9D1'];
+    const tile = (k) => {
+      const t = s[KEY[k]];
+      const name = k === 'montaje' ? 'Montaje' : 'Video final';
+      const ic = k === 'montaje' ? icon.cut('currentColor', 18) : icon.star('currentColor', 18);
+      if (t) { const mine = t.done_by === me.id; return `<div class="tile ${mine ? 'mine' : 'other'}"><span class="tt">${ic}<b>${name}</b><span class="ck">${icon.tick}</span></span><small>Hecho ${R.fmtWhen(t.done_at)}</small></div>`; }
+      if (!s.r) return `<div class="tile lock"><span class="tt">${ic}<b>${name}</b>${icon.lock}</span><small>Después del rodaje</small></div>`;
+      if (k === 'acabado' && !s.mo) return `<div class="tile lock"><span class="tt">${ic}<b>${name}</b>${icon.lock}</span><small>Después del montaje</small></div>`;
+      const cm = R.canMark(v, k, me, c, now);
+      const due = k === 'montaje' ? (s.d.montajeDue || s.d.finalDue) : s.d.finalDue;
+      if (cm.claim) return `<button class="tile take" data-act="claim" data-v="${v.id}" data-k="${k}"><span class="tt">${ic}<b>${name}</b></span><small>Tomar</small></button>`;
+      if (cm.ok) return `<button class="tile todo post" data-act="quick" data-v="${v.id}" data-k="${k}"><span class="tt">${ic}<b>${name}</b></span><small>${cm.claimed ? 'Tomado · hasta ' + R.fmtWhen(cm.limit) : 'Hasta ' + R.fmtWhen(due)}</small></button>`;
+      if (k === 'montaje' && s.montajeMissed) { const cl = R.claimOf(v, 'montaje', c); return `<div class="tile ${cl ? 'by' : 'late'}"><span class="tt">${ic}<b>${name}</b></span><small>${cl ? 'Lo hará ' + first(st.member(cl.member_id)) : 'Venció ' + R.fmtWhen(due)}</small></div>`; }
+      const who = k === 'acabado' && o.apoyo ? st.admin() : o;
+      return `<div class="tile wait"><span class="tt">${ic}<b>${name}</b></span><small>${first(who || o)} · hasta ${R.fmtWhen(due)}</small></div>`;
+    };
+    const passed = s.montajeMissed || s.reassigned;
+    const apoyo = o.apoyo ? `<p class="muted" style="margin:-4px 0 0;font-weight:600;${passed ? 'color:var(--b-fg)' : ''}">${passed ? 'Pasó a ' + first(st.admin() || { name: 'el administrador' }) + ' · montaje y final' : me.id === v.owner ? 'Apoyo · ' + first(st.admin() || { name: 'el administrador' }) + ' hace tu final; el pago es tuyo' : 'Apoyo · el pago del final es de ' + first(o)}</p>` : '';
+    return `<section class="vcard13${s.ac ? ' good' : s.montajeMissed && !s.mo ? ' miss' : ''}"><div class="vhead"><a class="vnum" href="#/v/${v.id}" style="text-decoration:none;color:inherit"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span class="vins" style="background:${col[0]};color:${col[1]}">${esc(ini(o.name)).charAt(0)}</span></a><span class="ttl"><p>${v.title ? esc(v.title) : 'Video ' + v.num}</p><span style="color:${s.ac ? 'var(--mint)' : '#B79C8F'}">Publica ${R.fmtDay(v.publish_date)}</span></span>${s.ac ? `<span class="chip13 ok">${icon.star('currentColor', 12)}Entregado</span>` : ''}</div>
+      <div class="tiles">${tile('montaje')}${tile('acabado')}</div>${apoyo}</section>`;
+  };
+  html += weekV.map(card).join('') + older.map(card).join('');
+  if (delivered.length) {
+    html += `<button class="pastbtn" data-act="pastToggle" data-k="post">${icon.star('#FF8A65', 18)}Entregados al cliente<span class="cnt">${delivered.length}</span>${icon.chev}</button>`;
+    if ((ui.past || {}).post) html += `<section class="tlist" style="padding:4px 14px">${delivered.map((v) => vrow(v, c, now, 'post')).join('')}</section>`;
+  }
+  return html;
+}
+// Rodajes pasados: cada rodaje plegado; al tocarlo se abre con llegadas y chips.
+function vRodajesPasados() {
+  const c = st.ctx();
+  const now = new Date();
+  const rods = c.events.filter((e) => e.kind === 'rodaje' && R.limaDate(e.starts_at) < R.limaDate(now)).sort(byStart).reverse();
+  let html = `${backTo('#/videos', 'Etapas')}<h1>Rodajes pasados</h1>`;
+  if (!rods.length) return html + '<div class="card"><p class="empty">Todavía no hay rodajes pasados.</p></div>';
+  html += rods.map((e) => {
+    const vs = e.video_ids.map((id) => c.videos.find((v) => v.id === id)).filter(Boolean).sort((a, b) => a.num - b.num);
+    const n = vs.filter((v) => R.videoState(v, c, now).r).length;
+    const openE = (ui.past || {})['r' + e.id];
+    return `<section class="vcard13"><button class="evmin rod" data-act="pastToggle" data-k="r${e.id}" style="border:none;padding:0;background:transparent">${calTile(e.starts_at, 'rod')}<span style="flex:1;min-width:0"><b style="display:block">${R.fmtWhen(e.starts_at)}${!active(e) ? ' · ' + (e.status === 'reprogramado' ? 'reprogramado' : 'cancelado') : ''}</b><span class="row" style="gap:4px;margin-top:6px">${vs.map((v) => `<span class="slot ${R.videoState(v, c, now).r ? 'ok' : 'miss'}" style="flex:0 0 34px;min-height:34px"><b style="font-size:13px;margin:0">${v.num}</b></span>`).join('')}</span></span><b class="num">${n}/${vs.length}</b></button>
+      ${openE ? `<div class="list">${st.partners().map((m) => { const s = st.eventStatus(e, m.id, now); return `<div class="li">${av(m, 26)}<span class="t"><b>${esc(m.name)}</b></span>${attChip(s)}</div>`; }).join('')}</div>${vs.map((v) => { const s = R.videoState(v, c, now); return `<a class="li" href="#/v/${v.id}"><span class="t"><b>Video ${v.num}${v.title ? ' · ' + esc(v.title) : ''}</b></span><span class="chips"><span class="chip13 ${s.g ? 'ok' : 'no'}">Guion</span><span class="chip13 ${s.s ? (s.s.split ? 'blue' : 'ok') : 'no'}">${s.s && s.s.split ? 'Storyboard repartido' : 'Storyboard'}</span><span class="chip13 ${s.r ? 'ok' : 'no'}">${s.r ? 'Grabado' : 'Sin grabar'}</span></span></a>`; }).join('')}<a class="btn sm b-ghost" href="#/e/${e.id}">Ver rodaje</a>` : ''}</section>`;
+  }).join('');
   return html;
 }
 
@@ -633,10 +970,12 @@ function vVideo(id) {
       if (viaG) cm = hire.present === me.id ? R.canMark(v, k, me, c, now, { hire }) : { ok: false, why: isOwner ? 'Lo hace Guillermo (lo contrataste)' : `Lo hace ${first(st.member(hire.present))} con Guillermo` };
       else cm = R.canMark(v, k, me, c, now);
       if (!open) cm = { ok: false, why: 'Proyecto cerrado' };
-      if (cm.ok) right = `<button class="tbtn ${viaG ? 't-g' : cm.take ? 't-take' : 't-done'}" data-act="mark" data-v="${v.id}" data-k="${k}"${viaG ? ` data-h="${hire.id}"` : ''}>${viaG ? 'Con Guillermo' : cm.take ? 'Tomar' : 'Hecho'}</button>`;
-      else if (cm.gone) { right = `<span class="tbtn t-gone">Venció</span>`; sub = 'Venció ' + R.fmtWhen(due) + ' · pasó a tu compañero'; subC = 'u0'; }
+      if (cm.claim) { right = `<button class="tbtn t-take" data-act="claim" data-v="${v.id}" data-k="${k}">Tomar</button>`; sub = `Puedes tomarlo hasta ${R.fmtWhen(cm.limit)} · cobras al entregarlo`; subC = 'u0'; }
+      else if (cm.ok) right = `<button class="tbtn ${viaG ? 't-g' : 't-done'}" data-act="mark" data-v="${v.id}" data-k="${k}"${viaG ? ` data-h="${hire.id}"` : ''}>${viaG ? 'Con Guillermo' : 'Hecho'}</button>`;
+      else if (cm.gone) { const cl = R.claimOf(v, k, c); right = `<span class="tbtn t-gone">${cl ? 'Tomado' : 'Venció'}</span>`; sub = cl ? 'Lo hará ' + first(st.member(cl.member_id)) : 'Venció ' + R.fmtWhen(due) + ' · pasó a tu compañero'; subC = cl ? '' : 'u0'; }
+      else if (cm.noGuion && isPartner(me)) { right = `<button class="tbtn t-gone" data-act="reproVideo" data-v="${v.id}" style="cursor:pointer">Reprogramar</button>`; sub = 'Sin guion no se graba'; subC = 'u0'; }
       else { right = `<span class="tbtn t-lock">${icon.lock}${k === 'rodaje' && ev ? (R.limaDate(now) === R.limaDate(ev.starts_at) ? R.limaTime(new Date(new Date(ev.starts_at).getTime() - R.RULES.open * 60000)) : dowShort(ev.starts_at)) : 'Espera'}</span>`; if (cm.why) sub = esc(cm.why) + (due ? ' · ' + R.fmtWhen(due) : ''); dim = true; }
-      if (cm.take && cm.ok) { sub = `No llegó a tiempo · si lo haces, cobras tú`; subC = 'u0'; }
+      if (cm.claimed && cm.ok) { sub = `Lo tomaste · entrégalo antes de ${R.fmtWhen(cm.limit)}`; subC = 'u0'; }
     }
     return `<div class="trow"><span class="tic tint-${STAGE[k]}${dim ? ' dimmed' : ''}">${stageIc(STAGE[k])}</span><span class="ttx"><b${dim ? ' class="dim"' : ''}>${R.KIND_LABEL[k]} <span class="muted" style="font-weight:500">· ${R.money(rate[k])}</span></b><span class="${subC ? 'c-' + subC : ''}">${sub}</span></span>${right}</div>`;
   }).join('');
@@ -648,7 +987,7 @@ function vVideo(id) {
     <div style="flex:1;min-width:0"><b class="num" style="font-size:21px;line-height:1.2;display:block">${v.title ? esc(v.title) : 'Video ' + v.num}</b><p class="sub" style="margin:4px 0 0">De ${esc(o.name)} · publica ${R.fmtDay(v.publish_date)}</p>
     ${canTitle ? `<button class="linkbtn" data-act="title" data-v="${v.id}" style="margin-top:4px">${v.title ? 'Cambiar tema' : 'Ponerle tema'}</button>` : ''}</div></div>
     <div class="track" aria-label="Avance del video">${track}</div></section>
-  ${vs.montajeMissed && !vs.mo ? banner('bad', 'El montaje no llegó a tiempo', 'Según el punto 5.7, el administrador hace el montaje y el final, y cobra la posproducción de este video.') : ''}
+  ${vs.montajeMissed && !vs.mo ? banner('bad', 'El montaje no llegó a tiempo', 'Pasa al administrador (5.7): lo toma y hace el montaje y el final.') : ''}
   <section class="tlist" style="padding:4px 14px">${rows}</section>
   <p class="muted" style="margin:-6px 4px 0;line-height:1.45">Se marca en orden: guion y storyboard, luego el rodaje (el día del rodaje, con tu llegada confirmada), el montaje y el video final.</p>
   ${ev ? `<a class="btn b-ghost" href="#/e/${ev.id}">${icon.cam('var(--c-prod)', 16)}Ver rodaje · ${R.fmtWhen(ev.starts_at)}</a>` : ''}
@@ -656,71 +995,57 @@ function vVideo(id) {
 }
 
 // ---------- Reunión o rodaje ----------
+
+// ---------- 1.3 · Reunión por dentro (F + reparto G) y rodaje por dentro (G/H) ----------
 function vEvent(id) {
   const e = S.data.events.find((x) => x.id === id);
-  if (!e) return `<p class="empty">No encontrado.</p>`;
+  if (!e) return `${backTo('#/videos', 'Etapas')}<p class="empty">No encontrado.</p>`;
+  return e.kind === 'reunion' ? vMeeting(e) : vShoot(e);
+}
+// Llegadas de los dos (con la confirmación del administrador).
+function arrivalsRow(e, now) {
+  const c = st.ctx(e.project_id);
+  const h = st.hireFor(e.id);
+  return `<div class="row" style="gap:14px;flex-wrap:wrap">${st.partners().map((m) => {
+    if (h && h.hired_by === m.id) return `<span class="row" style="gap:8px"><span class="avd"><span class="av" style="width:30px;height:30px;background:#C9B2FF;color:#160F22">G</span></span><span class="small" style="font-weight:600;color:var(--v-fg)">Guillermo · por ${first(m)}</span></span>`;
+    const a = st.attOf(e.id, m.id);
+    const s = st.eventStatus(e, m.id, now);
+    const me = m.id === S.me.id;
+    const t = a && a.arrived_at ? (me ? 'Llegaste ' : 'Llegó ') + R.limaTime(a.arrived_at) : a && a.claimed_at ? 'Marcó ' + R.limaTime(a.claimed_at) + ' · por confirmar' : a && a.notice && a.notice.sent_at ? 'Avisó que no irá' : s.k === 'ausente' ? 'No llegó' : R.rsvpOf(e, m.id, c).k === 'voy' ? 'Confirmó · por llegar' : 'Por llegar';
+    const col = a && a.arrived_at ? '#6EE7B7' : a && a.claimed_at ? '#FFC978' : s.k === 'ausente' ? '#FF8A7A' : 'var(--tx4)';
+    return `<span class="row" style="gap:8px"><span class="avd">${av(m, 30)}<i style="background:${col}"></i></span><span class="small" style="font-weight:600;color:${col === 'var(--tx4)' ? 'var(--tx3)' : col}">${t}</span></span>`;
+  }).join('')}</div>`;
+}
+function adminConfirm(e) {
   const me = S.me;
-  const now = new Date();
+  if (me.role !== 'admin' || !active(e)) return '';
+  return S.data.attendance.filter((a) => a.event_id === e.id && a.claimed_at && !a.arrived_at && a.member_id !== me.id).map((a) => `<div class="card tight"><b>${esc(st.member(a.member_id).name)} marcó su llegada a las ${R.limaTime(a.claimed_at)}</b><div class="grid2"><button class="btn sm x-green" data-act="confirmArr" data-a="${a.id}" data-m="claimed">Sí, a las ${R.limaTime(a.claimed_at)}</button><button class="btn sm b-ghost" data-act="confirmArr" data-a="${a.id}" data-m="now">Llegó ahora</button></div></div>`).join('');
+}
+function myArrival(e, now) {
+  const myS = st.eventStatus(e, S.me.id, now);
+  if (!active(e) || myS.k !== 'pendiente' || !isPartner(S.me)) return '';
+  if (R.canCheckIn(e, now)) return `<button class="hb x-green" data-act="checkin" data-e="${e.id}">${pinIc}Llegué</button>`;
+  return '';
+}
+// Pequeños bloques de siempre: avisos del otro, fuerza mayor, Guillermo y opciones.
+function eventExtras(e, now) {
+  const me = S.me;
   const isRod = e.kind === 'rodaje';
-  const ps = st.partners();
   const c = st.ctx(e.project_id);
   const p = projOf(e.project_id);
   const open = p && p.status === 'abierto';
   const act = active(e);
   const myS = st.eventStatus(e, me.id, now);
-  const vids = e.video_ids.map((vid) => S.data.videos.find((v) => v.id === vid)).filter(Boolean).sort((a, b) => a.num - b.num);
   const start = new Date(e.starts_at);
   const tolEnd = new Date(start.getTime() + e.tolerance_min * 60000);
   const atts = S.data.attendance.filter((x) => x.event_id === e.id);
-  const someoneArrived = atts.some((a) => a.arrived_at || a.claimed_at);
-  const amHere = ['puntual', 'tarde'].indexOf(myS.k) !== -1;
-  let html = `${backTo('#/videos', 'Etapas')}
-  <div><div class="between"><p class="lbl" style="color:${isRod ? '#FFB547' : '#A9C7FF'}">${isRod ? 'Rodaje' : 'Reunión de preproducción'}${wasReprogrammed(e) ? ' <em class="tag-red">Reprogramado</em>' : ''}</p>${evChip(e, now)}</div><h1>${R.fmtWhen(e.starts_at)}</h1>
-  <p class="sub">Puntual hasta ${R.limaTime(new Date(start.getTime() + 600000))} · tolerancia hasta ${R.limaTime(tolEnd)}${isRod ? ` · avisos a tiempo hasta ${R.fmtWhen(R.noticeDeadline(e))}` : ''}</p></div>`;
-  if (e.status === 'reprogramado') { const nu = S.data.events.find((x) => x.id === e.replaced_by); html += banner('bad', 'Este rodaje se reprogramó', (nu ? 'Nueva fecha: ' + R.fmtWhen(nu.starts_at) + '. ' : '') + (e.cancel_note ? esc(e.cancel_note) : ''), nu ? `<a class="btn sm b-ghost" href="#/e/${nu.id}" style="margin-top:8px">Ver el nuevo rodaje</a>` : ''); }
-  if (e.status === 'cancelado') html += banner('bad', 'Cancelado', esc(e.cancel_note || ''));
-  if (!isRod && e.rodaje_id) { const r = S.data.events.find((x) => x.id === e.rodaje_id); if (r) html += `<a class="btn sm b-ghost" href="#/e/${r.id}" style="align-self:flex-start">Para el rodaje del ${R.fmtWhen(r.starts_at)}</a>`; }
-  // Asistencia
-  html += `<section class="card"><p class="lbl">Asistencia</p>${ps.map((m) => {
-    const a = st.attOf(e.id, m.id);
-    const s = st.eventStatus(e, m.id, now);
-    const extra = a && a.arrived_at ? 'Llegó ' + R.limaTime(a.arrived_at) + (a.confirmed_by ? ' · confirmó ' + first(st.member(a.confirmed_by)) : '')
-      : a && a.claimed_at ? 'Marcó su llegada a las ' + R.limaTime(a.claimed_at)
-      : a && a.notice && a.notice.sent_at ? 'Avisó ' + R.fmtWhen(a.notice.sent_at) + (a.notice.reason === 'fm' ? ' · fuerza mayor (' + esc(a.notice.fm_kind || '') + ')' : '') : '';
-    const confirm = me.role === 'admin' && act && a && a.claimed_at && !a.arrived_at && m.id !== me.id
-      ? `<div class="grid2" style="margin-top:8px"><button class="btn sm b-mint" data-act="confirmArr" data-a="${a.id}" data-m="claimed">Sí, llegó a las ${R.limaTime(a.claimed_at)}</button><button class="btn sm b-ghost" data-act="confirmArr" data-a="${a.id}" data-m="now">No, llegó ahora</button></div>` : '';
-    return `<div><div class="row">${av(m)}<div style="flex:1"><b>${esc(m.name)}</b><p class="muted" style="margin:2px 0 0">${extra}</p></div>${attChip(s)}${a && a.photo ? `<button class="btn sm b-ghost" data-act="photo" data-p="${esc(a.photo)}">Foto</button>` : ''}</div>${confirm}</div>`;
-  }).join('')}</section>`;
-  if (!isRod && act) html += guillermoBlock(e, myS, now);
-  // Mis acciones
-  if (act && myS.k === 'pendiente') {
-    if (R.canCheckIn(e, now)) html += `<button class="btn b-mint" data-act="checkin" data-e="${e.id}">Llegué</button><p class="muted" style="margin:-6px 0 0;text-align:center">${me.role === 'admin' || R.adminAbsent(e, c, now) ? 'Queda registrada con la hora de ahora.' : 'Queda con la hora de ahora y el administrador la confirma.'}</p>`;
-    else if (now < start) html += banner('wait', 'La llegada se marca desde las ' + R.limaTime(new Date(start.getTime() - 900000)), '15 minutos antes de la hora programada.');
-    if (now < tolEnd) html += `<button class="btn b-ghost" data-act="notice" data-e="${e.id}">No podré ir</button>`;
-  }
+  const vids = e.video_ids.map((vid) => S.data.videos.find((v) => v.id === vid)).filter(Boolean);
+  let html = '';
   if (act && myS.k === 'por_confirmar') html += banner('wait', 'Tu llegada espera confirmación', `La marcaste a las ${R.limaTime(st.attOf(e.id, me.id).claimed_at)}. Si el administrador la confirma, vale esa hora.`);
-  if (act && myS.k === 'ausente' && (!st.attOf(e.id, me.id) || !st.attOf(e.id, me.id).notice) && now - tolEnd < 24 * 3600000) {
-    html += `<button class="btn b-purple" data-act="notice" data-e="${e.id}" data-fm="1">Fue fuerza mayor</button><p class="muted" style="margin:-6px 0 0;text-align:center">Puedes marcarlo hasta 24 h después (7.9). Tu compañero tiene que aceptarlo.</p>`;
-  }
-  // Reunión: finalizar
-  if (!isRod && act) {
-    if (e.ended_at) html += banner('ok', 'Reunión finalizada · ' + R.limaTime(e.ended_at), 'Los guiones y storyboards terminados hasta esa hora sumaron +1 punto de reunión por video.');
-    else if (e.end_requested_at) {
-      if (me.role === 'admin') html += `<div class="card" style="border-color:#4A3414;background:#1C130A"><b>${esc(st.member(e.end_requested_by).name)} pidió finalizar a las ${R.limaTime(e.end_requested_at)}</b><p class="sub" style="margin:0">Si lo confirmas, la reunión queda finalizada a esa hora. Los puntos de reunión cuentan hasta ahí.</p><button class="btn b-amber" data-act="confirmEnd" data-e="${e.id}">Confirmar fin de la reunión</button></div>`;
-      else html += banner('wait', (e.end_requested_by === me.id ? 'Pediste' : esc(st.member(e.end_requested_by).name) + ' pidió') + ' finalizar a las ' + R.limaTime(e.end_requested_at), 'El administrador lo confirma. Los puntos de reunión cuentan hasta esa hora.');
-    } else if (R.meetingOpen(e, now)) {
-      html += banner('fm', '+1 punto de reunión por video', 'Termina el guion y el storyboard de cada video antes de finalizar la reunión y sumas un punto extra en tu racha.');
-      if (amHere || me.role === 'admin') {
-        const direct = me.role === 'admin' || R.adminAbsent(e, c, now);
-        html += `<button class="btn ${direct ? 'b-amber' : 'b-ghost'}" data-act="endMeeting" data-e="${e.id}">${direct ? 'Finalizar reunión' : 'Pedir finalizar la reunión'}</button>`;
-      }
-      html += `<p class="muted" style="margin:-6px 0 0;text-align:center">Si nadie la finaliza, se cierra sola a las ${R.limaTime(R.meetingEnd(e))} (6 h).</p>`;
-    }
-    const rod = S.data.events.find((x) => x.id === e.rodaje_id);
-    if (!e.video_ids.length && rod && open) html += `<a class="btn b-amber" href="#/semana/${rod.id}">Repartir videos</a>`;
-    if (e.ended_at && rod && active(rod) && open && now < R.preDueFor(rod.starts_at) && !S.data.events.some((x) => x.kind === 'reunion' && x.rodaje_id === rod.id && active(x) && !x.ended_at)) html += `<button class="btn b-ghost" data-act="extraMeet" data-r="${rod.id}">Agendar otra reunión para este rodaje</button>`;
-  }
-  // Avisos del otro por responder
+  const rs = R.rsvpState(e, me.id, c, now);
+  if (act && myS.k === 'pendiente' && !rs.open && R.rsvpOf(e, me.id, c).k !== 'no' && now < tolEnd && isPartner(me)) html += `<button class="btn b-ghost" data-act="notice" data-e="${e.id}">No podré ir</button>`;
+  if (act && myS.k === 'ausente' && (!st.attOf(e.id, me.id) || !st.attOf(e.id, me.id).notice) && now - tolEnd < 24 * 3600000) html += `<button class="btn x-violet" data-act="notice" data-e="${e.id}" data-fm="1">Fue fuerza mayor</button>`;
+  if (!isRod && act) html += guillermoBlock(e, myS, now);
   for (const a of atts.filter((x) => x.member_id !== me.id && x.notice && x.notice.sent_at)) {
     const who = st.member(a.member_id);
     const s = st.eventStatus(e, a.member_id, now);
@@ -728,38 +1053,172 @@ function vEvent(id) {
     if (n.decision) { html += banner('ok', `Respondiste el aviso de ${esc(who.name)}`, decisionText(n.decision)); continue; }
     if (!act) continue;
     const want = n.choice === 'other' ? 'Pide que grabes sus videos.' : n.choice === 'repro' ? 'Pide reprogramar.' : '';
-    if (n.reason === 'fm') html += `<div class="card" style="border-color:#3E2C63;background:#160F22"><b>${esc(who.name)} marcó fuerza mayor</b><p class="sub" style="margin:0">Motivo: ${esc(n.fm_kind || '')}. ${want} Si la aceptas, no cuenta como falta ni resta racha (7.9). El pago siempre es de quien hace el trabajo.</p><div class="grid2"><button class="btn b-purple" data-act="decide" data-a="${a.id}" data-d="accept">Acepto</button><button class="btn b-ghost" data-act="decide" data-a="${a.id}" data-d="talk">Conversarlo</button></div></div>`;
-    else if (!isRod) html += `<div class="card"><b>${esc(who.name)} ${s.k === 'cancel_ok' ? 'canceló a tiempo' : 'avisó fuera de plazo'}</b><p class="sub" style="margin:0">${s.k === 'cancel_ok' ? 'Cancelar con 24 h es su derecho: no resta racha.' : 'Avisó con menos de 24 h: le resta 3 puntos.'} Si quiere, puede contratar a Guillermo.</p><button class="btn b-amber" data-act="decide" data-a="${a.id}" data-d="ok">Entendido</button></div>`;
-    else if (s.k === 'cancel_ok') html += `<div class="card"><b>${esc(who.name)} canceló a tiempo</b><p class="sub" style="margin:0">${want} Avisó antes de las 18:00 del día anterior: es su derecho (7.8). Puedes reprogramar el día o grabar solo tus videos. Sus videos no los tomas sin su permiso.</p><div class="grid2"><button class="btn b-amber" data-act="reday" data-e="${e.id}" data-a="${a.id}">Reprogramar el día</button><button class="btn b-ghost" data-act="decide" data-a="${a.id}" data-d="own">Grabo solo los míos</button></div>${n.choice === 'other' ? `<button class="btn b-ghost" data-act="decide" data-a="${a.id}" data-d="record">Grabo también los suyos (me lo pidió)</button>` : ''}</div>`;
-    else html += `<div class="card" style="border-color:#4A3414;background:#1C130A"><b>${esc(who.name)} avisó fuera de plazo</b><p class="sub" style="margin:0">${want} Tú decides: reprogramar el día (los gastos extra van por su cuenta) o tomar el día completo y grabar también sus videos (te corresponde ese pago, 7.3).</p><div class="grid2"><button class="btn b-ghost" data-act="reday" data-e="${e.id}" data-a="${a.id}">Reprogramar el día</button><button class="btn b-amber" data-act="decide" data-a="${a.id}" data-d="record">Tomo el día completo</button></div></div>`;
+    if (n.reason === 'fm') html += `<div class="card" style="border-color:#3E2C63;background:#160F22"><b>${esc(who.name)} marcó fuerza mayor</b><p class="sub" style="margin:0">Motivo: ${esc(n.fm_kind || '')}. ${want}</p><div class="grid2"><button class="btn x-violet" data-act="decide" data-a="${a.id}" data-d="accept">Acepto</button><button class="btn b-ghost" data-act="decide" data-a="${a.id}" data-d="talk">Conversarlo</button></div></div>`;
+    else if (!isRod) html += `<div class="card"><b>${esc(who.name)} ${s.k === 'cancel_ok' ? 'avisó a tiempo que no irá' : 'avisó fuera de plazo'}</b><button class="btn x-amber" data-act="decide" data-a="${a.id}" data-d="ok">Entendido</button></div>`;
+    else if (s.k === 'cancel_ok') html += `<div class="card"><b>${esc(who.name)} avisó a tiempo que no irá</b><p class="sub" style="margin:0">${want} Puedes reprogramar el día o grabar solo tus videos.</p><div class="grid2"><button class="btn x-amber" data-act="reday" data-e="${e.id}" data-a="${a.id}">Reprogramar el día</button><button class="btn b-ghost" data-act="decide" data-a="${a.id}" data-d="own">Grabo solo los míos</button></div>${n.choice === 'other' ? `<button class="btn b-ghost" data-act="decide" data-a="${a.id}" data-d="record">Grabo también los suyos</button>` : ''}</div>`;
+    else html += `<div class="card" style="border-color:#4A3414;background:#1C130A"><b>${esc(who.name)} avisó fuera de plazo</b><p class="sub" style="margin:0">${want} Reprograma el día o toma el día completo.</p><div class="grid2"><button class="btn b-ghost" data-act="reday" data-e="${e.id}" data-a="${a.id}">Reprogramar el día</button><button class="btn x-amber" data-act="decide" data-a="${a.id}" data-d="record">Tomo el día completo</button></div></div>`;
   }
-  // Videos del rodaje
-  if (isRod && vids.length) {
-    html += `<section class="card" style="padding:12px 16px"><p class="lbl">Videos de este rodaje</p><div class="list">${vids.map((v) => {
-      const t = S.data.tasks.find((x) => x.video_id === v.id && x.kind === 'rodaje');
-      const o = st.member(v.owner);
-      let right = '', why = '';
-      if (t) right = `<span class="chip c-ok">Grabó ${first(st.member(t.done_by))}</span>`;
-      else if (act && open) {
-        const cm = R.canMark(v, 'rodaje', me, c, now);
-        if (cm.ok) right = `<button class="btn sm b-amber" data-act="quick" data-v="${v.id}" data-k="rodaje">${cm.take ? 'Lo grabé yo' : 'Grabado'}</button>`;
-        else { right = '<span class="chip c-mute">Pendiente</span>'; why = cm.why; }
-      } else right = '<span class="chip c-mute">—</span>';
-      return `<div class="li">${av(o, 26)}<span class="t"><b>Video ${v.num}</b><span>De ${esc(o.name)} · publica ${R.fmtDay(v.publish_date)}</span>${why ? `<span class="why">${icon.lock} ${esc(why)}</span>` : ''}</span>${right}</div>`;
-    }).join('')}</div>
-    ${act && open && now > start && vids.some((v) => !S.data.tasks.find((x) => x.video_id === v.id && x.kind === 'rodaje')) ? `<button class="btn b-ghost" data-act="repro" data-e="${e.id}">Reprogramar videos no grabados</button>` : ''}</section>`;
-  }
-  // Herramientas
-  if (act && open) {
+  if (act && open && isPartner(me)) {
     const tools = [];
     const anyShot = vids.some((v) => S.data.tasks.find((x) => x.video_id === v.id && x.kind === 'rodaje'));
+    if (isRod && now > start && vids.some((v) => !S.data.tasks.find((x) => x.video_id === v.id && x.kind === 'rodaje'))) tools.push(`<button class="btn b-ghost" data-act="repro" data-e="${e.id}">Reprogramar videos no grabados</button>`);
     if (isRod && !anyShot && (me.role === 'admin' || atts.some((a) => a.member_id !== me.id && a.notice && a.notice.sent_at))) tools.push(`<button class="btn b-ghost" data-act="reday" data-e="${e.id}">Reprogramar el rodaje completo</button>`);
+    const someoneArrived = atts.some((a) => a.arrived_at || a.claimed_at);
     if (me.role === 'admin' && !someoneArrived) tools.push(`<button class="btn b-ghost" data-act="moveEv" data-e="${e.id}">Cambiar fecha u hora</button>`);
     if (me.role === 'admin' && now < start) tools.push(`<button class="btn b-ghost" data-act="tol" data-e="${e.id}">Cambiar tolerancia (${e.tolerance_min} min)</button>`);
     if (me.role === 'admin' && !e.video_ids.length && !atts.length && !S.data.hires.some((h) => h.event_id === e.id)) tools.push(`<button class="btn b-red" data-act="delEv" data-e="${e.id}">Borrar ${isRod ? 'rodaje' : 'reunión'}</button>`);
     else if (me.role === 'admin') tools.push(`<button class="btn b-red" data-act="cancelEv" data-e="${e.id}">Cancelar ${isRod ? 'rodaje' : 'reunión'}</button>`);
+    if (!isRod && e.ended_at) { const rod = S.data.events.find((x) => x.id === e.rodaje_id); if (rod && active(rod) && now < R.preDueFor(rod.starts_at) && !S.data.events.some((x) => x.kind === 'reunion' && x.rodaje_id === rod.id && active(x) && !x.ended_at)) tools.push(`<button class="btn b-ghost" data-act="extraMeet" data-r="${rod.id}">Agendar otra reunión para este rodaje</button>`); }
     if (tools.length) html += `<p class="lbl" style="margin-top:6px">Opciones</p>` + tools.join('');
   }
+  return html;
+}
+function statusBanners(e) {
+  if (e.status === 'reprogramado') { const nu = S.data.events.find((x) => x.id === e.replaced_by); return banner('bad', 'Este rodaje se reprogramó', (nu ? 'Nueva fecha: ' + R.fmtWhen(nu.starts_at) + '. ' : '') + (e.cancel_note ? esc(e.cancel_note) : ''), nu ? `<a class="btn sm b-ghost" href="#/e/${nu.id}" style="margin-top:8px">Ver el nuevo rodaje</a>` : ''); }
+  if (e.status === 'cancelado') return banner('bad', 'Cancelado', esc(e.cancel_note || ''));
+  return '';
+}
+// Cuadro Guion / Storyboard de un video en la reunión.
+function preTile(v, k, c, now, mt) {
+  const me = S.me;
+  const s = R.videoState(v, c, now);
+  const t = s[KEY[k]];
+  const name = k === 'guion' ? 'Guion' : 'Storyboard';
+  const ic = k === 'guion' ? icon.pen('currentColor', 18) : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="8" height="7" rx="1.5"/><rect x="13" y="4" width="8" height="7" rx="1.5"/><rect x="3" y="13" width="8" height="7" rx="1.5"/><rect x="13" y="13" width="8" height="7" rx="1.5"/></svg>';
+  const tt = (extra = '') => `<span class="tt">${ic}<b>${name}</b>${extra}</span>`;
+  if (t) {
+    if (t.split) return `<div class="tile by">${tt()}<small>Repartido al grabar</small></div>`;
+    const mine = t.done_by === me.id;
+    return `<div class="tile ${mine ? 'mine' : 'other'}">${tt(`<span class="ck">${icon.tick}</span>`)}<small>${t.hire_id ? 'Con Guillermo · ' : ''}Hecho ${R.limaDate(t.done_at) === R.limaDate(now) ? R.limaTime(t.done_at) : R.fmtWhen(t.done_at)}</small></div>`;
+  }
+  const hire = mt ? st.hireFor(mt.id) : null;
+  if (hire && hire.hired_by === v.owner) {
+    if (hire.present === me.id) { const cm = R.canMark(v, k, me, c, now, { hire }); if (cm.ok) return `<button class="tile g" data-act="quick" data-v="${v.id}" data-k="${k}" data-h="${hire.id}">${tt()}<small>Lo haces tú con Guillermo</small></button>`; }
+    else return `<div class="tile wait">${tt()}<small>Lo hace ${first(st.member(hire.present))} con Guillermo</small></div>`;
+  }
+  const cm = R.canMark(v, k, me, c, now);
+  if (cm.claim) return `<button class="tile take" data-act="claim" data-v="${v.id}" data-k="${k}">${tt()}<small>Tomar</small></button>`;
+  if (cm.ok) return `<button class="tile todo" data-act="quick" data-v="${v.id}" data-k="${k}">${tt()}<small>${cm.claimed ? 'Tomado · hasta ' + R.fmtWhen(cm.limit) : mt && R.meetingOpen(mt, now) ? 'Tocar al terminar' : 'Hasta ' + R.fmtWhen(s.d.preDue)}</small></button>`;
+  if (cm.gone) { const cl = R.claimOf(v, k, c); return cl ? `<div class="tile by">${tt()}<small>Lo hará ${first(st.member(cl.member_id))}</small></div>` : `<div class="tile late">${tt()}<small>Venció ${R.fmtWhen(s.d.preDue)}</small></div>`; }
+  if (cm.late) return `<div class="tile late">${tt()}<small>Venció</small></div>`;
+  const o = st.member(v.owner);
+  return `<div class="tile wait">${tt()}<small>${mt && R.meetingOpen(mt, now) ? 'Lo marca ' + first(o) : first(o) + ' · hasta ' + R.fmtWhen(s.d.preDue)}</small></div>`;
+}
+function vMeeting(e) {
+  const now = new Date();
+  const me = S.me;
+  const c = st.ctx(e.project_id);
+  const p = projOf(e.project_id);
+  const open = p && p.status === 'abierto';
+  const rod = S.data.events.find((x) => x.id === e.rodaje_id);
+  const vids = e.video_ids.map((vid) => c.videos.find((v) => v.id === vid)).filter(Boolean).sort((a, b) => a.num - b.num);
+  const start = new Date(e.starts_at);
+  const live = R.meetingOpen(e, now);
+  const preDue = rod ? R.preDueFor(rod.starts_at) : null;
+  const late = preDue && now > preDue;
+  const done = vids.reduce((a, v) => { const s = R.videoState(v, c, now); return a + (s.g ? 1 : 0) + (s.s ? 1 : 0); }, 0);
+  const total = vids.length * 2;
+  const end = R.meetingEnd(e);
+  const bonusOf = (v) => { const s = R.videoState(v, c, now); if (!s.g || !s.s) return false; const t = new Date(Math.max(new Date(s.g.done_at), new Date(s.s.done_at))); return t >= new Date(start.getTime() - R.RULES.open * 60000) && t <= end && !s.g.hire_id && !s.s.hire_id; };
+  const myBonus = vids.filter((v) => v.owner === me.id && bonusOf(v)).length;
+  const stTxt = !active(e) ? (e.status === 'cancelado' ? 'CANCELADA' : 'REPROGRAMADA') : e.ended_at ? 'FINALIZADA ' + R.limaTime(e.ended_at) : live ? 'EN CURSO' : now < start ? 'PROGRAMADA' : 'FINALIZADA';
+  const stC = live ? '#6EE7B7' : 'var(--tx4)';
+  let html = `${backTo('#/videos', 'Etapas')}${statusBanners(e)}`;
+  html += `<section class="mhead${late && done < total ? ' late' : ''}"><div class="row" style="gap:14px">${calTile(e.starts_at, 'pre')}<div style="flex:1;min-width:0"><b class="num" style="font-size:17px;display:block">Reunión de preproducción</b><p class="sub" style="margin:3px 0 0">${R.limaTime(start)}${rod ? ' · para el rodaje del ' + R.fmtDay(R.limaDate(rod.starts_at)) : ''}</p></div>
+    <span class="row" style="gap:6px;font-size:11px;font-weight:700;color:${stC};white-space:nowrap"><span class="hdot" style="background:${stC};animation:${live ? 'pulse 1.6s ease-in-out infinite' : 'none'}"></span>${stTxt}</span></div>
+    ${arrivalsRow(e, now)}
+    ${vids.length ? `<div style="display:flex;flex-direction:column;gap:8px;padding-top:12px;border-top:1px solid #1F2A24"><div class="between"><b class="small" style="font-size:13px;color:${late && done < total ? 'var(--r-fg2)' : 'var(--g-fg)'}">Entregables</b><b class="num" style="font-size:15px">${done}<span class="muted" style="font-size:15px"> / ${total}</span></b></div>
+      <div class="ebar"><i style="width:${total ? Math.round(done / total * 100) : 0}%"></i></div>
+      <div class="between" style="align-items:center"><span class="row small" style="gap:6px;font-weight:600;color:#FFD9A0">${icon.flame('#FFB547', 14)}${myBonus ? '+' + myBonus + (myBonus === 1 ? ' punto de reunión' : ' puntos de reunión') : e.ended_at || !live ? 'Sin puntos de reunión' : 'Termina guion y storyboard aquí: +1 por video'}</span><span class="small" style="font-weight:600;color:${late ? '#FF8A7A' : 'var(--tx4)'}">${preDue ? (late ? 'Venció ' : 'Plazo: ') + R.fmtWhen(preDue) : ''}</span></div></div>` : ''}</section>`;
+  html += adminConfirm(e) + myArrival(e, now);
+  if (active(e) && now < start && R.rsvpState(e, me.id, c, now).open && !R.rsvpState(e, me.id, c, now).k) html += confCard(e, now, true);
+  html += teamMsgs(now).filter((t) => vids.some((v) => t.indexOf('video ' + v.num + ' ') !== -1)).map(msgCard).join('');
+  if (!vids.length && active(e) && open && rod && isPartner(me)) html += repartoForm(e, rod);
+  else if (!vids.length) html += `<div class="card"><p class="empty">Los videos se reparten en la reunión.</p></div>`;
+  html += vids.map((v, i) => {
+    const o = st.member(v.owner);
+    const col = COLOR[o.role] || ['#22242C', '#C9C9D1'];
+    const s = R.videoState(v, c, now);
+    const miss = late && !(s.g && s.s);
+    const bonus = bonusOf(v);
+    const undoT = ['guion', 'storyboard'].map((k) => s[KEY[k]]).filter((t) => t && t.done_by === me.id && !t.split && R.canUndo(t, me, c, now));
+    return `<section class="vcard13${miss ? ' miss' : bonus ? ' good' : ''}" style="animation-delay:${(i * 0.05).toFixed(2)}s"><div class="vhead"><a class="vnum" href="#/v/${v.id}" style="text-decoration:none;color:inherit" aria-label="Detalle del video ${v.num}"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span class="vins" style="background:${col[0]};color:${col[1]}">${esc(ini(o.name)).charAt(0)}</span></a><span class="ttl"><p>${v.title ? esc(v.title) : 'Sin tema'}</p></span>${bonus ? `<span class="chip13" style="background:#2A2010;border:1px solid #6B4A1A;color:#FFD9A0">${icon.flame('#FFB547', 12)}+1 reunión</span>` : ''}</div>
+      <div class="tiles">${preTile(v, 'guion', c, now, e)}${preTile(v, 'storyboard', c, now, e)}</div>
+      ${undoT.length ? `<div class="row" style="justify-content:flex-end;gap:12px;margin-top:-6px">${undoT.map((t) => `<button class="linkbtn" data-act="undo" data-id="${t.id}">Deshacer ${t.kind}</button>`).join('')}</div>` : ''}</section>`;
+  }).join('');
+  if (active(e) && open && vids.length) {
+    if (e.ended_at) html += `<button class="btn" disabled>Reunión finalizada · ${R.limaTime(e.ended_at)}</button>`;
+    else if (e.end_requested_at) html += me.role === 'admin' ? `<button class="hb x-amber" data-act="confirmEnd" data-e="${e.id}">Confirmar fin de la reunión (${R.limaTime(e.end_requested_at)})</button>` : banner('wait', 'Pediste finalizar a las ' + R.limaTime(e.end_requested_at), 'El administrador lo confirma.');
+    else if (live && (me.role === 'admin' || ['puntual', 'tarde'].indexOf(st.eventStatus(e, me.id, now).k) !== -1)) { const direct = me.role === 'admin' || R.adminAbsent(e, c, now); html += `<button class="hb ${done === total ? 'x-green' : 'x-ghost'}" data-act="endMeeting" data-e="${e.id}">${direct ? 'Finalizar reunión' : 'Pedir finalizar la reunión'}</button>`; }
+  }
+  html += eventExtras(e, now);
+  return html;
+}
+// Reparto dentro de la reunión: tema y dueño de cada video (2 y 2 por defecto).
+function repartoForm(mt, rod) {
+  const p = projOf(rod.project_id);
+  const ps = st.partners();
+  const adm = ps.find((m) => m.role === 'admin') || S.me;
+  const soc = ps.find((m) => m.role === 'socio');
+  const c = st.ctx(p.id);
+  const left = p.videos_total - c.videos.length;
+  const n = Math.min(4, left);
+  if (!n) return `<div class="card"><p class="empty">Ya se repartieron todos los videos del proyecto.</p></div>`;
+  const pubBase = R.addDays(R.limaDate(rod.starts_at), 5);
+  const h = st.hireFor(mt.id);
+  const rows = Array.from({ length: n }, (_, i) => {
+    const owner = soc ? (i < Math.ceil(n / 2) ? adm.id : soc.id) : adm.id;
+    const num = c.videos.length + i + 1;
+    return `<section class="vcard13" style="animation-delay:${(i * 0.05).toFixed(2)}s"><div class="vhead"><span class="vnum"><span class="vbox"><small>VIDEO</small><b class="num">${num}</b></span></span><input class="tema" name="tit${i}" placeholder="Tema del video" maxlength="80" aria-label="Tema del video ${num}"></div>
+      <div class="row" role="radiogroup" aria-label="Quién hace el video ${num}" style="gap:8px">${ps.map((m) => { const k = m.role === 'admin' ? 'W' : 'S'; return `<label class="own${m.id === owner ? ' on-' + k : ''}" data-k="${k}"><input type="radio" class="hide" name="own${i}" value="${m.id}" ${m.id === owner ? 'checked' : ''}>${av(m, 22)}${esc(first(m))}</label>`; }).join('')}</div>
+      <label class="row small" style="gap:8px;color:var(--tx3)">Publica <input class="in" type="date" name="pub${i}" value="${R.addDays(pubBase, Math.floor(i / 2) * 2)}" style="min-height:38px;flex:1"></label></section>`;
+  }).join('');
+  return `<form data-form="reparto" style="display:flex;flex-direction:column;gap:12px"><input type="hidden" name="r" value="${rod.id}"><input type="hidden" name="n" value="${n}">
+    <div class="between" style="align-items:center"><b class="num" style="font-size:19px">Reparte los videos</b><span class="row" style="gap:6px" data-owncount>${ps.map((m) => `<span class="cnt13" style="background:${m.role === 'admin' ? '#2A2010' : '#131A2A'};color:${m.role === 'admin' ? '#FFD08A' : '#A9C7FF'}">${av(m, 20)}<b data-n="${m.id}">0</b></span>`).join('')}</span></div>
+    ${h ? banner('fm', `Guillermo trabaja por ${esc(st.member(h.hired_by).name)}`, 'Asigna sus videos y marca sus guiones y storyboards "con Guillermo".') : ''}
+    ${rows}<button class="hb x-green">${icon.check}Confirmar reparto</button></form>`;
+}
+// Rodaje por dentro (G/H): "Por grabar" / "✓ Grabado" para los dos; sin guion, Reprogramar.
+function vShoot(e) {
+  const now = new Date();
+  const me = S.me;
+  const c = st.ctx(e.project_id);
+  const p = projOf(e.project_id);
+  const open = p && p.status === 'abierto' && active(e);
+  const vids = e.video_ids.map((vid) => c.videos.find((v) => v.id === vid)).filter(Boolean).sort((a, b) => a.num - b.num);
+  const start = new Date(e.starts_at);
+  const today = R.limaDate(now) === R.limaDate(start);
+  const myS = st.eventStatus(e, me.id, now);
+  const amHere = ['puntual', 'tarde'].indexOf(myS.k) !== -1;
+  let html = `${backTo('#/videos', 'Etapas')}${statusBanners(e)}`;
+  html += `<section class="evcard rod"><div class="row" style="gap:12px">${calTile(e.starts_at, 'rod')}<div style="flex:1;min-width:0"><b class="num" style="font-size:17px;display:block">Rodaje · ${R.limaTime(start)}</b><span class="muted" style="display:block;margin-top:2px">${evTitle(e, c).vt}${e.note ? ' · ' + esc(e.note) : ''}</span></div><span class="small" style="font-weight:700;color:var(--tx4)">${today ? (now >= start ? 'HOY · EN CURSO' : 'HOY') : now > start ? 'PASÓ' : R.fmtDay(R.limaDate(start)).toUpperCase()}</span></div>${arrivalsRow(e, now)}</section>`;
+  html += adminConfirm(e) + myArrival(e, now);
+  if (active(e) && now < new Date(start.getTime() - R.RULES.open * 60000) && (R.rsvpState(e, me.id, c, now).open && !R.rsvpState(e, me.id, c, now).k || R.rsvpState(e, me.id, c, now).missed)) html += confCard(e, now, true);
+  html += teamMsgs(now).filter((t) => vids.some((v) => t.indexOf('video ' + v.num + ' ') !== -1)).map(msgCard).join('');
+  html += vids.map((v, i) => {
+    const o = st.member(v.owner);
+    const col = COLOR[o.role] || ['#22242C', '#C9C9D1'];
+    const s = R.videoState(v, c, now);
+    const miss = !s.g || !s.s;
+    const chip = (k) => { const t = s[KEY[k]]; return `<span class="chip13 ${t ? (t.split ? 'blue' : 'ok') : 'no'}">${t ? icon.tick : '×'}${k === 'guion' ? 'Guion' : t && t.split ? 'Storyboard repartido' : 'Storyboard'}</span>`; };
+    let act = '';
+    if (s.r) act = `<span class="hb x-done" style="cursor:default;font-size:15px;${s.r.done_by !== v.owner ? '' : ''}">${icon.check}Grabado${s.r.done_by !== v.owner ? ' · por ' + first(st.member(s.r.done_by)) : ''}</span>`;
+    else if (open) {
+      const cm = R.canMark(v, 'rodaje', me, c, now);
+      if (cm.noGuion) act = isPartner(me) ? `<button class="hb x-red" data-act="reproVideo" data-v="${v.id}" style="font-size:15px">Reprogramar</button>` : '';
+      else if (cm.ok) act = `<button class="hb x-amber" data-act="quick" data-v="${v.id}" data-k="rodaje">${icon.cam('currentColor', 18)}Por grabar</button>`;
+      else act = `<span class="hb x-off" title="${esc(cm.why || '')}">${icon.cam('currentColor', 18)}Por grabar</span>${v.owner === me.id && !amHere && today ? '' : ''}`;
+      // La noche anterior: tomar lo que falta del compañero
+      const takes = ['guion', 'storyboard'].map((k) => { if (s[KEY[k]]) return ''; const cmk = R.canMark(v, k, me, c, now); if (cmk.claim) return `<button class="btn sm x-blue" data-act="claim" data-v="${v.id}" data-k="${k}">Tomar ${k}</button>`; if (cmk.ok && cmk.claimed) return `<button class="btn sm x-green" data-act="quick" data-v="${v.id}" data-k="${k}">${k === 'guion' ? 'Guion' : 'Storyboard'} hecho</button>`; return ''; }).join('');
+      if (takes) act = `<div class="row" style="gap:8px">${takes}</div>` + act;
+    }
+    return `<section class="vcard13${miss && !s.r ? ' miss' : ''}" style="animation-delay:${(i * 0.05).toFixed(2)}s"><div class="vhead"><a class="vnum" href="#/v/${v.id}" style="text-decoration:none;color:inherit"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span class="vins" style="background:${col[0]};color:${col[1]}">${esc(ini(o.name)).charAt(0)}</span></a><span class="ttl"><p>${v.title ? esc(v.title) : 'Video ' + v.num}</p></span></div>
+      <div class="chips">${chip('guion')}${chip('storyboard')}</div>${act}</section>`;
+  }).join('');
+  if (!vids.length) html += `<div class="card"><p class="empty">Todavía no hay videos en este rodaje.</p></div>`;
+  html += eventExtras(e, now);
+  const pastN = c.events.filter((x) => x.kind === 'rodaje' && x.id !== e.id && R.limaDate(x.starts_at) < R.limaDate(now)).length;
+  if (pastN) html += `<a class="pastbtn" href="#/rodajes">${icon.hist.replace('width="22" height="22"', 'width="18" height="18"')}Rodajes pasados<span class="cnt">${pastN}</span>${icon.chev}</a>`;
   return html;
 }
 
@@ -770,7 +1229,7 @@ function guillermoBlock(e, myS, now) {
   const p = S.data.projects.find((x) => x.id === e.project_id);
   const preVal = R.rates(p).guion + R.rates(p).storyboard;
   if (!h) {
-    if (now < start && myS.k === 'pendiente' && st.partners().length > 1) return `<div class="card" style="border-color:#3E2C63;background:#160F22"><p class="lbl" style="color:#C9B2FF">¿No irás a esta reunión?</p><p class="sub" style="margin:0">Puedes contratar a <b style="color:#fff">Guillermo</b> para tu preproducción. Tu compañero hace tus guiones y storyboards con él y recibe el 80 % (${R.money(preVal * 0.8)} por video). Tú conservas el 20 % y tu asistencia queda como "no requerida": no es falta ni suma racha.</p><button class="btn b-purple" data-act="hire" data-e="${e.id}">Contratar a Guillermo</button></div>`;
+    if (now < start && myS.k === 'pendiente' && st.partners().length > 1 && !R.rsvpState(e, me.id, st.ctx(e.project_id), now).open) return `<div class="card" style="border-color:#3E2C63;background:#160F22"><p class="lbl" style="color:#C9B2FF">¿No irás a esta reunión?</p><p class="sub" style="margin:0">Puedes contratar a <b style="color:#fff">Guillermo</b> para tu preproducción. Tu compañero hace tus guiones y storyboards con él y recibe el 80 % (${R.money(preVal * 0.8)} por video). Tú conservas el 20 % y tu asistencia queda como "no requerida": no es falta ni suma racha.</p><button class="btn b-purple" data-act="hire" data-e="${e.id}">Contratar a Guillermo</button></div>`;
     return '';
   }
   const A = st.member(h.hired_by), B = st.member(h.present);
@@ -1150,7 +1609,8 @@ function vTeam() {
     const msg = encodeURIComponent(`Hola, te invito a nuestro equipo en la app de registro. Entra aquí: ${link}`);
     return `<div class="li">${av(m)}<span class="t"><b>${esc(m.name)}${m.id === me.id ? ' (tú)' : ''}</b><span>${ROLE[m.role]}${m.apoyo ? ' · recibe apoyo en el acabado' : ''}${pendingInv ? ' · invitación pendiente' : ''}</span>
       ${pendingInv && m.invite_code ? `<span class="row" style="gap:6px;margin-top:8px"><a class="btn sm b-mint" href="https://wa.me/?text=${msg}" target="_blank" rel="noopener">Enviar por WhatsApp</a><button class="btn sm b-ghost" data-act="copy" data-t="${esc(link)}">Copiar enlace</button></span>` : ''}</span>
-      ${(me.role === 'admin' || m.id === me.id) && !pendingInv ? `<button class="btn sm b-ghost" data-act="rename" data-id="${m.id}">Editar</button>` : ''}</div>`;
+      ${(me.role === 'admin' || m.id === me.id) && !pendingInv ? `<button class="btn sm b-ghost" data-act="rename" data-id="${m.id}">Editar</button>` : ''}</div>
+      ${(m.role === 'admin' || m.role === 'socio' || m.role === 'colaborador') ? waField(m, me.role === 'admin' || m.id === me.id) : ''}`;
   }).join('')}</div></section>`;
   if (me.role === 'admin') html += `<form data-form="invite" class="card"><p class="lbl">Invitar a tu socio</p>
     <label class="field"><span>Nombre</span><input class="in" name="name" required placeholder="Nombre de tu socio"></label>
@@ -1173,6 +1633,17 @@ function vTeam() {
   return html;
 }
 
+// WhatsApp de cada integrante (+51 · 9 dígitos que empiezan con 9). Se usa para el botón "Escribir por WhatsApp".
+function waField(m, canEdit) {
+  const val = (ui.phone || {})[m.id] != null ? ui.phone[m.id] : (m.phone || '');
+  const digits = String(val).replace(/\D/g, '');
+  const ok = st.PHONE_RE.test(digits);
+  const shown = digits.replace(/(\d{3})(\d{0,3})(\d{0,3}).*/, (x, a, b, c) => [a, b, c].filter(Boolean).join(' '));
+  if (!canEdit) return m.phone ? `<p class="muted" style="margin:-4px 0 8px 46px">WhatsApp +51 ${esc(shown)}</p>` : '';
+  return `<form data-form="phone" class="row" style="gap:8px;margin:-2px 0 10px 46px"><input type="hidden" name="m" value="${m.id}">
+    <span class="in" style="flex:1;display:flex;align-items:center;gap:6px;min-height:44px;border-color:${digits && !ok ? 'var(--u0)' : ok ? 'var(--g-bd)' : 'var(--line2)'}"><b class="muted" style="font-size:14px">+51</b><input name="p" inputmode="numeric" maxlength="11" value="${esc(shown)}" placeholder="9XX XXX XXX" aria-label="WhatsApp de ${esc(m.name)}" style="flex:1;min-width:0;background:transparent;border:none;color:var(--tx);outline:none;font-size:15px">${ok ? `<span style="color:var(--mint)">${icon.tick}</span>` : ''}</span>
+    <button class="btn sm x-green" style="min-height:44px">Guardar</button>${m.phone ? `<a class="btn sm b-ghost" style="min-height:44px" href="${st.waLink(m, 'Hola')}" target="_blank" rel="noopener">Probar</a>` : ''}</form>`;
+}
 function vNewProject() {
   return `<a href="#/equipo" class="row muted" style="text-decoration:none">${icon.back} Equipo</a><h1>Nuevo proyecto</h1><p class="sub">Un proyecto es un paquete de videos de un cliente (por ejemplo, 16 videos al mes). Los montos por tarea salen solos del presupuesto (cláusula cuarta).</p>
   <form data-form="project" class="card">
@@ -1199,6 +1670,7 @@ function applyLook() {
   d.style.setProperty('--u0', L.u0);
   d.style.setProperty('--u1', L.u1);
   d.style.setProperty('--u2', L.u2);
+  applyLook13();
   const meta = document.querySelector('meta[name=theme-color]');
   if (meta) meta.setAttribute('content', theme() === 'light' ? '#F6F5F2' : '#0B0C10');
 }
@@ -1221,10 +1693,12 @@ const RULE_DEF = [
     ['pre', 'Guion y storyboard', 'el día antes del rodaje · luego tu compañero puede tomarlos', 30, 720, 1380, (x) => R.hm(x)],
     ['mon', 'Montaje (con apoyo)', 'días antes de publicar, a las 21:00', 1, 1, 5, (x) => x + (x === 1 ? ' día' : ' días')],
     ['fin', 'Video final', 'días antes de publicar, a las 21:00', 1, 0, 3, (x) => x + (x === 1 ? ' día' : ' días')],
+    ['take', 'Tomar lo del compañero', 'horas antes del rodaje · hasta ahí se toma y se entrega', 1, 1, 12, (x) => x + ' h'],
     ['undo', 'Deshacer una tarea', 'tiempo para corregir un error al marcar', 5, 5, 60, (x) => x + ' min']]],
-  ['Avisar que no podrás ir', [
-    ['avr', 'Rodaje · a tiempo hasta', 'del día anterior · después resta 3', 30, 720, 1380, (x) => R.hm(x)],
-    ['avm', 'Reunión · con anticipación', 'horas antes · después resta 3', 2, 6, 72, (x) => x + ' h']]]
+  ['Confirmar asistencia', [
+    ['avr', 'Rodaje · confirmar hasta', 'del día anterior · sin confirmar resta 2', 30, 720, 1380, (x) => R.hm(x)],
+    ['conf', 'Reunión · confirmar con', 'horas antes · sin confirmar resta 2', 1, 6, 48, (x) => x + ' h'],
+    ['madr', 'Madrugada · hasta', 'si el plazo cae antes, pasa a las 23:59 del día anterior', 30, 0, 480, (x) => R.hm(x)]]]
 ];
 const PCT_DEF = [['pre', 'Preproducción', 'pre'], ['rod', 'Rodaje', 'prod'], ['mon', 'Montaje', 'post'], ['aca', 'Video final', 'star']];
 const REM_DEF = [
@@ -1270,20 +1744,118 @@ function propSummary(p) {
   const all = RULE_DEF.flatMap((g) => g[1]);
   return Object.entries(p.data).map(([k, v]) => { const d = all.find((x) => x[0] === k); const was = old[k] != null ? old[k] : R.DEFAULT_RULES[k]; return d ? `${d[1]}: ${d[6](was)} → ${d[6](v)}` : k; }).join(' · ');
 }
+// ==================================================================
+// 1.3 · Apariencia C: colores para los dos, por separado en noche y día
+// ==================================================================
+const LOOK_DEF = {
+  dark: {
+    main: '#FFB547', u0: '#FF6B5B', u1: '#FF9F2E', u2: '#5A5D67',
+    stPre: '#12805A', stRod: '#A15F00', stPost: '#B4452A', bdPre: '#6EE7B7', bdRod: '#FFB547', bdPost: '#FF8A65', stOn: 100, stOff: 22, bdOp: 55, fgOn: '#FFFFFF',
+    r1: ['#17130C', '#3A3220', '#FFB547', '#FFD08A'], r2: ['#1C130A', '#4A3414', '#FF9F2E', '#FFC978'], r3: ['#0C1720', '#1E3A52', '#5CC8FF', '#A8E1FF'], r4: ['#160F22', '#3E2C63', '#B98CFF', '#D6C2FF'],
+    meta: ['#16140F', '#3A3220', '#FFB547', '#2A2518'], wallet: ['#121A16', '#1F3A2C', '#6EE7B7', '#F4F4F5']
+  },
+  light: {
+    main: '#D98A00', u0: '#D93B2B', u1: '#E07B00', u2: '#8B8B94',
+    stPre: '#12805A', stRod: '#A15F00', stPost: '#B4452A', bdPre: '#12805A', bdRod: '#A15F00', bdPost: '#B4452A', stOn: 100, stOff: 12, bdOp: 45, fgOn: '#FFFFFF',
+    r1: ['#FFF4E0', '#F2D9A6', '#E08A00', '#7A4A00'], r2: ['#FFEBD6', '#F5C99A', '#E06F00', '#7A3D00'], r3: ['#E3F3FC', '#A9D7F0', '#1E88C7', '#0B4A70'], r4: ['#F1E9FF', '#D4C0FA', '#7C4DDB', '#3E2273'],
+    meta: ['#FFF7E8', '#EFD9AE', '#D98A00', '#F1E3C4'], wallet: ['#E9F7F0', '#B7E2CC', '#0F8A5F', '#0B1F15']
+  }
+};
+function lookFor(mode, saved) {
+  const L = saved || st.settings().look || {};
+  const base = JSON.parse(JSON.stringify(LOOK_DEF[mode]));
+  // Compatibilidad con la 1.2 (colores sueltos = noche).
+  if (mode === 'dark') ['main', 'u0', 'u1', 'u2'].forEach((k) => { if (L[k]) base[k] = L[k]; });
+  return Object.assign(base, JSON.parse(JSON.stringify((L[mode]) || {})));
+}
+const hexRgb = (h) => { const x = String(h || '#000').replace('#', ''); return [0, 2, 4].map((i) => parseInt(x.slice(i, i + 2), 16) / 255); };
+const lum = (h) => { const c = hexRgb(h).map((v) => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+// Mezcla un color con el fondo según la opacidad (para medir el contraste real).
+const over = (fg, bg, op) => { const a = hexRgb(fg), b = hexRgb(bg); return '#' + a.map((v, i) => Math.round((v * op / 100 + b[i] * (1 - op / 100)) * 255).toString(16).padStart(2, '0')).join(''); };
+function applyLook13() {
+  const mode = theme();
+  const L = lookFor(mode);
+  const d = document.documentElement.style;
+  d.setProperty('--amber', L.main); d.setProperty('--main-fg', fgFor(L.main));
+  d.setProperty('--u0', L.u0); d.setProperty('--u1', L.u1); d.setProperty('--u2', L.u2);
+  [['pre', 'Pre'], ['rod', 'Rod'], ['post', 'Post']].forEach(([k, K]) => { d.setProperty('--st-' + k, L['st' + K]); d.setProperty('--st-' + k + '-c', L['bd' + K]); });
+  d.setProperty('--st-on', L.stOn + '%'); d.setProperty('--st-off', L.stOff + '%'); d.setProperty('--st-bdop', L.bdOp + '%'); d.setProperty('--st-fg-on', L.fgOn);
+  d.setProperty('--meta-bg', L.meta[0]); d.setProperty('--meta-line', L.meta[1]); d.setProperty('--meta-bar', L.meta[2]); d.setProperty('--meta-track', L.meta[3]);
+  d.setProperty('--w-bg', L.wallet[0]); d.setProperty('--w-line', L.wallet[1]); d.setProperty('--w-title', L.wallet[2]); d.setProperty('--w-money', L.wallet[3]);
+  for (let n = 1; n <= 4; n++) { const r = L['r' + n]; d.setProperty(`--r${n}-bg`, r[0]); d.setProperty(`--r${n}-bd`, r[1]); d.setProperty(`--r${n}-c`, r[2]); d.setProperty(`--r${n}-t`, r[3]); }
+}
+const SUG = {
+  main: ['#FFB547', '#FF8A65', '#6EE7B7', '#8AB4FF', '#B98CFF', '#F5C542'],
+  u0: ['#FF6B5B', '#E5484D', '#FF4D7D', '#D93B2B', '#FF5A36', '#C2410C'], u1: ['#FF9F2E', '#FFB547', '#F5C542', '#FF8A65', '#E07B00', '#D97706'], u2: ['#5A5D67', '#8B8B94', '#4A5A78', '#3E6B5A', '#6B7280', '#A1A1AA'],
+  st: ['#12805A', '#A15F00', '#B4452A', '#2D5BBA', '#7C4DDB', '#0E7490'], bd: ['#6EE7B7', '#FFB547', '#FF8A65', '#8AB4FF', '#B98CFF', '#FFFFFF'],
+  rc: ['#FFB547', '#FF9F2E', '#5CC8FF', '#B98CFF', '#6EE7B7', '#F5C542'], bg: ['#17130C', '#1C130A', '#0C1720', '#160F22', '#121A16', '#15161C'], bgl: ['#FFF4E0', '#FFEBD6', '#E3F3FC', '#F1E9FF', '#E9F7F0', '#FFFFFF'], tx: ['#F4F4F5', '#FFD08A', '#A8E1FF', '#D6C2FF', '#C9F7E3', '#15161C']
+};
+function swatches(path, cur, list) {
+  return `<div class="row" style="gap:8px;flex-wrap:wrap">${list.map((c) => `<button class="swu" data-act="lk" data-p="${path}" data-c="${c}" aria-label="${c}" aria-pressed="${cur === c}" style="background:${c};${cur === c ? 'box-shadow:0 0 0 2px var(--s1),0 0 0 5px var(--tx)' : ''}">${cur === c ? icon.tick : ''}</button>`).join('')}
+    <label class="swu" style="background:conic-gradient(red,yellow,lime,cyan,blue,magenta,red);position:relative;overflow:hidden" aria-label="Otro color"><input type="color" value="${cur}" data-lk="${path}" style="position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer"></label></div>`;
+}
+const colorRow = (name, path, cur, list, warn = '') => `<div style="display:flex;flex-direction:column;gap:8px"><div class="row" style="gap:10px"><i style="width:14px;height:14px;border-radius:4px;background:${cur};border:1px solid var(--line2)"></i><b class="small" style="flex:1;font-size:13px">${name}</b><span class="muted mono">${cur}</span></div>${swatches(path, cur, list)}${warn}</div>`;
+const rangeRow = (name, path, cur) => `<label style="display:flex;flex-direction:column;gap:6px"><span class="row" style="gap:10px"><b class="small" style="flex:1;font-size:13px">${name}</b><b class="num">${cur} %</b></span><input type="range" min="0" max="100" step="1" value="${cur}" data-lk="${path}" data-num="1" style="width:100%;accent-color:var(--amber)"></label>`;
+const warnLow = (fg, bg, op = 100) => { const r = contrast(fg, op < 100 ? over(bg, theme() === 'light' ? '#FFFFFF' : '#15161C', op) : bg); return r < 3 ? `<p class="small" style="margin:0;color:var(--u1);font-weight:600">Se lee con dificultad (contraste ${r.toFixed(1)}). Puedes guardarlo igual.</p>` : ''; };
 function vAdminLook() {
-  const cur = ui.look || st.look();
-  const prevDays = [['HOY', 0], ['DOM', 1], ['LUN', 2], ['MAR', null], ['MIÉ', 2]];
-  let html = `${backTo('#/admin', 'Administrador')}<div><h1 style="font-size:28px">Apariencia</h1><p class="sub">Elige y mira el resultado al instante. Al guardar, cambia en los celulares de los dos.</p></div>`;
-  html += `<section class="card" style="gap:12px"><p class="lbl">Vista previa</p>
-    <div class="dsqs">${prevDays.map(([d, b], i) => `<div class="dsq ${b === null ? 'd-none' : ''} ${i === 0 ? 'on' : ''}" style="${b === null ? '' : `--uc:${cur['u' + b]}`}"><span class="dw">${d}</span><b class="num">${31 + i > 31 ? i : 31}</b></div>`).join('')}</div>
-    <div class="trow" style="border:none;padding:6px 8px;border-radius:14px;background:var(--s2)"><span class="tic tint-post">${stageIc('post')}</span><span class="ttx"><b>Montaje · video 4</b><span class="due-l" style="color:${cur.u0}">Hoy 21:00 · en 58 min</span></span><span class="tbtn" style="background:${cur.main};color:${fgFor(cur.main)}">Hecho</span></div></section>`;
-  html += `<div><p class="lbl">Color principal</p><p class="muted" style="margin:4px 0 10px">Botones, pestaña activa y títulos destacados.</p><div class="swrow">${PALETTE.main.map(([n, c]) => `<button class="swb" data-act="lookPick" data-k="main" data-c="${c}" aria-label="${n}" aria-pressed="${cur.main === c}"><span style="background:${c};${cur.main === c ? `box-shadow:0 0 0 3px var(--bg),0 0 0 6px ${c}` : ''}">${cur.main === c ? icon.tick : ''}</span><small>${n}</small></button>`).join('')}</div></div>`;
-  html += `<div style="display:flex;flex-direction:column;gap:12px"><div><p class="lbl">Colores de urgencia</p><p class="muted" style="margin:4px 0 0">Los cuadrados de los días y las fechas límite en Inicio y Etapas.</p></div>
-    ${[['u0', 'Urgente', 'vence hoy o ya venció'], ['u1', 'Próximo', 'vence en 1 o 2 días'], ['u2', 'Con tiempo', 'vence en 3 días o más']].map(([k, n, w]) => `<div class="card tight"><div class="row" style="gap:10px"><i style="width:14px;height:14px;border-radius:4px;background:${cur[k]}"></i><b style="flex:1">${n}</b><span class="muted">${w}</span></div>
-      <div class="row" style="gap:8px">${PALETTE[k].map(([nn, c]) => `<button class="swu" data-act="lookPick" data-k="${k}" data-c="${c}" aria-label="${nn}" aria-pressed="${cur[k] === c}" style="background:${c};${cur[k] === c ? 'box-shadow:0 0 0 2px var(--s1),0 0 0 5px var(--tx)' : ''}">${cur[k] === c ? icon.tick : ''}</button>`).join('')}</div></div>`).join('')}</div>`;
-  html += `<div class="row" style="gap:10px"><button class="btn b-ghost" style="flex:1" data-act="lookReset">Restablecer</button><button class="btn b-amber" style="flex:2" data-act="lookSave">Guardar para los dos</button></div><p class="muted" style="margin:-6px 0 0;text-align:center">No necesita aprobación del socio · queda en el historial.</p>`;
+  const mode = (ui.lk && ui.lk.mode) || theme();
+  const saved = st.settings().look || {};
+  const edit = (ui.lk && ui.lk.data) || {};
+  const L = Object.assign(lookFor(mode, saved), JSON.parse(JSON.stringify(edit[mode] || {})));
+  const sec = (ui.lk && ui.lk.sec) || 'main';
+  const stage = (ui.lk && ui.lk.stage) || 'Pre';
+  const changed = Object.keys(edit).some((m) => Object.keys(edit[m] || {}).length);
+  const isL = mode === 'light';
+  const surf = isL ? '#FFFFFF' : '#15161C';
+  let html = `${backTo('#/admin', 'Administrador')}<div><h1 style="font-size:28px">Apariencia</h1><p class="sub">Para los dos celulares. Noche y día se guardan por separado.</p></div>`;
+  html += `<div class="seg">${[['dark', 'Noche'], ['light', 'Día']].map(([k, t]) => `<button class="${mode === k ? 'on' : ''}" data-act="lkMode" data-k="${k}">${t}</button>`).join('')}</div>`;
+  // Vista previa en vivo
+  const lvP = L.r3;
+  const tileP = (K, ic, on) => `<span class="stile" style="min-height:70px;border-radius:16px;cursor:default;background:${over(L['st' + K], surf, on ? L.stOn : L.stOff)};border-color:${over(L['bd' + K], surf, L.bdOp)};color:${on ? L.fgOn : (isL ? '#15161C' : '#F4F4F5')}">${ic(on ? L.fgOn : L['bd' + K], 20)}<span style="font-size:10px">${{ Pre: 'Preproducción', Rod: 'Rodaje', Post: 'Posproducción' }[K]}</span></span>`;
+  html += `<section class="card" style="gap:12px;background:${isL ? '#F6F5F2' : '#0B0C10'}"><p class="lbl">Vista previa · ${mode === 'dark' ? 'noche' : 'día'}</p>
+    <div class="racha" style="background:${lvP[0]};border-color:${lvP[1]};padding:12px 14px"><div class="rfire" style="width:60px;height:70px">${icon.flame(lvP[2], 44)}</div><div class="rtx"><p class="lbl" style="color:${lvP[3]}">Tu racha</p><b class="num" style="font-size:32px;line-height:1;color:${lvP[3]}">15</b><span class="rlv" style="--lvc:${lvP[2]};--lvt:${lvP[3]};--lvchip:${over(lvP[2], lvP[0], 18)}">Nivel 3 · Responsable</span></div></div>
+    <div class="dsqs">${[['HOY', 'u0'], ['DOM', 'u1'], ['LUN', 'u2'], ['MAR', null]].map(([d, k], i) => `<div class="dsq ${k ? '' : 'd-none'} ${i === 0 ? 'on' : ''}" style="${k ? `--uc:${L[k]}` : ''}"><span class="dw">${d}</span><b class="num">${i + 1}</b></div>`).join('')}</div>
+    <div class="stiles">${tileP('Pre', icon.pen, stage === 'Pre')}${tileP('Rod', icon.cam, stage === 'Rod')}${tileP('Post', icon.cut, stage === 'Post')}</div>
+    <div class="grid2"><div style="border-radius:16px;padding:12px;background:${L.meta[0]};border:1px solid ${L.meta[1]}"><p class="lbl" style="color:${L.meta[2]}">Meta del equipo</p><b class="num" style="font-size:24px;color:${isL ? '#15161C' : '#F4F4F5'}">56%</b><div style="height:8px;border-radius:9px;background:${L.meta[3]};margin-top:6px"><div style="width:56%;height:100%;border-radius:9px;background:${L.meta[2]}"></div></div></div>
+      <div style="border-radius:16px;padding:12px;background:${L.wallet[0]};border:1px solid ${L.wallet[1]}"><p class="lbl" style="color:${L.wallet[2]}">En la billetera</p><b class="num" style="font-size:24px;color:${L.wallet[3]}">S/ 156.25</b></div></div>
+    <span class="hb" style="min-height:44px;background:${over(L.main, surf, 18)};border:1px solid ${over(L.main, surf, 45)};color:${L.main};font-size:14px">Botón principal</span></section>`;
+  const SECS = [['main', 'Principal'], ['etapas', 'Etapas'], ['urg', 'Urgencia'], ['racha', 'Racha'], ['meta', 'Meta del equipo'], ['wallet', 'Billetera']];
+  html += `<div class="row" style="gap:6px;flex-wrap:wrap">${SECS.map(([k, t]) => `<button class="btn sm ${sec === k ? 'x-amber' : 'b-ghost'}" data-act="lkSec" data-k="${k}">${t}</button>`).join('')}</div>`;
+  let body = '';
+  if (sec === 'main') body = colorRow('Color principal', 'main', L.main, SUG.main, warnLow(L.main, surf));
+  if (sec === 'urg') body = [['u0', 'Urgente · vence hoy o ya venció'], ['u1', 'Próximo · 1 o 2 días'], ['u2', 'Con tiempo · 3 días o más']].map(([k, n]) => colorRow(n, k, L[k], SUG[k])).join('');
+  if (sec === 'etapas') {
+    body = `<div class="seg">${[['Pre', 'Preproducción'], ['Rod', 'Rodaje'], ['Post', 'Posproducción']].map(([k, t]) => `<button class="${stage === k ? 'on' : ''}" data-act="lkStage" data-k="${k}">${t}</button>`).join('')}</div>`
+      + colorRow('Fondo', 'st' + stage, L['st' + stage], SUG.st, warnLow(L.fgOn, L['st' + stage], L.stOn))
+      + rangeRow('Opacidad · elegida', 'stOn', L.stOn) + rangeRow('Opacidad · sin elegir', 'stOff', L.stOff)
+      + colorRow('Borde e ícono sin elegir', 'bd' + stage, L['bd' + stage], SUG.bd) + rangeRow('Opacidad del borde', 'bdOp', L.bdOp)
+      + colorRow('Ícono y texto · elegida', 'fgOn', L.fgOn, ['#FFFFFF', '#F4F4F5', '#15161C', '#FFF1C2', '#C9F7E3', '#DCE6FF']);
+  }
+  if (sec === 'racha') {
+    const ln = (ui.lk && ui.lk.lv) || 3;
+    const r = L['r' + ln];
+    body = `<div class="seg">${['Cumplidor', 'Constante', 'Responsable', 'Imparable'].map((t, i) => `<button class="${ln === i + 1 ? 'on' : ''}" data-act="lkLv" data-k="${i + 1}">${t}</button>`).join('')}</div>`
+      + colorRow('Fondo', `r${ln}.0`, r[0], isL ? SUG.bgl : SUG.bg) + colorRow('Borde', `r${ln}.1`, r[1], SUG.bd)
+      + colorRow('Llama, insignia y barra', `r${ln}.2`, r[2], SUG.rc) + colorRow('Número de puntos', `r${ln}.3`, r[3], SUG.tx, warnLow(r[3], r[0]));
+  }
+  if (sec === 'meta') body = colorRow('Fondo', 'meta.0', L.meta[0], isL ? SUG.bgl : SUG.bg) + colorRow('Borde', 'meta.1', L.meta[1], SUG.bd) + colorRow('Barra y título', 'meta.2', L.meta[2], SUG.rc, warnLow(L.meta[2], L.meta[0])) + colorRow('Fondo de la barra', 'meta.3', L.meta[3], isL ? SUG.bgl : SUG.bg);
+  if (sec === 'wallet') body = colorRow('Fondo', 'wallet.0', L.wallet[0], isL ? SUG.bgl : SUG.bg) + colorRow('Borde', 'wallet.1', L.wallet[1], SUG.bd) + colorRow('Título', 'wallet.2', L.wallet[2], SUG.rc, warnLow(L.wallet[2], L.wallet[0])) + colorRow('Monto', 'wallet.3', L.wallet[3], SUG.tx, warnLow(L.wallet[3], L.wallet[0]));
+  html += `<section class="card" style="gap:16px">${body}</section>`;
+  html += `<div class="row" style="gap:10px"><button class="btn b-ghost" style="flex:1" data-act="lkReset">Restaurar</button><button class="btn x-amber" style="flex:2" data-act="lookSave" ${changed ? '' : 'disabled'}>Guardar para los dos</button></div><p class="muted" style="margin:-6px 0 0;text-align:center">Restaurar vuelve esta sección (${mode === 'dark' ? 'noche' : 'día'}) a los colores de fábrica. Queda en el historial.</p>`;
   return html;
 }
+function lkSet(path, val) {
+  const mode = (ui.lk && ui.lk.mode) || theme();
+  ui.lk = Object.assign({ mode }, ui.lk || {}, { mode });
+  ui.lk.data = Object.assign({}, ui.lk.data || {});
+  const cur = Object.assign(lookFor(mode), JSON.parse(JSON.stringify(ui.lk.data[mode] || {})));
+  const m = Object.assign({}, ui.lk.data[mode] || {});
+  const [k, i] = path.split('.');
+  if (i != null) { const arr = (m[k] || cur[k]).slice(); arr[Number(i)] = val; m[k] = arr; } else m[k] = val;
+  ui.lk.data[mode] = m;
+}
+
 function vAdminRules() {
   const base = Object.assign({}, R.DEFAULT_RULES, st.settings().rules || {});
   const cur = Object.assign({}, base, ui.rules || {});
@@ -1386,7 +1958,7 @@ function sheetMark(v, k, hireId) {
   return `<form data-form="mark" class="" style="display:contents"><input type="hidden" name="v" value="${v.id}"><input type="hidden" name="k" value="${k}"><input type="hidden" name="h" value="${hireId || ''}">
   <h2>${R.KIND_LABEL[k]} · video ${v.num}</h2>
   ${h ? `<div class="banner bn-fm"><div><b>Con Guillermo · contratado por ${esc(st.member(h.hired_by).name)}</b><p>Quedará como "Hecho por Guillermo". Recibes ${R.money(val * 0.8)} (80 %) y ${R.money(val * 0.2)} siguen siendo de ${esc(st.member(h.hired_by).name)}. No suma ni resta racha.</p></div></div>` : ''}
-  ${cm.take ? banner('warn', `Tomas la tarea de ${esc(st.member(v.owner).name)}`, `No la entregó a tiempo: el pago (${R.money(val)}) pasa a ti y queda en el historial.`) : ''}
+  ${cm.claimed ? banner('wait', `Entregas lo que tomaste de ${esc(st.member(v.owner).name)}`, `Cobras ${R.money(val)} y sumas +${R.PTS.rescue} puntos de rescate.`) : ''}
   ${cm.late ? banner('warn', 'Fuera de plazo', 'Se paga igual, pero resta 3 puntos de racha.') : ''}
   ${cm.apoyo ? banner('wait', 'Acabado de apoyo (5.5)', `Si el montaje llegó a tiempo, el pago es de ${esc(st.member(v.owner).name)}.`) : ''}
   <p class="sub" style="margin:0">Queda registrado con la hora de ahora: ${R.fmtWhen(new Date())}.</p>
@@ -1400,8 +1972,8 @@ function sheetNotice(e, fmOnly) {
   const onTime = now <= dl;
   const isR = e.kind === 'rodaje';
   const text = onTime
-    ? (isR ? 'Avisar hasta las 18:00 del día anterior es cancelar a tiempo: no resta racha. Tu compañero puede reprogramar el día o grabar solo sus videos; los tuyos no los toma sin tu permiso.' : 'Avisar con 24 h es cancelar a tiempo: no resta racha.')
-    : (isR ? 'Tu compañero decide: reprogramar el día (los gastos extra van por tu cuenta) o tomar el día completo y cobrar esos rodajes. Resta 3 puntos.' : 'Avisar con menos de 24 h resta 3 puntos.');
+    ? (isR ? 'Avisar a tiempo no resta racha. Tu compañero puede reprogramar el día o grabar solo sus videos; los tuyos no los toma sin tu permiso.' : 'Avisar a tiempo no resta racha.')
+    : (isR ? 'Tu compañero decide: reprogramar el día (los gastos extra van por tu cuenta) o tomar el día completo y cobrar esos rodajes. Resta 3 puntos.' : 'Fuera de plazo resta 3 puntos.');
   return `<form data-form="notice" style="display:contents"><input type="hidden" name="e" value="${e.id}">
   <h2>${fmOnly ? 'Fue fuerza mayor' : 'No podré ir'}</h2>
   ${fmOnly ? '' : `<div class="banner ${onTime ? 'bn-ok' : 'bn-warn'}"><div><b>${onTime ? `A tiempo · hasta ${R.fmtWhen(dl)}` : `Fuera de plazo · venció ${R.fmtWhen(dl)}`}</b><p>${text}</p></div></div>`}
@@ -1474,20 +2046,27 @@ function render() {
   else if (!S.teamId || !S.me) html = vNoTeam(r[0] === 'i' ? r[1] : ui.inviteCode);
   else if (r[0] === 'i' && r[1]) html = layout('home', vAccept(r[1]));
   else {
-    const map = { admin: ['', () => vAdmin(r[1])], propuesta: ['home', () => vProposal(r[1])], '': ['home', vHome], videos: ['vids', vEtapas], semana: ['vids', () => vWeek(r[1])], v: ['vids', () => vVideo(r[1])], e: ['vids', () => vEvent(r[1])], resumen: ['sum', vSummary], cierre: ['sum', vClose], historial: ['hist', vHistory], equipo: ['', vTeam], proyecto: ['', vNewProject] };
+    const map = { admin: ['', () => vAdmin(r[1])], propuesta: ['home', () => vProposal(r[1])], '': ['home', vHome], videos: ['vids', vEtapas], rodajes: ['vids', vRodajesPasados], semana: ['vids', () => vWeek(r[1])], v: ['vids', () => vVideo(r[1])], e: ['vids', () => vEvent(r[1])], resumen: ['sum', vSummary], cierre: ['sum', vClose], historial: ['hist', vHistory], equipo: ['', vTeam], proyecto: ['', vNewProject] };
     const [tab, fn] = map[r[0]] || map[''];
     html = layout(tab, fn());
   }
   if (sheetHtml) html += `<div class="sheet" data-act="closeBg"><div>${sheetHtml}</div></div>`;
   $app.innerHTML = html;
-  const u = ui.undo && Date.now() < ui.undo.until ? ui.undo : null;
-  $toast.innerHTML = u ? `<div class="t-ok undo"><span>${u.amt ? '+ ' + R.money(u.amt) + ' · registrado' : 'Registrado'}</span><button data-act="undoQuick">Deshacer</button></div>` : S.toast ? `<div class="t-${S.toast.kind}">${esc(S.toast.msg)}</div>` : '';
+  const u = ui.undo && Date.now() < ui.undo.until && !(S.toast && S.toast.kind === 'bad') ? ui.undo : null;
+  $toast.innerHTML = u ? `<div class="t-ok undo"><span>${u.text ? esc(u.text) : 'Registrado'}</span><button data-act="undoQuick">Deshacer</button></div>` : S.toast ? `<div class="t-${S.toast.kind}">${esc(S.toast.msg)}</div>` : '';
+  if (ui.rpop) $app.insertAdjacentHTML('beforeend', rachaPop(ui.rpop));
   syncOpts();
+  syncOwn();
   animateCounts();
   animateWallet();
+  animatePop();
   if (r[0] !== 'resumen') ui.animKey = null;
 }
 
+function syncOwn() {
+  document.querySelectorAll('label.own').forEach((l) => { const i = l.querySelector('input'); l.classList.toggle('on-' + l.dataset.k, !!(i && i.checked)); });
+  document.querySelectorAll('[data-owncount] [data-n]').forEach((b) => { b.textContent = document.querySelectorAll(`label.own input[value="${b.dataset.n}"]:checked`).length; });
+}
 function syncOpts() {
   document.querySelectorAll('label.opt').forEach((l) => { const i = l.querySelector('input'); l.classList.toggle('on', !!(i && i.checked)); });
 }
@@ -1503,9 +2082,23 @@ const ACT = {
   day: (el) => { ui.day = Number(el.dataset.i); render(); },
   theme: () => { try { localStorage.setItem('ra-theme', theme() === 'light' ? 'dark' : 'light'); } catch (e) { /* */ } render(); },
   title: async (el) => { const v = S.data.videos.find((x) => x.id === el.dataset.v); const t = prompt('Tema del video (por ejemplo: "Ansiedad en el trabajo"):', v.title || ''); if (t !== null) await st.setTitle(v, t); },
-  lookPick: (el) => { ui.look = Object.assign({}, ui.look || st.look()); ui.look[el.dataset.k] = el.dataset.c; render(); },
-  lookReset: () => { ui.look = { main: '#FFB547', u0: '#FF6B5B', u1: '#FF9F2E', u2: '#5A5D67' }; render(); },
-  lookSave: async () => { await st.saveLook(ui.look || st.look()); ui.look = null; },
+  lk: (el) => { lkSet(el.dataset.p, el.dataset.c); render(); },
+  lkMode: (el) => { ui.lk = Object.assign({}, ui.lk || {}, { mode: el.dataset.k }); render(); },
+  lkSec: (el) => { ui.lk = Object.assign({ mode: theme() }, ui.lk || {}, { sec: el.dataset.k }); render(); },
+  lkStage: (el) => { ui.lk = Object.assign({ mode: theme() }, ui.lk || {}, { stage: el.dataset.k }); render(); },
+  lkLv: (el) => { ui.lk = Object.assign({ mode: theme() }, ui.lk || {}, { lv: Number(el.dataset.k) }); render(); },
+  lkReset: () => {
+    const mode = (ui.lk && ui.lk.mode) || theme(); const sec = (ui.lk && ui.lk.sec) || 'main';
+    const keys = { main: ['main'], urg: ['u0', 'u1', 'u2'], etapas: ['stPre', 'stRod', 'stPost', 'bdPre', 'bdRod', 'bdPost', 'stOn', 'stOff', 'bdOp', 'fgOn'], racha: ['r1', 'r2', 'r3', 'r4'], meta: ['meta'], wallet: ['wallet'] }[sec];
+    keys.forEach((k) => lkSet(k, JSON.parse(JSON.stringify(LOOK_DEF[mode][k])))); render();
+  },
+  lookSave: async () => {
+    const saved = JSON.parse(JSON.stringify(st.settings().look || {}));
+    const edit = (ui.lk && ui.lk.data) || {};
+    for (const m of ['dark', 'light']) if (edit[m]) saved[m] = Object.assign({}, saved[m] || {}, edit[m]);
+    if (saved.dark) ['main', 'u0', 'u1', 'u2'].forEach((k) => { if (saved.dark[k]) saved[k] = saved.dark[k]; });
+    await st.saveLook(saved); ui.lk = Object.assign({}, ui.lk || {}, { data: {} });
+  },
   ruleStep: (el) => {
     const base = Object.assign({}, R.DEFAULT_RULES, st.settings().rules || {});
     ui.rules = Object.assign({}, ui.rules || {});
@@ -1528,7 +2121,14 @@ const ACT = {
   remSave: async () => { await st.saveReminders(Object.assign({}, st.settings().reminders || {}, ui.rem || {})); ui.rem = null; },
   propWithdraw: async (el) => { const p = st.proposals().find((x) => x.id === el.dataset.id); if (p && confirm('¿Retirar la propuesta? Tu socio ya no podrá aprobarla.')) await st.decideProposal(p, 'retirada'); },
   propDecide: async (el) => { const p = st.proposals().find((x) => x.id === el.dataset.id); if (!p) return; if (el.dataset.s === 'aprobada' && !confirm(p.kind === 'pct' ? '¿Aprobar los nuevos porcentajes? Rigen desde el próximo proyecto.' : '¿Aprobar las nuevas reglas? Se aplican desde ahora.')) return; await st.decideProposal(p, el.dataset.s); },
-  stage: (el) => { ui.stage = el.dataset.k; render(); },
+  stage: (el) => {
+    const k = el.dataset.k;
+    if (k === 'rod' && ui.stage === 'rod') { render(); return; }
+    ui.stage = k;
+    if (k === 'rod') { const now = new Date(); const r = weekRodaje(st.ctx(), now); if (r && now >= new Date(new Date(r.starts_at).getTime() - R.RULES.open * 60000) && R.limaDate(now) === R.limaDate(r.starts_at)) { location.hash = '#/e/' + r.id; return; } }
+    render();
+  },
+  pastToggle: (el) => { ui.past = Object.assign({}, ui.past || {}); ui.past[el.dataset.k] = !ui.past[el.dataset.k]; render(); },
   scope: (el) => { ui.scope = el.dataset.k; render(); },
   mark: (el) => { const v = S.data.videos.find((x) => x.id === el.dataset.v); openSheet(sheetMark(v, el.dataset.k, el.dataset.h)); },
   quick: async (el) => {
@@ -1537,19 +2137,51 @@ const ACT = {
     const hire = el.dataset.h ? S.data.hires.find((h) => h.id === el.dataset.h) : null;
     const cm = R.canMark(v, k, S.me, st.ctx(v.project_id), new Date(), { hire });
     if (!cm.ok) { st.toast(cm.why || 'Todavía no se puede', 'bad'); return; }
-    if (cm.take && !confirm(`Vas a tomar ${R.KIND_LABEL[k].toLowerCase()} del video ${v.num} de ${st.member(v.owner).name}. El pago pasa a ti y queda en el historial. ¿Seguir?`)) return;
-    if (cm.late && !confirm('Está fuera de plazo: se paga igual, pero resta 3 puntos de racha. ¿Marcar?')) return;
+    if (k === 'rodaje' && cm.split && !confirm(`El video ${v.num} no tiene storyboard. Se graba igual y el valor del storyboard se reparte mitad y mitad. ¿Marcar grabado?`)) return;
     const amt = gain(v, k, cm, !!hire);
     const rect = el.getBoundingClientRect();
     el.classList.add('done');
+    const before = R.streak(S.me.id, st.ctx(v.project_id), new Date()).pts;
     const t = await st.markTask(v, k, hire ? { hire_id: hire.id } : {}, null);
     if (v.owner === S.me.id && !hire) ui.burst = Date.now();
-    fly(rect, amt ? '+ ' + R.money(amt) : 'Apoyo ✓');
+    if (amt) fly(rect, '+ ' + R.money(amt));
     showUndo(t, amt);
+    afterMark(v, k, cm, before);
   },
+  claim: async (el) => {
+    const v = S.data.videos.find((x) => x.id === el.dataset.v);
+    const k = el.dataset.k;
+    const cm = R.canMark(v, k, S.me, st.ctx(v.project_id), new Date());
+    if (!cm.claim) { st.toast(cm.why || 'Ya no se puede tomar', 'bad'); return; }
+    const c = await st.claimTask(v, k);
+    if (c && c.id) { ui.undo = { claim: c.id, until: Date.now() + 8000, text: `Lo tomaste · entrégalo antes de ${R.fmtWhen(cm.limit)}` }; render(); setTimeout(() => { if (ui.undo && ui.undo.claim === c.id) { ui.undo = null; render(); } }, 8000); }
+  },
+  rsvp: async (el) => {
+    const e = evById(el.dataset.e);
+    const k = el.dataset.k;
+    if (k === 'no' && e.kind === 'rodaje') { openSheet(sheetNotice(e, false)); return; }
+    if (k === 'guillermo') { ACT.hire(el); return; }
+    ui.evOpen = Object.assign({}, ui.evOpen || {}); delete ui.evOpen[e.id];
+    await st.setRsvp(e, k);
+  },
+  evToggle: (el) => { ui.evOpen = Object.assign({}, ui.evOpen || {}); ui.evOpen[el.dataset.e] = !ui.evOpen[el.dataset.e]; render(); },
+  rsvpChange: (el) => { ui.evOpen = Object.assign({}, ui.evOpen || {}); ui.evOpen[el.dataset.e] = 'ask'; render(); },
+  popClose: () => { ui.rpop = null; render(); },
+  reproVideo: (el) => {
+    const v = S.data.videos.find((x) => x.id === el.dataset.v);
+    const now = new Date();
+    const cur = R.rodajeOf(v, st.ctx(v.project_id));
+    const next = S.data.events.filter((e) => e.kind === 'rodaje' && active(e) && e.project_id === v.project_id && new Date(e.starts_at) > now && (!cur || e.id !== cur.id)).sort(byStart);
+    openSheet(`<h2>Reprogramar el video ${v.num}</h2><p class="sub" style="margin:0">Sin guion no se graba. Pasa a otro rodaje y ${esc(first(st.member(v.owner)))} vuelve a tener plazo hasta el día anterior a las ${R.hm(R.RULES.pre)}.</p>
+      ${next.map((e) => `<button class="btn x-amber" data-act="reproGo" data-v="${v.id}" data-e="${e.id}">${R.fmtWhen(e.starts_at)} · ${evTitle(e, st.ctx(v.project_id)).vt || 'sin videos'}</button>`).join('') || '<p class="empty">No hay rodajes siguientes.</p>'}
+      ${isPartner(S.me) ? `<button class="btn b-ghost" data-act="reproNew" data-v="${v.id}">Programar un rodaje nuevo</button>` : ''}<button class="btn b-ghost" data-act="close">Cancelar</button>`);
+  },
+  reproGo: async (el) => { const v = S.data.videos.find((x) => x.id === el.dataset.v); sheetHtml = null; await st.moveVideo(v, el.dataset.e); },
+  reproNew: (el) => { const v = S.data.videos.find((x) => x.id === el.dataset.v); openSheet(dateTimeSheet('newRodV', 'Rodaje nuevo', `Para el video ${v.num}.`, { v: v.id }, R.addDays(R.limaDate(new Date()), 2), '10:00', 'Programar')); },
   undoQuick: async (el) => {
     const u = ui.undo; if (!u) return;
     ui.undo = null;
+    if (u.claim) { await st.unclaim(u.claim); return; }
     const rect = el.getBoundingClientRect();
     await st.undoOwn(u.id);
     if (u.amt) fly(rect, '− ' + R.money(u.amt), true);
@@ -1626,7 +2258,7 @@ const ACT = {
   hireDecide: async (el) => { const h = S.data.hires.find((x) => x.id === el.dataset.id); await st.decideHire(h, el.dataset.s); },
   signOut: () => st.signOut(),
   google: () => { location.href = st.googleUrl(); },
-  demoAs: (el) => st.demoSwitch(el.dataset.id),
+  demoAs: (el) => { ui.undo = null; ui.rpop = null; return st.demoSwitch(el.dataset.id); },
   demoReset: () => { if (confirm('¿Borrar todos los datos de la demo?')) st.demoReset(); },
   seed: async () => { await seedDemo(); location.hash = '#/'; location.reload(); }
 };
@@ -1659,7 +2291,8 @@ const FORM = {
     if (soon.length && !confirm(`Ojo: ${soon.length === 1 ? 'un video se publica' : soon.length + ' videos se publican'} muy cerca del rodaje (${R.fmtDay(rd)}): su montaje vencería antes o el mismo día. ¿Guardar igual?`)) return;
     await st.reparto(rod, videos);
     ui.stage = 'pre';
-    location.hash = '#/videos';
+    const mt = S.data.events.find((e) => e.kind === 'reunion' && e.rodaje_id === rod.id && active(e) && !e.ended_at);
+    location.hash = mt ? '#/e/' + mt.id : '#/videos';
   },
   mark: async (f) => {
     const v = S.data.videos.find((x) => x.id === f.v);
@@ -1668,9 +2301,11 @@ const FORM = {
     const hire = f.h ? S.data.hires.find((h) => h.id === f.h) : null;
     const cm = R.canMark(v, f.k, S.me, st.ctx(v.project_id), new Date(), { hire });
     const amt = gain(v, f.k, cm, !!hire);
+    const before = R.streak(S.me.id, st.ctx(v.project_id), new Date()).pts;
     const t = await st.markTask(v, f.k, extra, null);
-    fly(centerRect(), amt ? '+ ' + R.money(amt) : 'Apoyo ✓');
+    if (amt) fly(centerRect(), '+ ' + R.money(amt));
     showUndo(t, amt);
+    afterMark(v, f.k, cm, before);
   },
   notice: async (f) => {
     const e = evById(f.e);
@@ -1693,12 +2328,19 @@ const FORM = {
   },
   moveEv: async (f) => { const e = evById(f.e); sheetHtml = null; if (e.kind === 'reunion' && e.rodaje_id) { const r = evById(e.rodaje_id); if (r && R.at(f.d, f.t) >= R.preDueFor(r.starts_at)) throw new Error('La reunión tiene que ser antes del plazo de preproducción'); } await st.moveEvent(e, f.d, f.t); },
   extraMeet: async (f) => { const r = evById(f.r); sheetHtml = null; await st.extraMeeting(r, f.d, f.t); },
+  newRodV: async (f) => {
+    const v = S.data.videos.find((x) => x.id === f.v);
+    sheetHtml = null;
+    const r = await st.newRodaje(v.project_id, [], f.d, f.t);
+    if (r && r.id) await st.moveVideo(v, r.id);
+  },
   newRod: async (f) => {
     const c = st.ctx();
     const ids = c.videos.filter((v) => !R.rodajeOf(v, c) && !R.videoState(v, c).r).map((v) => v.id);
     sheetHtml = null;
     await st.newRodaje(S.projectId, ids, f.d, f.t);
   },
+  phone: async (f) => { await st.setPhone(f.m, f.p); },
   pay: async (f, form) => {
     const file = form.proof && form.proof.files[0];
     let path = null;
@@ -1717,7 +2359,7 @@ document.addEventListener('click', async (e) => {
   if (el.tagName === 'A' && el.getAttribute('href')) { sheetHtml = null; location.hash = el.getAttribute('href'); return; }
   try { await fn(el, e); } catch (err) { console.error(err); }
 });
-document.addEventListener('change', (e) => { if (e.target.closest('label.opt')) syncOpts(); });
+document.addEventListener('change', (e) => { if (e.target.closest('label.opt')) syncOpts(); if (e.target.closest('label.own')) syncOwn(); if (e.target.dataset && e.target.dataset.lk) { lkSet(e.target.dataset.lk, e.target.dataset.num ? Number(e.target.value) : e.target.value); render(); } });
 document.addEventListener('submit', async (e) => {
   const form = e.target.closest('form[data-form]');
   if (!form) return;

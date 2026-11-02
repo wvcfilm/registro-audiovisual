@@ -46,7 +46,11 @@ export function money(n) {
 // ---------- Valor de cada tarea (cláusula cuarta) ----------
 export const DEFAULT_PCT = { pre: 25, rod: 35, mon: 16, aca: 24 };
 // Reglas de registro del equipo (las ajusta el administrador con aprobación del socio).
-export const DEFAULT_RULES = { open: 15, punt: 10, tol: 45, pre: 1080, mon: 2, fin: 1, undo: 10, avr: 1080, avm: 24 };
+// 1.3: take = horas antes del rodaje hasta las que se puede tomar la preproducción del compañero;
+// conf = horas antes de la reunión para confirmar asistencia; madr = fin de la madrugada (minutos: 300 = 05:00).
+export const DEFAULT_RULES = { open: 15, punt: 10, tol: 45, pre: 1080, mon: 2, fin: 1, undo: 10, avr: 1080, avm: 24, take: 5, conf: 12, madr: 300 };
+// Puntos de racha nuevos (1.3).
+export const PTS = { rescue: 3, claimFail: -4, noConfirm: -2 };
 export const RULES = Object.assign({}, DEFAULT_RULES);
 export function setRules(r) { Object.assign(RULES, DEFAULT_RULES, r || {}); }
 export const hm = (mins) => String(Math.floor(mins / 60)).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0');
@@ -125,6 +129,13 @@ export function videoState(video, ctx, now = new Date()) {
   };
 }
 
+export const ceilCent = (x) => Math.ceil(Math.round(x * 1e6) / 1e4) / 100;
+// El otro socio (para repartir el storyboard no hecho).
+export function other(ctx, memberId) {
+  const m = (ctx.members || []).find((x) => x.id !== memberId && (x.role === 'admin' || x.role === 'socio') && x.active !== false);
+  return m ? m.id : memberId;
+}
+
 function isCollabTask(task, ctx) {
   const m = ctx.members.find((x) => x.id === task.done_by);
   return !!(m && m.role === 'colaborador');
@@ -168,6 +179,11 @@ export function payouts(project, ctx, now = new Date()) {
         add(doer.id, STAGE_OF[kind], covered);
         if (value - covered > 1e-9) add(v.owner, STAGE_OF[kind], value - covered);
         if (share - value > 1e-9) collabExtra[doer.id] = (collabExtra[doer.id] || 0) + (share - value);
+      } else if (t.split) {
+        // 1.3: grabado sin storyboard → su valor se reparte mitad y mitad; el centavo extra es del dueño del video.
+        const own = ceilCent(value / 2);
+        add(v.owner, STAGE_OF[kind], own);
+        add(t.split_with || other(ctx, v.owner), STAGE_OF[kind], value - own);
       } else {
         add(to, STAGE_OF[kind], value);
       }
@@ -179,8 +195,37 @@ export function payouts(project, ctx, now = new Date()) {
 }
 
 // ---------- Asistencia (7.2, 7.3, 7.4, 7.7) ----------
-export function noticeDeadline(event) {
-  return event.kind === 'rodaje' ? at(addDays(limaDate(event.starts_at), -1), hm(RULES.avr)) : new Date(new Date(event.starts_at).getTime() - RULES.avm * 3600 * 1000);
+// 1.3: plazo para confirmar asistencia (y para avisar a tiempo que no irás).
+// Rodaje: el día anterior a las 18:00. Reunión: 12 h antes; si eso cae de madrugada (00:00 a 04:59),
+// el plazo pasa a las 23:59 del día anterior.
+export function confirmDeadline(event) {
+  if (event.kind === 'rodaje') return at(addDays(limaDate(event.starts_at), -1), hm(RULES.avr));
+  const t = new Date(new Date(event.starts_at).getTime() - RULES.conf * 3600 * 1000);
+  const [h, m] = limaTime(t).split(':').map(Number);
+  if (h * 60 + m < RULES.madr) return at(addDays(limaDate(t), -1), '23:59');
+  return t;
+}
+export function noticeDeadline(event) { return confirmDeadline(event); }
+// La confirmación existe desde la 1.3: lo anterior no resta.
+export const V13_FROM = new Date('2026-11-02T00:00:00-05:00');
+
+// Respuesta de asistencia de un integrante: voy / no / guillermo (o nada).
+export function rsvpOf(event, memberId, ctx) {
+  const att = (ctx.attendance || []).find((a) => a.event_id === event.id && a.member_id === memberId);
+  const h = (ctx.hires || []).find((x) => x.event_id === event.id && x.hired_by === memberId && (x.status === 'pendiente' || x.status === 'aceptada'));
+  if (h) return { k: 'guillermo', at: h.created_at ? new Date(h.created_at) : null, hire: h };
+  if (att && att.notice && att.notice.sent_at) return { k: 'no', at: new Date(att.notice.sent_at), att };
+  if (att && att.rsvp === 'voy') return { k: 'voy', at: att.rsvp_at ? new Date(att.rsvp_at) : null, att };
+  return { k: null, att: att || null };
+}
+// Confirmación: ¿ya respondió, puede cambiar, o venció sin responder (−2)?
+export function rsvpState(event, memberId, ctx, now = new Date()) {
+  const due = confirmDeadline(event);
+  const r = rsvpOf(event, memberId, ctx);
+  const answeredInTime = !!(r.k && (!r.at || r.at <= due));
+  const created = event.created_at ? new Date(event.created_at) : null;
+  const missed = active(event) && now > due && due >= V13_FROM && !answeredInTime && !(created && created > due);
+  return { due, k: r.k, open: now <= due && active(event), missed, answeredInTime, r };
 }
 export function attendanceStatus(event, att, now = new Date()) {
   const start = new Date(event.starts_at);
@@ -248,7 +293,7 @@ export function canCheckIn(event, now = new Date()) {
 // ---------- Racha (6.4) ----------
 export const LEVELS = [
   { min: 20, name: 'Imparable', color: '#B98CFF' },
-  { min: 10, name: 'Responsable', color: '#FF5A36' },
+  { min: 10, name: 'Responsable', color: '#5CC8FF' },
   { min: 5, name: 'Constante', color: '#FF9F2E' },
   { min: 1, name: 'Cumplidor', color: '#FFB547' },
   { min: 0, name: 'Sin racha', color: '#6B6B75' }
@@ -286,8 +331,20 @@ export function streakEvents(memberId, ctx, now = new Date()) {
       if (st.ac && st.ac.done_by === memberId) ev.push({ at: new Date(st.ac.done_at), pts: st.finalLate ? -3 : 1, why: st.finalLate ? `Video ${v.num} entregado tarde` : `Video ${v.num} entregado a tiempo` });
     }
   }
+  // 1.3: rescate (+3 por entregable tomado y entregado) y compromiso incumplido (−4).
+  for (const c of (ctx.claims || []).filter((x) => x.member_id === memberId && (x.status || 'activa') === 'activa' && PRE[x.kind])) {
+    const v = ctx.videos.find((x) => x.id === c.video_id);
+    if (!v) continue;
+    const t = taskOf(ctx.tasks, v.id, c.kind);
+    const rNow = rodajeOf(v, ctx);
+    if (!t && (!rNow || rNow.id !== c.rodaje_id)) continue; // se reprogramó: el compromiso anterior no cuenta
+    if (t && t.done_by === memberId && !t.split) ev.push({ at: new Date(t.done_at), pts: PTS.rescue, why: `Rescataste el ${c.kind} del video ${v.num}` });
+    else if (claimFailed(c, v, ctx, now)) ev.push({ at: new Date(c.limit_at || takeLimit(v, c.kind, ctx)), pts: PTS.claimFail, why: `Tomaste el ${c.kind} del video ${v.num} y no lo entregaste` });
+  }
+  const isPartner = (ctx.members || []).some((m) => m.id === memberId && (m.role === 'admin' || m.role === 'socio'));
   for (const e of (ctx.events || []).filter(active)) {
     const att = (ctx.attendance || []).find((a) => a.event_id === e.id && a.member_id === memberId);
+    if (isPartner) { const rs = rsvpState(e, memberId, ctx, now); if (rs.missed) ev.push({ at: rs.due, pts: PTS.noConfirm, why: `${e.kind === 'rodaje' ? 'Rodaje' : 'Reunión'}: no confirmaste asistencia` }); }
     const s = memberStatus(e, memberId, ctx, now);
     if (s.k === 'pendiente' || s.k === 'no_req') continue;
     if (s.pts !== 0) ev.push({ at: att && att.arrived_at ? new Date(att.arrived_at) : new Date(e.starts_at), pts: s.pts, why: `${e.kind === 'rodaje' ? 'Rodaje' : 'Reunión'}: ${s.label.toLowerCase()}` });
@@ -340,8 +397,27 @@ export function deliveries(memberId, ctx, now = new Date()) {
   return { total, onTime, missed };
 }
 
-// ---------- Qué se puede marcar y deshacer (lo mismo que exige la base de datos) ----------
 const PRE = { guion: 1, storyboard: 1 };
+// ---------- 1.3 · Tomar = comprometerse y luego entregar ----------
+// Hasta cuándo se puede tomar (y entregar) lo del compañero: preproducción hasta 5 h antes del rodaje;
+// montaje que pasó al administrador (5.7) hasta el plazo del video final.
+export function takeLimit(video, kind, ctx) {
+  if (PRE[kind]) { const r = rodajeOf(video, ctx); return r ? new Date(new Date(r.starts_at).getTime() - RULES.take * 3600 * 1000) : null; }
+  if (kind === 'montaje') { const owner = (ctx.members || []).find((m) => m.id === video.owner); return deadlines(video, owner, {}).finalDue; }
+  return null;
+}
+// Compromiso vigente sobre una tarea (si el video se reprogramó, el compromiso anterior ya no cuenta).
+export function claimOf(video, kind, ctx) {
+  const r = PRE[kind] ? rodajeOf(video, ctx) : null;
+  return (ctx.claims || []).find((c) => c.video_id === video.id && c.kind === kind && (c.status || 'activa') === 'activa' && (!PRE[kind] || (r && c.rodaje_id === r.id))) || null;
+}
+// Compromisos incumplidos: se pasó el límite y no se entregó.
+export function claimFailed(c, video, ctx, now = new Date()) {
+  const lim = c.limit_at ? new Date(c.limit_at) : takeLimit(video, c.kind, ctx);
+  return !!(lim && now > lim && !taskOf(ctx.tasks, video.id, c.kind));
+}
+
+// ---------- Qué se puede marcar y deshacer (lo mismo que exige la base de datos) ----------
 export function canMark(video, kind, me, ctx, now = new Date(), opts = {}) {
   const st = videoState(video, ctx, now);
   const owner = st.owner || {};
@@ -350,9 +426,18 @@ export function canMark(video, kind, me, ctx, now = new Date(), opts = {}) {
   if (done) return { ok: false, why: 'Hecho' };
   if (PRE[kind]) {
     if (opts.hire) return { ok: true };
-    if (isOwner) return st.d.preDue && now > st.d.preDue ? { ok: false, gone: true, why: 'Venció el plazo: pasó a tu compañero' } : { ok: true };
-    if (st.d.preDue && now > st.d.preDue) return { ok: true, take: true };
-    return { ok: false, why: st.d.preDue ? `Es de ${owner.name}. Si no la entrega, podrás tomarla después del ${fmtWhen(st.d.preDue)}` : `Es de ${owner.name}` };
+    const c = claimOf(video, kind, ctx);
+    const lim = takeLimit(video, kind, ctx);
+    if (isOwner) {
+      if (st.d.preDue && now > st.d.preDue) return { ok: false, gone: true, by: c ? c.member_id : null, why: c ? 'Lo hará tu compañero' : 'Venció el plazo: pasó a tu compañero' };
+      return { ok: true };
+    }
+    if (me.role !== 'admin' && me.role !== 'socio') return { ok: false, why: `Es de ${owner.name}` };
+    if (!st.d.preDue || now <= st.d.preDue) return { ok: false, why: st.d.preDue ? `Es de ${owner.name}. Si no la entrega, podrás tomarla después del ${fmtWhen(st.d.preDue)}` : `Es de ${owner.name}` };
+    if (c && c.member_id === me.id) return lim && now > lim ? { ok: false, late: true, why: 'Pasó el límite para entregarlo' } : { ok: true, take: true, claimed: true, limit: lim };
+    if (c) return { ok: false, why: 'Ya lo tomó otra persona' };
+    if (lim && now > lim) return { ok: false, late: true, why: 'Pasó el límite para tomarlo' };
+    return { ok: false, claim: true, limit: lim, why: 'Tómalo para hacerlo' };
   }
   if (kind === 'rodaje') {
     const r = st.rodaje;
@@ -360,19 +445,27 @@ export function canMark(video, kind, me, ctx, now = new Date(), opts = {}) {
     const open = new Date(new Date(r.starts_at).getTime() - RULES.open * 60000);
     if (now < open) return { ok: false, why: `Se habilita el ${fmtWhen(open)}` };
     if (limaDate(now) !== limaDate(r.starts_at)) return { ok: false, why: 'El día del rodaje ya pasó: reprográmalo' };
-    if (!st.g || !st.s) return { ok: false, why: 'Primero se necesitan el guion y el storyboard' };
+    // 1.3: sin guion no se graba (se reprograma); sin storyboard sí se graba y su valor se reparte.
+    if (!st.g) return { ok: false, noGuion: true, why: 'Sin guion no se graba: reprográmalo' };
     const mine = (ctx.attendance || []).find((a) => a.event_id === r.id && a.member_id === me.id);
     if (!mine || !mine.arrived_at) return { ok: false, why: mine && mine.claimed_at ? 'Tu llegada espera confirmación del administrador' : 'Primero registra tu llegada al rodaje' };
-    if (isOwner) return { ok: true };
+    const split = !st.s;
+    if (isOwner) return { ok: true, split };
     const oa = (ctx.attendance || []).find((a) => a.event_id === r.id && a.member_id === video.owner);
     if (oa && oa.arrived_at) return { ok: false, why: `${owner.name} está en el rodaje: lo marca él` };
     if (oa && oa.notice && oa.notice.sent_at && new Date(oa.notice.sent_at) <= noticeDeadline(r) && oa.notice.choice !== 'other') return { ok: false, why: `${owner.name} avisó a tiempo: sus videos se reprograman` };
-    return { ok: true, take: true };
+    return { ok: true, take: true, split };
   }
   if (kind === 'montaje') {
     if (!st.r) return { ok: false, why: 'Primero tiene que grabarse el video' };
     if (isOwner) return st.montajeMissed ? { ok: false, why: 'Venció el plazo del montaje: pasa al administrador (5.7)' } : { ok: true };
-    if (me.role === 'admin' && st.montajeMissed) return { ok: true, take: true };
+    if (me.role === 'admin' && st.montajeMissed) {
+      const c = claimOf(video, kind, ctx);
+      const lim = takeLimit(video, kind, ctx);
+      if (c && c.member_id === me.id) return { ok: true, take: true, claimed: true, limit: lim };
+      if (lim && now > lim) return { ok: false, late: true, why: 'Pasó el plazo del video final' };
+      return { ok: false, claim: true, limit: lim, why: 'Tómalo para hacerlo' };
+    }
     return { ok: false, why: `Es de ${owner.name}` };
   }
   if (kind === 'acabado') {

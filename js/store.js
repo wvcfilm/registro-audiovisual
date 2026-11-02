@@ -1,6 +1,6 @@
 // Estado de la app y operaciones del día a día.
 import { api, TABLES, isPractice, hasServer } from './api.js';
-import { setRules, DEFAULT_PCT, DEFAULT_RULES, at, addDays, payouts, attendanceStatus, memberStatus, videoState, limaDate, adminAbsent, preDueFor, meetingOf as rMeetingOf } from './rules.js';
+import { setRules, DEFAULT_PCT, DEFAULT_RULES, at, addDays, payouts, attendanceStatus, memberStatus, videoState, limaDate, adminAbsent, preDueFor, meetingOf as rMeetingOf, rodajeOf, takeLimit, claimOf } from './rules.js';
 
 export const S = {
   ready: false, session: null, teams: [], teamId: null, me: null, projectId: null,
@@ -36,7 +36,7 @@ export async function loadTeams() {
 
 export async function load() {
   if (!S.teamId) return;
-  const OPTIONAL = { proposals: 1 };
+  const OPTIONAL = { proposals: 1, claims: 1 };
   const rows = await Promise.all(TABLES.map((t) => OPTIONAL[t] ? api.list(t, S.teamId).catch(() => []) : api.list(t, S.teamId)));
   TABLES.forEach((t, i) => { S.data[t] = rows[i] || []; });
   try { S.settings = (await api.rpc('team_settings', { t: S.teamId })) || {}; } catch (e) { S.settings = S.settings || {}; }
@@ -77,6 +77,7 @@ export function ctx(projectId = S.projectId) {
     events,
     attendance: d.attendance.filter((a) => evIds.has(a.event_id)),
     hires: d.hires.filter((h) => evIds.has(h.event_id)),
+    claims: (d.claims || []).filter((c) => vids.has(c.video_id)),
     jobs: []
   };
 }
@@ -300,3 +301,62 @@ export function demoReset() { api.reset(); location.hash = '#/'; location.reload
 export function videoCtx(v) { return videoState(v, ctx(v.project_id)); }
 export function eventStatus(e, memberId, now) { return memberStatus(e, memberId, ctx(e.project_id), now); }
 export { attOf, limaDate };
+
+// ==================================================================
+// 1.3
+// ==================================================================
+// Tomar = comprometerse: pasa la tarea a quien la toma; cobra al entregarla.
+export function claimTask(video, kind) {
+  const c = ctx(video.project_id);
+  const r = rodajeOf(video, c);
+  const lim = takeLimit(video, kind, c);
+  const row = { team_id: S.teamId, project_id: video.project_id, video_id: video.id, kind, member_id: S.me.id, status: 'activa', rodaje_id: kind === 'montaje' ? null : (r ? r.id : null), limit_at: lim ? lim.toISOString() : null };
+  return run(() => api.insert('claims', row), null);
+}
+export const unclaim = (claimId) => run(() => api.remove('claims', claimId), 'Ya no lo tienes tomado');
+export const myClaim = (video, kind) => { const c = claimOf(video, kind, ctx(video.project_id)); return c && c.member_id === S.me.id ? c : null; };
+
+// Confirmar asistencia: voy · no iré (es el aviso a tiempo) · Guillermo (solo reunión).
+export function setRsvp(event, k, extra = {}) {
+  return run(async () => {
+    const a = attOf(event.id, S.me.id);
+    const h = S.data.hires.find((x) => x.event_id === event.id && x.hired_by === S.me.id && (x.status === 'pendiente' || x.status === 'aceptada'));
+    if (h && k !== 'guillermo') await api.update('hires', h.id, { status: 'cancelada', decided_at: new Date().toISOString() });
+    if (k === 'voy') {
+      const patch = { rsvp: 'voy', rsvp_at: new Date().toISOString() };
+      if (a && a.notice && a.notice.sent_at) patch.notice = null;
+      if (a) return api.update('attendance', a.id, patch);
+      return api.insert('attendance', Object.assign({ team_id: S.teamId, event_id: event.id, member_id: S.me.id }, patch));
+    }
+    if (k === 'no') {
+      const notice = Object.assign({ sent_at: new Date().toISOString(), decision: null, reason: 'normal' }, extra);
+      if (a) return api.update('attendance', a.id, { notice, rsvp: null });
+      return api.insert('attendance', { team_id: S.teamId, event_id: event.id, member_id: S.me.id, notice });
+    }
+    if (k === 'guillermo') {
+      if (a && (a.rsvp || (a.notice && a.notice.sent_at))) await api.update('attendance', a.id, { rsvp: null, notice: null });
+      if (h) return h;
+      const other = partners().find((m) => m.id !== S.me.id);
+      return api.insert('hires', { team_id: S.teamId, project_id: event.project_id, event_id: event.id, hired_by: S.me.id, present: other.id, pct: 80, status: 'pendiente' });
+    }
+  }, k === 'voy' ? 'Asistencia confirmada' : k === 'no' ? 'Aviso enviado' : 'Le pediste a tu compañero ir con Guillermo');
+}
+
+// Reprogramar un video (sin guion no se graba): pasa a otro rodaje y se reabre el plazo de su dueño.
+export const moveVideo = (video, rodajeId) => run(() => api.rpc('move_video', { v: video.id, to_rodaje: rodajeId }), 'Video reprogramado');
+
+// WhatsApp de cada integrante (9 dígitos, empieza con 9).
+export const PHONE_RE = /^9\d{8}$/;
+export function setPhone(memberId, phone) {
+  const p = String(phone || '').replace(/\D/g, '');
+  if (p && !PHONE_RE.test(p)) return Promise.reject(new Error('El número debe tener 9 dígitos y empezar con 9'));
+  return run(() => api.update('members', memberId, { phone: p || null }), 'WhatsApp guardado');
+}
+export const waLink = (m, text) => m && m.phone ? `https://wa.me/51${m.phone}?text=${encodeURIComponent(text || '')}` : `https://wa.me/?text=${encodeURIComponent(text || '')}`;
+
+// Reparto dentro de la reunión: crea los videos (tema y dueño) del rodaje de esa reunión.
+export function repartoReunion(meeting, rows) {
+  const rod = S.data.events.find((e) => e.id === meeting.rodaje_id);
+  if (!rod) return Promise.reject(new Error('La reunión no tiene rodaje'));
+  return reparto(rod, rows);
+}

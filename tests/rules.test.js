@@ -44,9 +44,11 @@ function scenario() {
     });
   });
   for (const e of events) {
-    attendance.push({ id: 'aW' + e.id, event_id: e.id, member_id: 'W', arrived_at: new Date(new Date(e.starts_at).getTime() - 2 * 60000).toISOString() });
+    // 1.3: los dos confirmaron asistencia a tiempo (dos días antes).
+    const rsvp_at = new Date(new Date(e.starts_at).getTime() - 48 * 3600000).toISOString();
+    attendance.push({ id: 'aW' + e.id, event_id: e.id, member_id: 'W', rsvp: 'voy', rsvp_at, arrived_at: new Date(new Date(e.starts_at).getTime() - 2 * 60000).toISOString() });
     const late = e.id === 'J0' || e.id === 'J2';
-    attendance.push({ id: 'aS' + e.id, event_id: e.id, member_id: 'S', arrived_at: new Date(new Date(e.starts_at).getTime() + (late ? 22 : 3) * 60000).toISOString() });
+    attendance.push({ id: 'aS' + e.id, event_id: e.id, member_id: 'S', rsvp: 'voy', rsvp_at, arrived_at: new Date(new Date(e.starts_at).getTime() + (late ? 22 : 3) * 60000).toISOString() });
   }
   return { project, ctx: { members, videos, tasks, events, attendance } };
 }
@@ -187,7 +189,7 @@ test('1.1 · solo se marca lo que ya puede haber pasado', () => {
   assert.equal(canMark(vx, 'montaje', S, ctx, now).ok, false); // no se grabó
   assert.equal(canMark(vx, 'acabado', W, ctx, now).ok, false); // no hay montaje
   // después del plazo (22 dic 18:00), Williams puede tomar la preproducción
-  assert.equal(canMark(vx, 'guion', W, ctx, new Date('2026-12-22T18:01:00-05:00')).take, true);
+  assert.equal(canMark(vx, 'guion', W, ctx, new Date('2026-12-22T18:01:00-05:00')).claim, true); // 1.3: primero se toma
   // 1.2: el dueño ya no puede marcar su preproducción vencida
   assert.equal(canMark(vx, 'guion', S, ctx, new Date('2026-12-22T18:01:00-05:00')).ok, false);
   // con el plazo cambiado a las 20:00, a las 18:01 todavía es suya

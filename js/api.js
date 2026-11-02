@@ -1,7 +1,7 @@
 // Capa de datos. Misma interfaz para Supabase (real) y para el modo demo (en este navegador).
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
 
-const TABLES = ['members', 'projects', 'videos', 'tasks', 'events', 'attendance', 'hires', 'log', 'corrections', 'proposals'];
+const TABLES = ['members', 'projects', 'videos', 'tasks', 'events', 'attendance', 'hires', 'log', 'corrections', 'proposals', 'claims'];
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(16).slice(2) + Date.now().toString(16));
 
 // ------------------------------------------------------------------
@@ -155,6 +155,18 @@ class DemoAPI {
       const t = this.db.teams.find((x) => x.id === a.t); t.settings = Object.assign({}, t.settings || {}); t.settings[a.k] = a.v;
       this.log(a.t, null, 'settings.' + a.k, { new: a.v }); this.persist(); return t.settings;
     }
+    if (fn === 'move_video') {
+      const v = this.db.videos.find((x) => x.id === a.v);
+      if (!v || !this.partner(v.team_id)) throw new Error('Sin permiso');
+      if (this.db.tasks.find((t) => t.video_id === v.id && t.kind === 'rodaje')) throw new Error('Ese video ya se grabó');
+      const dst = this.db.events.find((e) => e.id === a.to_rodaje && e.kind === 'rodaje' && (e.status || 'activo') === 'activo' && e.project_id === v.project_id);
+      if (!dst) throw new Error('Elige un rodaje activo del mismo proyecto');
+      if (new Date(dst.starts_at) <= new Date()) throw new Error('Ese rodaje ya empezó');
+      for (const e of this.db.events.filter((x) => x.kind === 'rodaje' && (x.status || 'activo') === 'activo' && x.id !== dst.id && x.video_ids.indexOf(v.id) !== -1)) e.video_ids = e.video_ids.filter((id) => id !== v.id);
+      if (dst.video_ids.indexOf(v.id) === -1) dst.video_ids = dst.video_ids.concat([v.id]);
+      this.log(v.team_id, v.project_id, 'video.reprogramado', { video: v.num, to: dst.starts_at });
+      this.persist(); return null;
+    }
     throw new Error('Función desconocida: ' + fn);
   }
   async list(table, teamId) {
@@ -172,10 +184,24 @@ class DemoAPI {
     if (table === 'log') { const r = Object.assign({ id: ++this.logId, at: new Date().toISOString() }, row); this.db.log.push(r); this.persist(); return r; }
     if (table === 'tasks' && this.db.tasks.find((t) => t.video_id === row.video_id && t.kind === row.kind)) throw new Error('Esa tarea ya está marcada');
     if (table === 'attendance' && this.db.attendance.find((t) => t.event_id === row.event_id && t.member_id === row.member_id)) throw new Error('Ya existe');
+    if (table === 'claims') {
+      const me = this.me(row.team_id);
+      if (!me || row.member_id !== me.id) throw new Error('Solo puedes tomar a tu nombre');
+      if (this.db.claims.find((c) => c.video_id === row.video_id && c.kind === row.kind && (c.rodaje_id || null) === (row.rodaje_id || null))) throw new Error('Ya lo tomó alguien');
+      if (this.db.tasks.find((t) => t.video_id === row.video_id && t.kind === row.kind)) throw new Error('Esa tarea ya está hecha');
+    }
     const r = Object.assign({ id: uuid(), created_at: new Date().toISOString() }, row);
     if (table === 'tasks' && !r.done_at) r.done_at = new Date().toISOString();
     this.db[table].push(r);
     this.log(r.team_id, this.projectOf(table, r), table + '.insert', { new: r, old: null });
+    // 1.3 (igual que la base): grabar sin storyboard lo reparte mitad y mitad y lo cierra.
+    if (table === 'tasks' && r.kind === 'rodaje' && !this.db.tasks.find((t) => t.video_id === r.video_id && t.kind === 'storyboard')) {
+      const v = this.db.videos.find((x) => x.id === r.video_id);
+      const oth = this.db.members.find((m) => m.team_id === r.team_id && m.active && m.id !== v.owner && (m.role === 'admin' || m.role === 'socio'));
+      const sb = { id: uuid(), team_id: r.team_id, project_id: r.project_id, video_id: r.video_id, kind: 'storyboard', done_by: v.owner, done_at: r.done_at, split: true, split_with: oth ? oth.id : v.owner, created_at: r.created_at };
+      this.db.tasks.push(sb);
+      this.log(r.team_id, r.project_id, 'tasks.insert', { new: sb, old: null });
+    }
     this.persist(); return JSON.parse(JSON.stringify(r));
   }
   async update(table, id, patch) {
@@ -202,9 +228,14 @@ class DemoAPI {
     if (i < 0) return;
     const r = this.db[table][i];
     const me = this.me(r.team_id);
-    if (!me || me.role !== 'admin' || table === 'log') throw new Error('Sin permiso');
+    const ownClaim = table === 'claims' && me && r.member_id === me.id && !this.db.tasks.find((t) => t.video_id === r.video_id && t.kind === r.kind);
+    if (!me || (me.role !== 'admin' && !ownClaim) || table === 'log') throw new Error('Sin permiso');
     this.db[table].splice(i, 1);
     this.log(r.team_id, this.projectOf(table, r), table + '.delete', { new: null, old: r });
+    if (table === 'tasks' && r.kind === 'rodaje') {
+      const j = this.db.tasks.findIndex((t) => t.video_id === r.video_id && t.kind === 'storyboard' && t.split);
+      if (j >= 0) { const sb = this.db.tasks.splice(j, 1)[0]; this.log(r.team_id, r.project_id, 'tasks.delete', { new: null, old: sb }); }
+    }
     this.persist();
   }
   async upload(teamId, file) {
