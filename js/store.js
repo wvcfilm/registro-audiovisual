@@ -21,9 +21,46 @@ export function toast(msg, kind = 'ok') {
 export async function boot() {
   await api.handleRedirect();
   S.session = api.session();
-  if (S.session) await loadTeams();
+  if (S.session) await afterLogin();
   S.ready = true;
   emit();
+}
+// 1.5 · La sesión vencida vuelve a Entrar (antes salía "sin sesión" al aceptar la invitación).
+function sessionGone() { if (!api.session()) { S.session = null; S.teamId = null; S.me = null; return true; } return false; }
+async function afterLogin() {
+  try { await loadTeams(); } catch (e) { if (sessionGone()) return; throw e; }
+  await tryPendingInvite();
+}
+// 1.5 · Invitación en un paso: el código (y que aceptó las reglas) se guarda en el celular antes de ir a Google o al correo.
+export const pendingInvite = () => { try { return JSON.parse(localStorage.getItem('ra-invite') || 'null'); } catch (e) { return null; } };
+export const savePendingInvite = (o) => { try { localStorage.setItem('ra-invite', JSON.stringify(o)); } catch (e) { /* */ } };
+export const clearPendingInvite = () => { try { localStorage.removeItem('ra-invite'); } catch (e) { /* */ } };
+async function tryPendingInvite() {
+  const p = pendingInvite();
+  if (!p || !p.code || !p.ok || !S.session) return;
+  try {
+    const id = await api.rpc('accept_invite', { code: p.code, my_name: p.name || '' });
+    clearPendingInvite();
+    localStorage.setItem('ra-team', id);
+    S.inviteErr = null;
+    await loadTeams();
+    S.inviteDone = { name: S.me ? S.me.name : p.name, at: new Date() };
+  } catch (e) {
+    if (sessionGone()) return;
+    const msg = e.message || 'No se pudo aceptar la invitación';
+    // "Ya es de otra persona" deja la invitación guardada para entrar con la cuenta correcta.
+    if (!/ya es de/.test(msg)) clearPendingInvite();
+    S.inviteErr = { code: p.code, msg, keep: /ya es de/.test(msg) };
+  }
+}
+export const inviteSeen = () => { S.inviteDone = null; S.inviteErr = null; emit(); };
+// Cambiar de cuenta sin perder la invitación.
+export async function switchAccount() {
+  const p = pendingInvite() || (S.inviteErr && { code: S.inviteErr.code });
+  await api.signOut();
+  if (p) savePendingInvite(Object.assign({}, p));
+  location.hash = p ? '#/i/' + p.code : '#/';
+  location.reload();
 }
 
 export async function loadTeams() {
@@ -67,6 +104,7 @@ async function run(fn, okMsg) {
     if (okMsg) toast(okMsg);
     return r;
   } catch (e) {
+    if (S.session && sessionGone()) { toast('Tu sesión venció: vuelve a entrar', 'bad'); throw e; }
     toast(e.message || 'Algo salió mal', 'bad');
     throw e;
   } finally { S.busy = false; emit(); }
@@ -105,7 +143,7 @@ export const googleUrl = () => api.googleUrl();
 export async function verifyCode(email, code) {
   await api.verifyCode(email, code);
   S.session = api.session();
-  await loadTeams();
+  await afterLogin();
   emit();
 }
 export async function signOut() { await api.signOut(); location.hash = '#/'; location.reload(); }
@@ -123,9 +161,15 @@ export function invite(name, role, apoyo) {
 }
 export const inviteInfo = (code) => api.rpc('invite_info', { code });
 export async function acceptInvite(code, name) {
-  const id = await api.rpc('accept_invite', { code, my_name: name });
+  let id;
+  try { id = await api.rpc('accept_invite', { code, my_name: name }); } catch (e) {
+    if (sessionGone()) { savePendingInvite({ code, ok: true, name }); emit(); toast('Tu sesión venció: vuelve a entrar', 'bad'); return false; }
+    throw e;
+  }
+  clearPendingInvite();
   localStorage.setItem('ra-team', id);
   await loadTeams();
+  return true;
 }
 export const renameMember = (id, name) => run(() => api.update('members', id, { name: name.trim() }), 'Nombre actualizado');
 
@@ -199,6 +243,7 @@ export const saveReminders = (v) => run(() => api.rpc('save_settings', { t: S.te
 export const proposals = () => (S.data.proposals || []);
 export const pendingProposal = (kind) => proposals().find((p) => p.kind === kind && p.status === 'pendiente') || null;
 export const propose = (kind, data) => run(() => api.insert('proposals', { team_id: S.teamId, kind, data, status: 'pendiente', proposed_by: S.me.id, old: (S.settings || {})[kind] || null }), 'Propuesta enviada: tu socio la verá en su Inicio');
+export const proposeApoyo = (m, apoyo) => run(() => api.insert('proposals', { team_id: S.teamId, kind: 'apoyo', data: { member: m.id, apoyo: !!apoyo }, status: 'pendiente', proposed_by: S.me.id, old: { apoyo: !!m.apoyo } }), 'Propuesta enviada a ' + String(m.name).split(' ')[0] + ' · queda en el historial');
 export const decideProposal = (p, status) => run(() => api.update('proposals', p.id, { status }), status === 'aprobada' ? 'Aprobado: ya se aplica' : status === 'retirada' ? 'Propuesta retirada' : 'Propuesta rechazada');
 export const setTitle = (video, title) => run(() => api.update('videos', video.id, { title: title.trim() || null }), 'Tema guardado');
 

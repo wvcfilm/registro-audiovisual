@@ -307,8 +307,7 @@ export function payouts(project, ctx, now = new Date()) {
       if (hire) {
         // Hecho por Guillermo: el % va a quien lo hizo con él; el resto sigue siendo del dueño del video.
         // 1.5: el 80/20 es solo para el socio con apoyo; cualquier otro que contrata cede el 100 %.
-        const hirer = (ctx.members || []).find((m) => m.id === hire.hired_by);
-        const pct = hirer && hirer.role === 'socio' && hirer.apoyo ? Number(hire.pct || 80) / 100 : 1;
+        const pct = hirePct(hire, ctx.members);
         add(t.done_by, STAGE_OF[kind], value * pct);
         if (value * (1 - pct) > 1e-9) add(v.owner, STAGE_OF[kind], value * (1 - pct));
         guillermo[hire.hired_by] = guillermo[hire.hired_by] || { to: t.done_by, tasks: 0, amount: 0 };
@@ -415,6 +414,11 @@ export function attendanceStatus(event, att, now = new Date()) {
 
 // Guillermo: colaborador de preproducción que un socio contrata para una reunión (cobra el % de la preproducción).
 export const GUILLERMO = 'Guillermo';
+// 1.5: el 80/20 solo vale cuando contrata un socio con apoyo; cualquier otro (el líder incluido) cede el 100 %.
+export function hirePct(hire, members) {
+  const hirer = (members || []).find((m) => m.id === (hire && (hire.hired_by || hire.id || hire)));
+  return hirer && hirer.role === 'socio' && hirer.apoyo ? Number((hire && hire.pct) || 80) / 100 : 1;
+}
 export function hireFor(eventId, ctx, status = 'aceptada') {
   return (ctx.hires || []).find((h) => h.event_id === eventId && h.status === status) || null;
 }

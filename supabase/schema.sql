@@ -218,7 +218,7 @@ create or replace function create_invite(t uuid, invite_name text, invite_role t
 language plpgsql security definer set search_path = public as $$
 declare c text := upper(substr(encode(gen_random_bytes(6), 'hex'), 1, 8));
 begin
-  if not is_admin(t) then raise exception 'Solo el administrador invita'; end if;
+  if not is_admin(t) then raise exception 'Solo el líder invita'; end if;
   insert into members (team_id, name, role, apoyo, invite_code, invite_expires)
   values (t, invite_name, invite_role, gets_apoyo, c, now() + interval '7 days');
   insert into log (team_id, actor, type, data) values (t, my_member(t), 'invite', jsonb_build_object('name', invite_name, 'role', invite_role));
@@ -446,13 +446,13 @@ begin
     if not exists (select 1 from tasks where video_id = v.id and kind = 'rodaje') then raise exception 'Primero tiene que grabarse el video'; end if;
     md := case when vowner.apoyo then lima_at(v.publish_date - 2, '21:00') end;
     if me = v.owner then
-      if md is not null and now() > md then raise exception 'Venció el plazo del montaje: el video pasa al administrador (5.7)'; end if;
+      if md is not null and now() > md then raise exception 'Venció el plazo del montaje: el video pasa al líder (5.7)'; end if;
     elsif mrole <> 'admin' or md is null or now() <= md then
       raise exception 'Este montaje le corresponde al dueño del video';
     end if;
   elsif new.kind = 'acabado' then
     if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje') then raise exception 'Primero tiene que estar el montaje'; end if;
-    if me <> v.owner and mrole <> 'admin' then raise exception 'El video final lo hace el dueño o el administrador'; end if;
+    if me <> v.owner and mrole <> 'admin' then raise exception 'El video final lo hace el dueño o el líder'; end if;
   end if;
   new.done_at := now();
   return new;
@@ -488,7 +488,7 @@ begin
     elsif new.member_id = me and (mrole = 'admin' or admin_absent(new.event_id)) then
       new.arrived_at := coalesce(new.claimed_at, now());
     else
-      raise exception 'Tu llegada la confirma el administrador';
+      raise exception 'Tu llegada la confirma el líder';
     end if;
   end if;
   if new.notice ? 'sent_at' and (new.notice->>'sent_at') is not null
@@ -528,11 +528,11 @@ begin
     new.end_requested_at := now(); new.end_requested_by := me;
   end if;
   if new.ended_at is distinct from old.ended_at and new.ended_at is not null then
-    if mrole <> 'admin' and not admin_absent(new.id) then raise exception 'La reunión la finaliza el administrador'; end if;
+    if mrole <> 'admin' and not admin_absent(new.id) then raise exception 'La reunión la finaliza el líder'; end if;
     new.ended_at := coalesce(old.end_requested_at, new.end_requested_at, now());
   end if;
   if new.status is distinct from old.status then
-    if new.status = 'cancelado' and mrole <> 'admin' then raise exception 'Solo el administrador cancela'; end if;
+    if new.status = 'cancelado' and mrole <> 'admin' then raise exception 'Solo el líder cancela'; end if;
     if old.status <> 'activo' then raise exception 'Ya no está activo'; end if;
   end if;
   if new.starts_at is distinct from old.starts_at then
@@ -635,13 +635,13 @@ begin
     if not exists (select 1 from tasks where video_id = v.id and kind = 'rodaje') then raise exception 'Primero tiene que grabarse el video'; end if;
     md := case when vowner.apoyo then lima_at(v.publish_date - rule_int(new.team_id, 'mon', 2), '21:00') end;
     if me = v.owner then
-      if md is not null and now() > md then raise exception 'Venció el plazo del montaje: el video pasa al administrador (5.7)'; end if;
+      if md is not null and now() > md then raise exception 'Venció el plazo del montaje: el video pasa al líder (5.7)'; end if;
     elsif mrole <> 'admin' or md is null or now() <= md then
       raise exception 'Este montaje le corresponde al dueño del video';
     end if;
   elsif new.kind = 'acabado' then
     if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje') then raise exception 'Primero tiene que estar el montaje'; end if;
-    if me <> v.owner and mrole <> 'admin' then raise exception 'El video final lo hace el dueño o el administrador'; end if;
+    if me <> v.owner and mrole <> 'admin' then raise exception 'El video final lo hace el dueño o el líder'; end if;
   end if;
   new.done_at := now();
   return new;
@@ -659,7 +659,7 @@ create or replace function save_settings(t uuid, k text, v jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare s jsonb;
 begin
-  if not is_admin(t) then raise exception 'Solo el administrador cambia los ajustes'; end if;
+  if not is_admin(t) then raise exception 'Solo el líder cambia los ajustes'; end if;
   if k not in ('look', 'reminders') then raise exception 'Ese ajuste se cambia con una propuesta'; end if;
   update teams set settings = jsonb_set(coalesce(settings, '{}'), array[k], v) where id = t returning settings into s;
   insert into log (team_id, actor, type, data) values (t, my_member(t), 'settings.' || k, jsonb_build_object('new', v));
@@ -750,7 +750,7 @@ create or replace function guard_member() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
   if new.phone is distinct from old.phone and not is_admin(new.team_id) and old.user_id is distinct from auth.uid() then
-    raise exception 'Solo el administrador o el propio integrante cambian su WhatsApp';
+    raise exception 'Solo el líder o el propio integrante cambian su WhatsApp';
   end if;
   return new;
 end $$;
@@ -896,7 +896,7 @@ begin
     if not exists (select 1 from tasks where video_id = v.id and kind = 'rodaje') then raise exception 'Primero tiene que grabarse el video'; end if;
     md := case when vowner.apoyo then lima_at(v.publish_date - rule_int(new.team_id, 'mon', 2), '21:00') end;
     if me = v.owner then
-      if md is not null and now() > md then raise exception 'Venció el plazo del montaje: el video pasa al administrador (5.7)'; end if;
+      if md is not null and now() > md then raise exception 'Venció el plazo del montaje: el video pasa al líder (5.7)'; end if;
     elsif mrole <> 'admin' or md is null or now() <= md then
       raise exception 'Este montaje le corresponde al dueño del video';
     elsif not has_claim(v.id, 'montaje', me) then
@@ -904,7 +904,7 @@ begin
     end if;
   elsif new.kind = 'acabado' then
     if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje') then raise exception 'Primero tiene que estar el montaje'; end if;
-    if me <> v.owner and mrole <> 'admin' then raise exception 'El video final lo hace el dueño o el administrador'; end if;
+    if me <> v.owner and mrole <> 'admin' then raise exception 'El video final lo hace el dueño o el líder'; end if;
   end if;
   new.split := false; new.split_with := null;
   new.done_at := now();
@@ -957,7 +957,7 @@ begin
     elsif new.member_id = me and (mrole = 'admin' or admin_absent(new.event_id)) then
       new.arrived_at := coalesce(new.claimed_at, now());
     else
-      raise exception 'Tu llegada la confirma el administrador';
+      raise exception 'Tu llegada la confirma el líder';
     end if;
   end if;
   if new.notice ? 'sent_at' and (new.notice->>'sent_at') is not null
@@ -1146,7 +1146,7 @@ begin
     if vowner.apoyo then
       ph := post_phase(v.id);
       if me = v.owner then
-        if ph = 'pasado' then raise exception 'El video pasó al administrador: ya no puedes entregarlo'; end if;
+        if ph = 'pasado' then raise exception 'El video pasó al líder: ya no puedes entregarlo'; end if;
       elsif mrole <> 'admin' then
         raise exception 'Este montaje le corresponde al dueño del video';
       elsif ph <> 'pasado' then
@@ -1165,8 +1165,8 @@ begin
     if vowner.apoyo then
       ph := post_phase(v.id);
       if me = v.owner then
-        if ph = 'pasado' then raise exception 'El video pasó al administrador: ya no puedes entregarlo'; end if;
-        if ph = 'apoyo' then raise exception 'Tu video final lo hace el administrador como apoyo'; end if;
+        if ph = 'pasado' then raise exception 'El video pasó al líder: ya no puedes entregarlo'; end if;
+        if ph = 'apoyo' then raise exception 'Tu video final lo hace el líder como apoyo'; end if;
         if ph in ('revision', 'cambios', 'aprobado') then raise exception 'Ya entregaste este video'; end if;
         new.review := 'pendiente'; -- entrega por su cuenta: el administrador la revisa
       elsif mrole = 'admin' then
@@ -1176,10 +1176,10 @@ begin
           raise exception 'Tu socio entrega este video por su cuenta: revísalo cuando lo entregue';
         end if;
       else
-        raise exception 'El video final lo hace el dueño o el administrador';
+        raise exception 'El video final lo hace el dueño o el líder';
       end if;
     elsif me <> v.owner and mrole <> 'admin' then
-      raise exception 'El video final lo hace el dueño o el administrador';
+      raise exception 'El video final lo hace el dueño o el líder';
     end if;
   end if;
   new.split := false; new.split_with := null;
@@ -1260,7 +1260,7 @@ language plpgsql security definer set search_path = public as $$
 declare vv videos; k tasks; d record; me uuid; res text;
 begin
   select * into vv from videos where id = v;
-  if vv.id is null or not is_admin(vv.team_id) then raise exception 'Solo el administrador revisa las entregas'; end if;
+  if vv.id is null or not is_admin(vv.team_id) then raise exception 'Solo el líder revisa las entregas'; end if;
   me := my_member(vv.team_id);
   select * into k from tasks where video_id = v and kind = 'acabado' and not void and done_by = vv.owner;
   if k.id is null or k.review is distinct from 'pendiente' then raise exception 'No hay una entrega por revisar'; end if;
@@ -1357,7 +1357,7 @@ begin
     elsif new.member_id = me and (mrole = 'admin' or admin_absent(new.event_id)) then
       new.arrived_at := coalesce(new.claimed_at, now());
     else
-      raise exception 'Tu llegada la confirma el administrador';
+      raise exception 'Tu llegada la confirma el líder';
     end if;
   end if;
   if new.notice ? 'sent_at' and (new.notice->>'sent_at') is not null
@@ -1403,7 +1403,7 @@ begin
     new.end_requested_at := now(); new.end_requested_by := me;
   end if;
   if new.ended_at is distinct from old.ended_at and new.ended_at is not null and old.ended_at is null then
-    if mrole <> 'admin' and not admin_absent(new.id) then raise exception 'La reunión la finaliza el administrador'; end if;
+    if mrole <> 'admin' and not admin_absent(new.id) then raise exception 'La reunión la finaliza el líder'; end if;
     new.ended_at := coalesce(old.end_requested_at, new.end_requested_at, now());
     new.ended_set_at := now(); new.ended_by := me;
   end if;
@@ -1416,7 +1416,7 @@ begin
       if mrole <> 'admin' or old.canceled_at is null or now() > old.canceled_at + undo then raise exception 'Solo se deshace en los primeros 10 minutos'; end if;
       new.canceled_at := null; new.cancel_note := null;
     else
-      if new.status = 'cancelado' and mrole <> 'admin' then raise exception 'Solo el administrador cancela'; end if;
+      if new.status = 'cancelado' and mrole <> 'admin' then raise exception 'Solo el líder cancela'; end if;
       if old.status <> 'activo' then raise exception 'Ya no está activo'; end if;
       if new.status = 'cancelado' then new.canceled_at := now(); end if;
     end if;
@@ -1439,7 +1439,7 @@ begin
   if (new.publish_date is distinct from old.publish_date or new.apoyo_due is distinct from old.apoyo_due)
      and not is_admin(new.team_id)
      and exists (select 1 from tasks where video_id = new.id and kind = 'rodaje' and not void) then
-    raise exception 'Después del rodaje, la fecha de publicación la cambia el administrador';
+    raise exception 'Después del rodaje, la fecha de publicación la cambia el líder';
   end if;
   return new;
 end $$;
@@ -1452,7 +1452,7 @@ language plpgsql immutable as $$
 begin
   if r ? 'mon' and (r->>'mon')::int < 2 then raise exception 'El apoyo tiene que ser de al menos 2 días'; end if;
   if coalesce((r->>'self')::int, 480) >= coalesce((r->>'auto')::int, 720) or coalesce((r->>'auto')::int, 720) >= coalesce((r->>'fix')::int, 1020) or coalesce((r->>'fix')::int, 1020) >= 1439 then
-    raise exception 'Las horas tienen que ir en orden: entrega por su cuenta, pasa al administrador, corregir';
+    raise exception 'Las horas tienen que ir en orden: entrega por su cuenta, pasa al líder, corregir';
   end if;
 end $$;
 create or replace function guard_proposal_rules() returns trigger
@@ -1472,7 +1472,7 @@ create or replace function create_invite(t uuid, invite_name text, invite_role t
 language plpgsql security definer set search_path = public as $$
 declare c text := upper(substr(md5(gen_random_uuid()::text || clock_timestamp()::text), 1, 8));
 begin
-  if not is_admin(t) then raise exception 'Solo el administrador invita'; end if;
+  if not is_admin(t) then raise exception 'Solo el líder invita'; end if;
   if invite_role not in ('socio', 'colaborador') then raise exception 'Rol no válido'; end if;
   if coalesce(trim(invite_name), '') = '' then raise exception 'Escribe un nombre'; end if;
   insert into members (team_id, name, role, apoyo, invite_code, invite_expires)
@@ -1486,7 +1486,7 @@ language plpgsql security definer set search_path = public as $$
 declare mm members; c text := upper(substr(md5(gen_random_uuid()::text || clock_timestamp()::text), 1, 8));
 begin
   select * into mm from members where id = m;
-  if mm.id is null or not is_admin(mm.team_id) then raise exception 'Solo el administrador invita'; end if;
+  if mm.id is null or not is_admin(mm.team_id) then raise exception 'Solo el líder invita'; end if;
   if mm.user_id is not null then raise exception 'Ya entró al equipo'; end if;
   update members set invite_code = c, invite_expires = now() + interval '7 days', active = true where id = m;
   return c;
@@ -1497,7 +1497,7 @@ create or replace function save_settings(t uuid, k text, v jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare s jsonb;
 begin
-  if not is_admin(t) then raise exception 'Solo el administrador cambia los ajustes'; end if;
+  if not is_admin(t) then raise exception 'Solo el líder cambia los ajustes'; end if;
   if k not in ('look', 'reminders', 'guillermo') then raise exception 'Ese ajuste se cambia con una propuesta'; end if;
   update teams set settings = jsonb_set(coalesce(settings, '{}'), array[k], v) where id = t returning settings into s;
   insert into log (team_id, actor, type, data) values (t, my_member(t), 'settings.' || k, jsonb_build_object('new', v));
@@ -1511,7 +1511,7 @@ language plpgsql security definer set search_path = public as $$
 declare vv videos; ow members; d record; ph text; me uuid; adm uuid; ac tasks; cl claims; mo tasks; charge uuid; hand jsonb; late boolean; jm uuid;
 begin
   select * into vv from videos where id = v;
-  if vv.id is null or not is_admin(vv.team_id) then raise exception 'Solo el administrador reprograma la entrega'; end if;
+  if vv.id is null or not is_admin(vv.team_id) then raise exception 'Solo el líder reprograma la entrega'; end if;
   me := my_member(vv.team_id); adm := me;
   select * into ow from members where id = vv.owner;
   if new_date is null or new_date <= lima_day(now()) then raise exception 'Elige una fecha desde mañana'; end if;
@@ -1600,7 +1600,7 @@ language plpgsql security definer set search_path = public as $$
 declare me uuid := my_member(new.team_id); n int; rpc boolean := coalesce(current_setting('app.job', true), '') = '1';
 begin
   if tg_op = 'INSERT' then
-    if not is_admin(new.team_id) then raise exception 'El encargo lo arma el administrador'; end if;
+    if not is_admin(new.team_id) then raise exception 'El encargo lo arma el líder'; end if;
     if (select role from members where id = new.member_id) <> 'colaborador' then raise exception 'Elige un colaborador'; end if;
     if coalesce(array_length(new.video_ids, 1), 0) = 0 then raise exception 'Elige al menos un video'; end if;
     if new.price is null or new.price <= 0 then raise exception 'Escribe el monto por video'; end if;
@@ -1621,7 +1621,7 @@ begin
       if me = old.proposed_by then raise exception 'Lo aprueba tu socio'; end if;
       new.decided_by := me; new.decided_at := now();
     elsif new.status = 'cancelado' and old.status in ('propuesto', 'invitado') then
-      if not is_admin(new.team_id) then raise exception 'Solo el administrador cancela'; end if;
+      if not is_admin(new.team_id) then raise exception 'Solo el líder cancela'; end if;
     elsif old.status = 'invitado' and new.status = 'activo' and rpc then new.accepted_at := now();
     elsif old.status = 'activo' and new.status = 'finalizado' and rpc then new.finished_at := now();
     elsif old.status = 'finalizado' and new.status = 'activo' and rpc then new.finished_at := null;
@@ -2222,7 +2222,8 @@ create or replace function invite_info(code text) returns jsonb
 language sql stable security definer set search_path = public as $$
   select jsonb_build_object('team', t.name, 'name', m.name, 'role', m.role, 'apoyo', coalesce(m.apoyo, false),
     'by', (select a.name from members a where a.team_id = m.team_id and a.role = 'admin' and a.active limit 1),
-    'expired', m.invite_expires < now(), 'used', m.user_id is not null, 'team_id', t.id)
+    'expired', m.invite_expires < now(), 'used', m.user_id is not null, 'team_id', t.id,
+    'rules', coalesce(t.settings->'rules', '{}'::jsonb), 'pct', coalesce(t.settings->'pct', '{}'::jsonb))
   from members m join teams t on t.id = m.team_id where m.invite_code = upper(code)
 $$;
 create or replace function accept_invite(code text, my_name text) returns uuid

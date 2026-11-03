@@ -140,7 +140,7 @@ class DemoAPI {
     }
     if (fn === 'create_invite') {
       const me = this.me(a.t);
-      if (!me || me.role !== 'admin') throw new Error('Solo el administrador invita');
+      if (!me || me.role !== 'admin') throw new Error('Solo el líder invita');
       if (['socio', 'colaborador'].indexOf(a.invite_role) === -1) throw new Error('Rol no válido');
       if (!String(a.invite_name || '').trim()) throw new Error('Escribe un nombre');
       const code = Math.random().toString(16).slice(2, 10).toUpperCase();
@@ -152,7 +152,7 @@ class DemoAPI {
       const m = this.db.members.find((x) => x.invite_code === String(a.code).toUpperCase());
       if (!m) return null;
       const adm = this.db.members.find((x) => x.team_id === m.team_id && x.role === 'admin' && x.active);
-      return { team: (this.db.teams.find((t) => t.id === m.team_id) || {}).name, team_id: m.team_id, name: m.name, role: m.role, apoyo: !!m.apoyo, by: adm ? adm.name : null, expired: new Date(m.invite_expires) < new Date(), used: !!m.user_id };
+      return { team: (this.db.teams.find((t) => t.id === m.team_id) || {}).name, team_id: m.team_id, name: m.name, role: m.role, apoyo: !!m.apoyo, by: adm ? adm.name : null, rules: ((this.db.teams.find((t) => t.id === m.team_id) || {}).settings || {}).rules || {}, pct: ((this.db.teams.find((t) => t.id === m.team_id) || {}).settings || {}).pct || {}, expired: new Date(m.invite_expires) < new Date(), used: !!m.user_id };
     }
     if (fn === 'accept_invite') {
       const m = this.db.members.find((x) => x.invite_code === String(a.code).toUpperCase());
@@ -168,7 +168,7 @@ class DemoAPI {
     }
     if (fn === 'team_settings') { const t = this.db.teams.find((x) => x.id === a.t); return t ? (t.settings || {}) : null; }
     if (fn === 'save_settings') {
-      const me = this.me(a.t); if (!me || me.role !== 'admin') throw new Error('Solo el administrador cambia los ajustes');
+      const me = this.me(a.t); if (!me || me.role !== 'admin') throw new Error('Solo el líder cambia los ajustes');
       if (['look', 'reminders', 'guillermo'].indexOf(a.k) === -1) throw new Error('Ese ajuste se cambia con una propuesta');
       const t = this.db.teams.find((x) => x.id === a.t); t.settings = Object.assign({}, t.settings || {}); t.settings[a.k] = a.v;
       this.log(a.t, null, 'settings.' + a.k, { new: a.v }); this.persist(); return t.settings;
@@ -209,7 +209,7 @@ class DemoAPI {
     if (fn === 'renew_invite') {
       const m = this.db.members.find((x) => x.id === a.m);
       const me = m && this.me(m.team_id);
-      if (!me || me.role !== 'admin') throw new Error('Solo el administrador invita');
+      if (!me || me.role !== 'admin') throw new Error('Solo el líder invita');
       if (m.user_id) throw new Error('Ya entró al equipo');
       Object.assign(m, { invite_code: Math.random().toString(16).slice(2, 10).toUpperCase(), invite_expires: new Date(Date.now() + 7 * 864e5).toISOString(), active: true });
       this.persist(); return m.invite_code;
@@ -246,7 +246,7 @@ class DemoAPI {
   reprogram(a) {
     const v = this.db.videos.find((x) => x.id === a.v);
     const me = v && this.me(v.team_id);
-    if (!me || me.role !== 'admin') throw new Error('Solo el administrador reprograma la entrega');
+    if (!me || me.role !== 'admin') throw new Error('Solo el líder reprograma la entrega');
     const today = R.limaDate(new Date());
     if (!a.new_date || a.new_date <= today) throw new Error('Elige una fecha desde mañana');
     if (a.new_date === v.publish_date) throw new Error('Es la misma fecha');
@@ -403,7 +403,7 @@ class DemoAPI {
     }
     if (table === 'jobs') {
       const me = this.me(row.team_id);
-      if (!me || me.role !== 'admin') throw new Error('El encargo lo arma el administrador');
+      if (!me || me.role !== 'admin') throw new Error('El encargo lo arma el líder');
       const cm = this.db.members.find((m) => m.id === row.member_id);
       if (!cm || cm.role !== 'colaborador') throw new Error('Elige un colaborador');
       if (!(row.video_ids || []).length) throw new Error('Elige al menos un video');
@@ -435,7 +435,7 @@ class DemoAPI {
     if (!r) throw new Error('No encontrado');
     const me = this.me(r.team_id);
     if (!me) throw new Error('Sin permiso');
-    if (table === 'tasks' && me.role !== 'admin') throw new Error('Solo el administrador corrige tareas');
+    if (table === 'tasks' && me.role !== 'admin') throw new Error('Solo el líder corrige tareas');
     if (table === 'jobs' && patch.status && patch.status !== r.status) {
       const ok = (r.status === 'propuesto' && (patch.status === 'invitado' || patch.status === 'rechazado') && me.id !== r.proposed_by)
         || (patch.status === 'cancelado' && (r.status === 'propuesto' || r.status === 'invitado') && me.role === 'admin')

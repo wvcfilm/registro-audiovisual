@@ -3,7 +3,7 @@ import { S } from './store.js';
 import * as R from './rules.js';
 import { seedDemo } from './demo.js';
 
-export const VERSION = '1.4';
+export const VERSION = '1.5';
 const $app = document.getElementById('app');
 const $toast = document.getElementById('toast');
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -93,7 +93,7 @@ function taskItems(now) {
       for (const k of ['guion', 'storyboard']) {
         if (vs[KEY[k]]) continue;
         const t = `${R.KIND_LABEL[k]} · ${vname}`;
-        if (byG) { if (hire.present === me.id) push(k, vs.d.preDue, t, `De ${first(owner)} · con Guillermo (80 %)`, { viaHire: true }); continue; }
+        if (byG) { if (hire.present === me.id) push(k, vs.d.preDue, t, `De ${first(owner)} · con Guillermo (${gTxt(hire)})`, { viaHire: true }); continue; }
         if (v.owner === me.id) push(k, vs.d.preDue, t, v.title ? esc(v.title) : 'Tu preproducción');
         else if (vs.d.preDue && now > vs.d.preDue && me.role !== 'colaborador') {
           const cm = R.canMark(v, k, me, c, now);
@@ -198,7 +198,8 @@ function pending(now = new Date()) {
     if (se && se.confirmed_at && !se.paid_at && me.role === 'admin') out.push({ type: 'settle', due: now, title: 'Registra el pago de la liquidación', sub: esc(p.client) + ' · ' + esc(p.name), urgent: true });
     if (se && se.observation && !se.sent_at && me.role === 'admin') out.push({ type: 'settle', due: now, title: 'Hay una observación en la liquidación', sub: esc(se.observation.text), urgent: true });
   }
-  for (const pr of st.proposals().filter((x) => x.status === 'pendiente' && x.proposed_by !== me.id)) out.push({ type: 'proposal', prop: pr, due: new Date(pr.created_at), title: `${first(st.member(pr.proposed_by))} propone cambiar ${pr.kind === 'pct' ? 'los porcentajes' : 'las reglas'}`, sub: 'Revísalo y apruébalo o recházalo', urgent: true });
+  for (const pr of st.proposals().filter((x) => x.status === 'pendiente' && x.kind === 'apoyo' && x.data.member === me.id)) out.push({ type: 'proposal', prop: pr, due: new Date(pr.created_at), title: `${first(st.member(pr.proposed_by))} propone ${pr.data.apoyo ? 'darte apoyo' : 'quitarte el apoyo'} en la edición`, sub: 'Revísalo y acéptalo o recházalo', urgent: true });
+  for (const pr of st.proposals().filter((x) => x.status === 'pendiente' && x.kind !== 'apoyo' && x.proposed_by !== me.id)) out.push({ type: 'proposal', prop: pr, due: new Date(pr.created_at), title: `${first(st.member(pr.proposed_by))} propone cambiar ${pr.kind === 'pct' ? 'los porcentajes' : 'las reglas'}`, sub: 'Revísalo y apruébalo o recházalo', urgent: true });
   for (const cr of S.data.corrections.filter((x) => x.status === 'pendiente' && x.requested_by !== me.id)) out.push({ type: 'corr', corr: cr, due: new Date(cr.created_at), title: `${first(st.member(cr.requested_by))} pidió una corrección`, sub: esc(cr.text), urgent: true });
   for (const x of out) {
     x.band = x.urgent ? 0 : R.band(x.due, now);
@@ -316,11 +317,11 @@ function demoBar() {
 
 function vLogin(inviteCode) {
   const demo = st.isDemo();
+  if (inviteCode) return `<div class="wrap"><main style="padding-bottom:32px">${logoRow()}${vAccept(inviteCode)}</main></div>`;
   return `<div class="wrap"><main style="padding-bottom:40px;justify-content:center;min-height:100vh">
   <div style="display:flex;gap:6px">${['#12271E:#6EE7B7', '#2A2416:#FFB547', '#2A1810:#FF8A65'].map((c) => `<span style="width:46px;height:46px;border-radius:14px;background:${c.split(':')[0]}"></span>`).join('')}</div>
   <h1 style="font-size:30px;line-height:1.1">Registra el trabajo de tu equipo audiovisual</h1>
   <p class="sub" style="font-size:15px">Quién hizo cada tarea, a tiempo o no, y cuánto le corresponde a cada uno.</p>
-  ${inviteCode ? `<div id="invbox">${banner('wait', 'Tienes una invitación', 'Entra con tu correo para aceptarla.')}</div>` : ''}
   ${demo ? `<div class="demo">${st.practice() ? banner('fm', 'Modo práctica', 'Prueba todo con un proyecto de ejemplo. Se guarda solo en este celular y no toca los datos reales.') : banner('warn', 'Modo demo', 'Todavía no está conectada la base de datos. Puedes probar todo: se guarda solo en este navegador.')}<button class="btn b-amber" data-act="seed" data-k="con">Ejemplo: socio con apoyo</button><button class="btn b-blue" data-act="seed" data-k="sin">Ejemplo: socio sin apoyo</button>${st.practice() ? '<button class="btn b-ghost" data-act="practiceOff">Salir del modo práctica</button>' : ''}</div>` : ''}
   ${demo ? '' : `<button class="btn" data-act="google" style="background:#F4F4F5;color:#0B0C10"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.8h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.3z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.5l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22z"/><path fill="#FBBC05" d="M6.4 13.9a6 6 0 0 1 0-3.8V7.5H3.1a10 10 0 0 0 0 9z"/><path fill="#EA4335" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.9-2.9A10 10 0 0 0 3.1 7.5l3.3 2.6C7.2 7.8 9.4 6 12 6z"/></svg>Continuar con Google</button>
   <p class="muted" style="text-align:center;margin:0">o con un código a tu correo</p>`}
@@ -337,13 +338,18 @@ function vLogin(inviteCode) {
   </main></div>`;
 }
 
+// Guillermo: % que recibe quien hace la preproducción con él (80 % o 100 % según quién contrata).
+const gp = (hire) => R.hirePct(hire, S.data.members);
+const gTxt = (hire) => Math.round(gp(hire) * 100) + ' %';
+const logoRow = () => `<div style="display:flex;gap:6px" aria-hidden="true">${['#12271E', '#2A2416', '#2A1810'].map((c) => `<span style="width:34px;height:34px;border-radius:11px;background:${c}"></span>`).join('')}</div>`;
 function vNoTeam(code) {
+  code = code || (st.pendingInvite() || {}).code;
+  if (code) return `<div class="wrap"><main style="padding-bottom:32px">${logoRow()}${vAccept(code)}</main></div>`;
   return `<div class="wrap"><main style="padding-bottom:40px">
   <h1>Bienvenido</h1><p class="sub">Entraste como ${esc(S.session.user.email)}.</p>
-  ${code ? vAccept(code) : ''}
   <form data-form="createTeam" class="card">
     <h3>Crear tu equipo</h3>
-    <p class="sub" style="margin:0">Quedas como administrador: invitas a tu socio, propones las reglas y cierras cada proyecto.</p>
+    <p class="sub" style="margin:0">Quedas como líder de proyecto: invitas a tus socios, propones las reglas y cierras cada proyecto.</p>
     <label class="field"><span>Tu nombre</span><input class="in" name="me" required placeholder="Williams José Velasquez Chambi"></label>
     <label class="field"><span>Nombre del equipo</span><input class="in" name="team" required placeholder="Williams Velasquez · Audiovisual"></label>
     <button class="btn b-amber">Crear equipo</button>
@@ -353,27 +359,94 @@ function vNoTeam(code) {
   </main></div>`;
 }
 
+// 1.5 · Invitación en un paso (InvitacionA): tarjeta pública, casilla de reglas y Aceptar con Google o con mi correo.
+function inviteTexts(info) {
+  const r = Object.assign({}, R.DEFAULT_RULES, info.rules || {});
+  const pct = Object.assign({}, R.DEFAULT_PCT, info.pct || {});
+  const by = first({ name: info.by || 'El líder' });
+  const colab = info.role === 'colaborador';
+  const apoyo = info.role === 'socio' && info.apoyo;
+  const perks = colab ? [
+    [1, 'Ves solo los videos de tu encargo y marcas cada entrega.'],
+    [1, 'Recibes las observaciones como checklist y subes el video final a Drive.'],
+    [0, 'Tu pago solo lo ves tú.']
+  ] : [
+    [1, 'Ver las etapas de todos los videos y marcar los tuyos.'],
+    [1, apoyo ? `${by} te apoya en el video final de tus videos si envías tu montaje a tiempo.` : 'Editas tus videos completos: montaje y video final.'],
+    [1, 'Aprobar la liquidación de cada proyecto.'],
+    [0, 'Tu racha y tu aporte real solo los ves tú.']
+  ];
+  const short = colab ? 'Al entrar ves las condiciones del encargo (videos, monto por video y plazos) y las aceptas antes de empezar.'
+    : `Pago por etapa del valor de cada video: preproducción ${pct.pre} % (guion y storyboard mitad y mitad), rodaje ${pct.rod} %, montaje ${pct.mon} % y video final ${pct.aca} %. Se paga a quien hace la tarea. La racha nunca cambia lo que cobras.`;
+  const more = colab ? ['Marca cada entrega en la app aunque envíes el archivo por WhatsApp o Drive: así queda la hora.', 'Cuando el video esté aprobado, lo subes a la carpeta de Drive del proyecto.'] : [
+    `Guion y storyboard: hasta el día antes del rodaje a las ${R.hm(r.pre)}.`,
+    `Confirmar el rodaje hasta las ${R.hm(r.avr)} del día anterior y la reunión ${Math.round(r.conf / 60) || r.conf} h antes.`,
+    apoyo ? `Montaje con apoyo: hasta ${r.mon} días antes de publicar a las ${R.hm(r.monh)}. Por tu cuenta: hasta las ${R.hm(r.self)} del día antes.`
+      : `Montaje hasta las ${R.hm(r.pmon)} y video final hasta las ${R.hm(r.pfin)} del día antes de publicar. Desde las ${R.hm(r.pfin)}, otro socio puede tomarlo.`,
+    `Llegada puntual hasta ${r.punt} min; tardanza hasta ${r.tol} min (se paga igual).`
+  ];
+  return { by, colab, perks, short, more, role: colab ? 'Colaborador' : apoyo ? 'Socio con apoyo' : 'Socio' };
+}
+const gIcon = '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.8h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.3z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.5l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22z"/><path fill="#FBBC05" d="M6.4 13.9a6 6 0 0 1 0-3.8V7.5H3.1a10 10 0 0 0 0 9z"/><path fill="#EA4335" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.9-2.9A10 10 0 0 0 3.1 7.5l3.3 2.6C7.2 7.8 9.4 6 12 6z"/></svg>';
+const mailIcon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>';
+const okIc = (c = '#6EE7B7') => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;margin-top:2px"><path d="m5 12 5 5 9-10"/></svg>`;
+const lockIc = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FFC978" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;margin-top:2px"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
 function vAccept(code) {
+  code = String(code || '').toUpperCase();
   const info = ui.inviteInfo;
-  if (!info || info.code !== code) { st.inviteInfo(code).then((r) => { ui.inviteInfo = Object.assign({ code }, r || { missing: true }); render(); }).catch(() => { ui.inviteInfo = { code, missing: true }; render(); }); return `<div class="card"><p class="muted">Buscando la invitación…</p></div>`; }
-  if (info.missing) return banner('bad', 'Invitación no encontrada', 'Revisa el código o pide uno nuevo.');
-  if (info.used) return banner('bad', 'Esta invitación ya se usó', '');
-  if (info.expired) return banner('bad', 'La invitación venció', 'Pide a quien te invitó que te envíe una nueva.');
-  const isSocio = info.role === 'socio';
-  return `<form data-form="accept" class="card" style="border-color:#24345A">
-    <input type="hidden" name="code" value="${esc(code)}">
-    <p class="lbl" style="color:#A9C7FF">Invitación</p>
-    <h2>${esc(info.team)}</h2>
-    <span class="chip c-info" style="align-self:flex-start">${ROLE[info.role]}</span>
-    ${isSocio ? `<div class="list small" style="color:#D4D4D8;line-height:1.5">
-      <div>✓ Ver las etapas de todos los videos y marcar los tuyos.</div>
-      <div>✓ Aprobar la liquidación de cada proyecto.</div>
-      <div>🔒 Tu racha y tu aporte real solo los ves tú.</div></div>
-      <div class="banner bn-warn"><div><b>Antes de entrar</b><p>La app sigue el acuerdo que firmaron: pago por etapa (guion y storyboard S/ 7.81, rodaje S/ 21.88, montaje S/ 10, acabado S/ 15 por video de S/ 62.50), plazos a las 21:00, tolerancia de 10 y 45 min, confirmar el rodaje hasta las 18:00 del día anterior y la reunión con 12 h. La racha nunca cambia lo que cobras.</p></div></div>
-      <label class="row small" style="gap:10px"><input type="checkbox" name="ok" required style="width:20px;height:20px"> Leí las reglas y son las mismas del acuerdo que firmé</label>` : ''}
-    <label class="field"><span>Tu nombre (así aparecerás)</span><input class="in" name="name" value="${esc(info.name)}" required></label>
-    <button class="btn b-blue">Entrar al equipo</button>
-  </form>`;
+  if (!info || info.code !== code) { st.inviteInfo(code).then((r) => { ui.inviteInfo = Object.assign({ code }, r || { missing: true }); render(); }).catch(() => { ui.inviteInfo = { code, missing: true }; render(); }); return `<div class="invload"><span class="spin"></span><p>Buscando la invitación…</p></div>`; }
+  const wa = (t) => `<a class="hb x-green" href="https://wa.me/?text=${encodeURIComponent(t)}" target="_blank" rel="noopener">${waIc}Escribir ${info.by ? 'a ' + esc(first({ name: info.by })) : 'por WhatsApp'}</a>`;
+  if (info.missing) return `<div class="inv"><p class="lbl" style="color:#FFB09C">Invitación</p><h1 class="h">No encontramos la invitación</h1><p class="sub">Revisa que el enlace esté completo o pide uno nuevo.</p>${S.session ? '' : `<button class="btn b-ghost" data-act="invForget">Entrar sin invitación</button>`}</div>`;
+  if (info.used) return `<div class="inv"><p class="lbl" style="color:#FFB09C">Invitación</p><h1 class="h">Esta invitación ya se usó</h1><p class="sub">Si es tuya, entra con la cuenta con la que la aceptaste.</p>${S.session ? '' : `<button class="btn b-ghost" data-act="invForget">Entrar</button>`}</div>`;
+  if (info.expired) return `<div class="inv"><p class="lbl" style="color:#FFB09C">Invitación</p><h1 class="h">Esta invitación venció</h1><p class="sub">Las invitaciones duran 7 días. Pídele a ${esc(first({ name: info.by || 'quien te invitó' }))} un enlace nuevo: lo genera en un toque.</p>${wa('Hola, mi invitación a la app de registro venció. ¿Me envías un enlace nuevo?')}</div>`;
+  const T = inviteTexts(info);
+  const ok = !!(ui.invOk || (st.pendingInvite() || {}).ok && (st.pendingInvite() || {}).code === code) || T.colab;
+  const nudge = ui.invNudge && !ok;
+  const nm = ui.invName != null ? ui.invName : info.name;
+  const avc = T.colab ? ['#FF8A65', '#1A0E08', '#21163A', '#D6C2FF'] : ['#8AB4FF', '#0B1530', '#18233A', '#A9C7FF'];
+  let html = `<div class="inv">
+  <div><p class="lbl" style="color:#A9C7FF">Invitación</p><h1 class="h">${esc(T.by)} te invita a ${T.colab ? 'editar con su equipo' : 'su equipo'}</h1><p class="sub" style="margin-top:6px">${esc(info.team || '')}</p></div>
+  <section class="invcard">
+    <div class="row" style="gap:12px"><span class="invav" style="background:${avc[0]};color:${avc[1]}">${esc((nm || '?').trim().charAt(0).toUpperCase())}</span>
+      <label style="flex:1;min-width:0"><input class="invname" name="invname" value="${esc(nm)}" aria-label="Tu nombre" maxlength="60"><small>Así aparecerás en el equipo</small></label>
+      <span class="invrole" style="background:${avc[2]};color:${avc[3]}">${T.role}</span></div>
+    <div class="invperks">${T.perks.map(([y, t]) => `<div>${y ? okIc() : lockIc}<span>${esc(t)}</span></div>`).join('')}</div>
+  </section>
+  <section class="invrules"><b>${T.colab ? 'Condiciones del encargo' : 'Antes de entrar'}</b><p>${esc(T.short)}</p>
+    ${ui.invMore ? `<div class="invmore">${T.more.map((t) => `<div><span></span><span>${esc(t)}</span></div>`).join('')}</div>` : ''}
+    <button type="button" class="invtgl" data-act="invMore">${ui.invMore ? 'Ver menos' : 'Ver todas las reglas'}</button></section>
+  ${T.colab ? '' : `<label class="invck${ok ? ' on' : nudge ? ' nudge' : ''}"><input type="checkbox" data-act="invOk"${ok ? ' checked' : ''}><span>Leí las reglas y son las mismas del acuerdo que firmé</span></label>`}`;
+  if (S.session) {
+    html += `<button class="hb x-blue${ok ? '' : ' dim'}" data-act="invAccept" data-code="${esc(code)}">Entrar al equipo</button>
+    <p class="muted" style="text-align:center;margin:0">Entraste como ${esc(S.session.user.email || '')} · <button class="linkbtn" style="display:inline;min-height:0" data-act="switchAccount">¿No eres tú? Cambiar de cuenta</button></p>`;
+  } else if (ui.invMail === 'sent') {
+    html += `<section class="invsent"><b class="h">Revisa tu correo</b><p>Te enviamos un enlace a <b>${esc(ui.email || '')}</b>. <b style="color:#fff">Ábrelo en este mismo celular</b>: entrarás directo al equipo. Si no llega en 2 minutos, revisa Spam.</p><p class="small" style="color:#8FA3CC;margin:0">Tu invitación queda guardada en este celular mientras tanto.</p></section>
+    <form data-form="verify" class="invcode"><label class="field"><span>¿Te llegó un código de 6 dígitos? Escríbelo aquí</span><input class="in num" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required style="font-size:20px;letter-spacing:.3em"></label><button class="btn b-ghost">Entrar con el código</button></form>`;
+  } else if (ui.invMail) {
+    html += `<form data-form="invMail" class="invmail" data-code="${esc(code)}"><label class="field"><span>Tu correo</span><input class="in" name="email" type="email" required autocomplete="email" placeholder="tucorreo@gmail.com" value="${esc(ui.email || '')}"></label><button class="hb x-blue">Enviarme el enlace</button><button type="button" class="linkbtn" style="align-self:center" data-act="invMailOff">Volver</button></form>`;
+  } else {
+    html += `<div class="invbtns">${st.isDemo() ? `<button class="hb x-blue${ok ? '' : ' dim'}" data-act="invAcc" data-k="demo" data-code="${esc(code)}">Aceptar (práctica)</button>` : `<button class="hb invg${ok ? '' : ' dim'}" data-act="invAcc" data-k="google" data-code="${esc(code)}">${gIcon}Aceptar con Google</button>
+      <button class="hb invm${ok ? '' : ' dim'}" data-act="invAcc" data-k="mail" data-code="${esc(code)}">${mailIcon}Aceptar con mi correo</button>`}
+      <p class="small" style="margin:0;text-align:center;color:${nudge ? '#FFC2BA' : 'var(--tx4)'}">${ok ? 'Un toque y entras directo al equipo.' : nudge ? 'Primero marca la casilla de arriba.' : 'Marca la casilla para continuar.'}</p></div>`;
+  }
+  return html + '</div>';
+}
+function vInviteDone() {
+  const d = S.inviteDone;
+  return `<div class="wrap"><main class="inv" style="padding-top:48px">
+    <span class="invpop">${okIc().replace('width="16" height="16"', 'width="30" height="30"')}</span>
+    <h1 class="h">¡Listo, ${esc(first({ name: d.name || '' }))}!<br>Ya estás en el equipo</h1>
+    <p class="sub">Entraste como ${esc(S.session.user.email || '')}. Desde ahora ves tus videos, tus tareas y tu billetera.</p>
+    <div class="invlog">${icon.clock.replace('width="12" height="12"', 'width="16" height="16"')}<p>Queda en el historial: <b>${esc(first({ name: d.name || '' }))} aceptó las reglas del acuerdo</b> · ${R.fmtWhen(d.at)}</p></div>
+    <button class="hb x-amber" data-act="invSeen">Ir a Inicio</button></main></div>`;
+}
+function vInviteTaken() {
+  const e = S.inviteErr;
+  return `<div class="wrap"><main class="inv" style="padding-top:40px">
+    <h1 class="h">${e.keep ? 'Esta cuenta ya es del equipo' : 'No se pudo aceptar la invitación'}</h1>
+    <div class="invbad"><span></span><p>${e.keep ? `Entraste como <b>${esc(S.session.user.email || '')}</b>. ${esc(e.msg)}.` : esc(e.msg)}</p></div>
+    ${e.keep ? `<button class="hb x-blue" data-act="switchAccount">Cambiar de cuenta</button><p class="small" style="margin:0;text-align:center;color:var(--tx4)">La invitación sigue guardada: no tienes que abrir el enlace otra vez.</p><button class="btn b-ghost" data-act="invDrop">Seguir con esta cuenta</button>` : `<button class="btn b-ghost" data-act="invDrop">Continuar</button>`}
+  </main></div>`;
 }
 
 // ---------- Inicio ----------
@@ -1013,7 +1086,7 @@ function vReparto(rodId) {
   }).join('');
   return `${backTo('#/videos', 'Etapas')}
   <h1>Repartir videos</h1><p class="sub">Rodaje del ${R.fmtWhen(rod.starts_at)}${mt ? ' · reunión del ' + R.fmtWhen(mt.starts_at) : ''}. Quedan ${left} videos por repartir (por defecto 2 y 2).</p>
-  ${h ? `<div class="banner bn-fm"><div><b>Guillermo trabaja por ${esc(st.member(h.hired_by).name)} en esta reunión</b><p>Asigna sus videos y luego marca sus guiones y storyboards "con Guillermo". Recibes el 80 % de esa preproducción.</p></div></div>` : ''}
+  ${h ? `<div class="banner bn-fm"><div><b>Guillermo trabaja por ${esc(st.member(h.hired_by).name)} en esta reunión</b><p>Asigna sus videos y luego marca sus guiones y storyboards "con Guillermo". Recibes ${gp(h) < 1 ? 'el ' + gTxt(h) : 'el total'} de esa preproducción.</p></div></div>` : ''}
   <form data-form="reparto" class="card"><input type="hidden" name="r" value="${rod.id}"><input type="hidden" name="n" value="${n}">
     <p class="lbl">Videos · fecha de publicación y dueño</p>
     ${rows || '<p class="empty">Ya se repartieron todos los videos.</p>'}
@@ -1191,7 +1264,7 @@ function postCard(v, c, now, inDetail) {
         const cmM = R.canMark(v, 'montaje', me, c, now), cmA = R.canMark(v, 'acabado', me, c, now);
         tiles = (s.mo ? ptile('montaje', 'mine', 'Hecho ' + t(s.mo.done_at)) : cmM.ok ? ptile('montaje', 'todo post', 'Tomado · hasta ' + whenRel(s.d.finalDue, now), `data-act="quick" data-v="${v.id}" data-k="montaje"`) : ptile('montaje', 'lock', 'Lo tomaste'))
           + (s.ac ? ptile('acabado', 'mine', 'Hecho ' + t(s.ac.done_at)) : s.mo && cmA.ok ? ptile('acabado', 'todo post', 'Tocar al entregar · hasta ' + whenRel(s.d.finalDue, now), `data-act="quick" data-v="${v.id}" data-k="acabado"`) : ptile('acabado', 'lock', 'Después del montaje'));
-        if (!s.ac) { tone = 'blue'; msg = `Tomaste el video de ${O}. Empiezas de cero en tu editor: al entregarlo cobras la edición completa.`; }
+        if (!s.ac) { tone = 'blue'; msg = `Tomaste el video de ${O}: al entregar el video final cobras la edición completa (montaje y final).`; }
         const cl = R.claimOf(v, 'montaje', c);
         extra = myUndo(s.ac) || myUndo(s.mo) || (cl && cl.member_id === me.id && !s.mo && R.within(cl.created_at, now) ? undoLink('unclaim', `data-id="${cl.id}"`, 'Soltar') : '');
       } else {
@@ -1413,8 +1486,8 @@ function offerUndo(text, fn) {
 }
 
 // ---------- Administrador → Entregas al límite ----------
-const ENT_KEYS = ['mon', 'monh', 'self', 'auto', 'fix'];
-function entBase() { const r = Object.assign({}, R.DEFAULT_RULES, st.settings().rules || {}); return { mon: r.mon, monh: r.monh, self: r.self, auto: r.auto, fix: r.fix, cli: Object.assign({}, r.cli || {}) }; }
+const ENT_KEYS = ['mon', 'monh', 'self', 'auto', 'fix', 'pmon', 'pfin', 'prev', 'pfix'];
+function entBase() { const r = Object.assign({}, R.DEFAULT_RULES, st.settings().rules || {}); return { mon: r.mon, monh: r.monh, self: r.self, auto: r.auto, fix: r.fix, pmon: r.pmon, pfin: r.pfin, prev: r.prev, pfix: r.pfix, cli: Object.assign({}, r.cli || {}) }; }
 function vAdminEntregas() {
   const base = entBase();
   const cur = Object.assign({}, base, ui.ent || {}, { cli: Object.assign({}, base.cli, (ui.ent || {}).cli || {}) });
@@ -1448,7 +1521,14 @@ function vAdminEntregas() {
     ${row('self', 'Entrega por su cuenta', 'hasta esta hora · luego se puede tomar', 60, 300, cur.auto - 60, R.hm, '#D98A00')}
     ${row('auto', 'Pasa solo a ti', 'si nadie lo tomó', 60, cur.self + 60, cur.fix - 60, R.hm, '#E5484D')}
     ${row('fix', 'Corregir cambios', 'si pediste cambios', 60, cur.auto + 60, 1320, R.hm, '#8A4A30')}
-    <div class="srow ent"><span class="sq" style="background:#3D6BB8"></span><span class="ttx"><b>Entrega y revisión</b><span>Tus videos, los de apoyo y los tomados</span></span><b class="num sval" style="color:var(--tx4)">23:59</b></div></div>`;
+    <div class="srow ent"><span class="sq" style="background:#3D6BB8"></span><span class="ttx"><b>Entrega y revisión</b><span>Videos de apoyo y los que tomaste${R.pairTeam({ members: S.data.members }) ? '' : ' · también los tuyos'}</span></span><b class="num sval" style="color:var(--tx4)">23:59</b></div></div>`;
+  // 1.5 · Socios sin apoyo: plazos iguales para el socio y para ti (día antes de publicar).
+  html += `<div><p class="lbl alb">Socios sin apoyo · también tus videos</p><div class="agrp">
+    ${row('pmon', 'Montaje', 'solo aviso, no bloquea', 60, 480, cur.pfin - 60, R.hm, '#2F9E6E', false)}
+    ${row('pfin', 'Video final', 'luego el otro lo puede tomar', 60, cur.pmon + 60, cur.prev - 60, R.hm, '#D98A00')}
+    ${row('prev', 'Revisión de ' + LN(), 'si no revisa, se aprueba sola', 60, cur.pfin + 60, cur.pfix - 60, R.hm, '#3D6BB8')}
+    ${row('pfix', 'Corregir cambios', 'si no corrige, pasa a ' + LN(), 60, cur.prev + 60, 1380, R.hm, '#8A4A30')}
+    <div class="srow ent"><span class="sq" style="background:#FFB547"></span><span class="ttx"><b>Último plazo</b><span>Luego aparece "Reprogramar entrega"</span></span><b class="num sval" style="color:var(--tx4)">23:59</b></div></div></div>`;
   html += `<section class="msgcard" style="align-items:center">${icon.cam('#8AB4FF', 20)}<p>Entre rodaje y publicación deben pasar al menos <b>${cur.mon + 1} días</b>. Si no, te avisa al programar.</p></section>`;
   const clients = Array.from(new Set(S.data.projects.map((p) => p.client).filter(Boolean)));
   if (clients.length) {
@@ -1771,17 +1851,17 @@ function guillermoBlock(e, myS, now) {
   const p = S.data.projects.find((x) => x.id === e.project_id);
   const preVal = R.rates(p).guion + R.rates(p).storyboard;
   if (!h) {
-    if (now < start && myS.k === 'pendiente' && st.partners().length > 1 && !R.rsvpState(e, me.id, st.ctx(e.project_id), now).open) return `<div class="card" style="border-color:#3E2C63;background:#160F22"><p class="lbl" style="color:#C9B2FF">¿No irás a esta reunión?</p><p class="sub" style="margin:0">Puedes contratar a <b style="color:#fff">Guillermo</b> para tu preproducción. Tu compañero hace tus guiones y storyboards con él y recibe el 80 % (${R.money(preVal * 0.8)} por video). Tú conservas el 20 % y tu asistencia queda como "no requerida": no es falta ni suma racha.</p><button class="btn b-purple" data-act="hire" data-e="${e.id}">Contratar a Guillermo</button></div>`;
+    if (now < start && myS.k === 'pendiente' && st.partners().length > 1 && !R.rsvpState(e, me.id, st.ctx(e.project_id), now).open) return `<div class="card" style="border-color:#3E2C63;background:#160F22"><p class="lbl" style="color:#C9B2FF">¿No irás a esta reunión?</p><p class="sub" style="margin:0">Puedes contratar a <b style="color:#fff">Guillermo</b> para tu preproducción. ${gp(me) < 1 ? `Tu compañero hace tus guiones y storyboards con él y recibe el ${gTxt(me)} (${R.money(preVal * gp(me))} por video). Tú conservas el resto` : `Tu compañero hace tus guiones y storyboards con él y recibe todo (${R.money(preVal)} por video)`} y tu asistencia queda como "no requerida": no es falta ni suma racha.</p><button class="btn b-purple" data-act="hire" data-e="${e.id}">Contratar a Guillermo</button></div>`;
     return '';
   }
   const A = st.member(h.hired_by), B = st.member(h.present);
   if (h.status === 'pendiente') {
-    if (me.id === h.present) return `<div class="card" style="border-color:#3E2C63;background:#160F22"><b>${esc(A.name)} quiere contratar a Guillermo</b><p class="sub" style="margin:0">Si aceptas, en esta reunión asignas sus videos y marcas sus guiones y storyboards "con Guillermo". Recibes el 80 % de esa preproducción (${R.money(preVal * 0.8)} por video). Él no tiene que asistir.</p><div class="grid2"><button class="btn b-purple" data-act="hireDecide" data-id="${h.id}" data-s="aceptada">Aceptar</button><button class="btn b-ghost" data-act="hireDecide" data-id="${h.id}" data-s="rechazada">Rechazar</button></div></div>`;
+    if (me.id === h.present) return `<div class="card" style="border-color:#3E2C63;background:#160F22"><b>${esc(A.name)} quiere contratar a Guillermo</b><p class="sub" style="margin:0">Si aceptas, en esta reunión asignas sus videos y marcas sus guiones y storyboards "con Guillermo". Recibes ${gp(h) < 1 ? 'el ' + gTxt(h) : 'el total'} de esa preproducción (${R.money(preVal * gp(h))} por video). ${esc(first(A))} no tiene que asistir.</p><div class="grid2"><button class="btn b-purple" data-act="hireDecide" data-id="${h.id}" data-s="aceptada">Aceptar</button><button class="btn b-ghost" data-act="hireDecide" data-id="${h.id}" data-s="rechazada">Rechazar</button></div></div>`;
     return banner('fm', `Esperando que ${esc(B.name)} acepte`, 'Si rechaza, la reunión sigue con las reglas normales.', now < start ? `<button class="btn sm b-ghost" data-act="hireDecide" data-id="${h.id}" data-s="cancelada" style="margin-top:8px">Cancelar contratación</button>` : '');
   }
   const mine = e.video_ids.map((id) => S.data.videos.find((v) => v.id === id)).filter((v) => v && v.owner === h.hired_by);
   return banner('fm', `Guillermo trabaja por ${esc(A.name)} en esta reunión`, me.id === h.present
-    ? `Tú asignas los videos de ${esc(A.name)} y marcas sus guiones y storyboards "con Guillermo". Recibes el 80 % de esa preproducción.${mine.length ? '' : ' Primero reparte la semana.'}`
+    ? `Tú asignas los videos de ${esc(A.name)} y marcas sus guiones y storyboards "con Guillermo". Recibes ${gp(h) < 1 ? 'el ' + gTxt(h) : 'el total'} de esa preproducción.${mine.length ? '' : ' Primero reparte la semana.'}`
     : me.id === h.hired_by ? `${esc(B.name)} y Guillermo preparan tus videos. Te llegarán los guiones aquí. Tu asistencia no es requerida.` : '',
     `${!e.video_ids.length && me.id === h.present ? `<a class="btn sm b-purple" href="#/semana/${e.rodaje_id || ''}" style="margin-top:8px">Repartir videos</a>` : ''}${mine.map((v) => `<a class="btn sm b-ghost" href="#/v/${v.id}" style="margin-top:8px;margin-right:6px">Video ${v.num} de ${first(A)}</a>`).join('')}`);
 }
@@ -1812,7 +1892,7 @@ function credits(p, c) {
     const when = R.fmtWhen(t.done_at) + (t.kind === 'rodaje' ? '' : late ? ' · fuera de plazo' : ' · a tiempo');
     if (t.hire_id) {
       const h = S.data.hires.find((x) => x.id === t.hire_id);
-      if (h) { out.push(Object.assign({}, base, { to: h.present, amt: rate[t.kind] * 0.8, when: when + ' · con Guillermo (80 %)' })); out.push(Object.assign({}, base, { to: h.hired_by, amt: rate[t.kind] * 0.2, when: when + ' · Guillermo (20 %)' })); }
+      if (h) { const q = gp(h); out.push(Object.assign({}, base, { to: h.present, amt: rate[t.kind] * q, when: when + ' · con Guillermo (' + gTxt(h) + ')' })); if (q < 1) out.push(Object.assign({}, base, { to: h.hired_by, amt: rate[t.kind] * (1 - q), when: when + ' · Guillermo (' + Math.round((1 - q) * 100) + ' %)' })); }
       continue;
     }
     if (t.kind === 'acabado' && vs.apoyo) { out.push(Object.assign({}, base, { to: v.owner, amt: rate[t.kind], when: when + ' · final de apoyo (5.5)' })); continue; }
@@ -1956,7 +2036,7 @@ function vSummary() {
   if (apoyoGiven) cover.push({ t: `${apoyoGiven} acabados de apoyo · sin cobro`, d: `Acordado en el punto 5.5: el pago es de ${oName}`, dot: '#6EE7B7' });
   if (lostCount) cover.push({ t: `${lostCount} ${lostCount === 1 ? 'video pasó' : 'videos pasaron'} a ${oName} · ${f(lostCount * (R8.montaje + R8.acabado))}`, d: 'Incumplimiento: el montaje no llegó a tiempo (5.7)', dot: '#FF6B5B' });
   if (apoyoGot) cover.push({ t: `${apoyoGot} acabados de ${oName}`, d: 'Apoyo acordado (5.5) · no es falta y tú los cobras', dot: '#8B8B94' });
-  if (gMine) cover.push({ t: `Guillermo hizo ${gMine.tasks} tareas por ti`, d: `${oName} recibió el 80 %; tú conservas el 20 %`, dot: '#B98CFF' });
+  if (gMine) cover.push({ t: `Guillermo hizo ${gMine.tasks} tareas por ti`, d: gp(me) < 1 ? `${oName} recibió el ${gTxt(me)}; tú conservas el resto` : `${oName} recibió el total`, dot: '#B98CFF' });
   const tips = [];
   if (bad) {
     if (lateCount) tips.push([`${lateCount} ${lateCount === 1 ? 'entrega llegó' : 'entregas llegaron'} tarde`, 'Termina guiones y storyboards en la misma reunión (suma +1 de reunión) y empieza cada montaje un día antes. Tarde resta 3.', `${dlv.total} de ${dlv.total} a tiempo`]);
@@ -2006,7 +2086,7 @@ function vSummary() {
     <div class="row" style="gap:8px;align-items:flex-start;padding:10px;border-radius:12px;background:#15130E"><span style="color:#FFC978;font-weight:700">+</span><p class="small" style="margin:0;line-height:1.45;color:#E4D5C3"><b style="color:#FFC978">Tu aporte:</b> ${bad ? 'llega puntual y entrega guiones y montajes a tiempo: con eso el equipo gana las medallas que faltan.' : 'sigue entregando a tiempo y termina la preproducción en la reunión; así el equipo no pierde puntualidad al final.'}</p></div></div>`;
   html += `</section>`;
   if (me.role === 'admin') html += `<a class="btn ${p.status === 'cerrado' ? 'b-ghost' : 'b-amber'}" href="#/cierre">${p.status === 'cerrado' ? 'Ver liquidación' : 'Cierre del proyecto'}</a>${p.status === 'cerrado' ? '' : `<p class="muted" style="margin:-6px 0 0;text-align:center">Se envía cuando estén los ${p.videos_total} videos · ${oName} confirma la liquidación</p>`}`;
-  else html += p.status === 'cerrado' || (p.settlement && p.settlement.sent_at) ? `<a class="btn b-blue" href="#/cierre">Ver liquidación</a>` : `<div class="row card" style="flex-direction:row;padding:12px 14px">${icon.check}<p class="small" style="margin:0;line-height:1.45;color:#C9C9D1">Cuando ${esc((st.admin() || {}).name || 'el administrador')} cierre el proyecto, te llegará la liquidación para que la confirmes.</p></div>`;
+  else html += p.status === 'cerrado' || (p.settlement && p.settlement.sent_at) ? `<a class="btn b-blue" href="#/cierre">Ver liquidación</a>` : `<div class="row card" style="flex-direction:row;padding:12px 14px">${icon.check}<p class="small" style="margin:0;line-height:1.45;color:#C9C9D1">Cuando ${esc((st.admin() || {}).name || 'el líder')} cierre el proyecto, te llegará la liquidación para que la confirmes.</p></div>`;
   html += `</div>`;
   return html;
 }
@@ -2062,7 +2142,7 @@ function logText(l) {
   if (T === 'invite') return { k: 'team', t: `${who} invitó a ${esc(l.data.name)} como ${ROLE[l.data.role]}` };
   if (T === 'join') return { k: 'team', t: `${esc(l.data.name)} entró al equipo` };
   if (T === 'tasks.insert' && n.hire_id) { const hh = S.data.hires.find((x) => x.id === n.hire_id) || {}; return { k: 'task', t: `Guillermo hizo el ${R.KIND_LABEL[n.kind].toLowerCase()} del video ${vnum(n.video_id)}`, s: `contratado por ${esc(st.member(hh.hired_by).name)} · lo registró ${who}` }; }
-  if (T === 'hires.insert') { const ev = S.data.events.find((x) => x.id === n.event_id) || {}; return { k: 'plan', t: `${who} contrató a Guillermo para la reunión del ${R.fmtWhen(ev.starts_at)}`, s: 'cobra el 80 % de su preproducción' }; }
+  if (T === 'hires.insert') { const ev = S.data.events.find((x) => x.id === n.event_id) || {}; return { k: 'plan', t: `${who} contrató a Guillermo para la reunión del ${R.fmtWhen(ev.starts_at)}`, s: `quien asiste cobra ${gp(n) < 1 ? 'el ' + gTxt(n) : 'todo'} de su preproducción` }; }
   if (T === 'hires.update' && n.status !== o.status) return { k: 'plan', t: `${who} ${{ aceptada: 'aceptó', rechazada: 'rechazó', cancelada: 'canceló' }[n.status] || 'actualizó'} la contratación de Guillermo` };
   if (T === 'tasks.insert') return { k: 'task', t: `${who} marcó ${R.KIND_LABEL[n.kind].toLowerCase()} del video ${vnum(n.video_id)}`, s: n.link ? 'con enlace' : '' };
   if (T === 'tasks.delete') return { k: 'task', t: `${who} desmarcó ${R.KIND_LABEL[o.kind].toLowerCase()} del video ${vnum(o.video_id)}` };
@@ -2100,6 +2180,9 @@ function logText2(l) {
   const evn = (x) => (x.kind === 'rodaje' ? 'el rodaje' : 'la reunión') + ' del ' + R.fmtWhen(x.starts_at);
   if (T === 'settings.look') return { k: 'team', t: `${who} cambió la apariencia de la app`, s: 'colores principal y de urgencia' };
   if (T === 'settings.reminders') return { k: 'team', t: `${who} ajustó los recordatorios automáticos` };
+  if (T === 'proposals.insert' && n.kind === 'apoyo') return { k: 'team', t: `${who} propuso ${n.data.apoyo ? 'dar' : 'quitar'} el apoyo en la edición a ${esc(st.member(n.data.member).name)}` };
+  if (T === 'proposals.update' && n.kind === 'apoyo' && n.status !== o.status) return { k: 'team', t: `${who} ${{ aprobada: 'aceptó', rechazada: 'rechazó', retirada: 'retiró' }[n.status] || 'actualizó'} ${n.status === 'retirada' ? 'la propuesta de apoyo' : (n.data.apoyo ? 'recibir apoyo' : 'editar sin apoyo')}`, s: n.status === 'aprobada' ? 'rige para los videos que aún no se graban' : '' };
+  if (T === 'members.update' && n.apoyo !== o.apoyo) return { k: 'team', t: `${esc(n.name)} ${n.apoyo ? 'ahora recibe apoyo' : 'ahora edita sin apoyo'}` };
   if (T === 'proposals.insert') return { k: 'team', t: `${who} propuso cambiar ${n.kind === 'pct' ? 'los porcentajes del acuerdo' : 'las reglas de registro'}`, s: propSummary(n) };
   if (T === 'proposals.update' && n.status !== o.status) return { k: 'team', t: `${who} ${{ aprobada: 'aprobó', rechazada: 'rechazó', retirada: 'retiró' }[n.status] || 'actualizó'} la propuesta de ${n.kind === 'pct' ? 'porcentajes' : 'reglas'}`, s: propSummary(n) };
   if (T === 'videos.update' && n.title !== o.title) return { k: 'plan', t: `${who} puso tema al video ${n.num}`, s: esc(n.title || 'sin tema') };
@@ -2166,7 +2249,7 @@ function vHistory() {
   const rows = S.data.log.slice().reverse().map((l) => Object.assign({ l }, logText2(l) || {})).filter((x) => x.t && (ui.histF === 'all' || x.k === ui.histF));
   const pendC = S.data.corrections.filter((x) => x.status === 'pendiente');
   let html = `<div><h1>Historial</h1><p class="sub">Todo queda registrado con fecha y hora. Nadie puede borrarlo ni editarlo. Si algo está mal, se pide una corrección; lo vacío (una reunión o un proyecto sin datos) sí se puede borrar, y queda anotado aquí.</p></div>`;
-  if (pendC.length) html += `<section class="card" style="border-color:#4A3414;background:#1C130A"><p class="lbl" style="color:#FFC978">Correcciones pendientes</p>${pendC.map((c) => `<div><b class="small">${esc(st.member(c.requested_by).name)}:</b> <span class="small">${esc(c.text)}</span>${c.requested_by !== S.me.id ? `<div class="grid2" style="margin-top:8px"><button class="btn sm b-amber" data-act="corr" data-id="${c.id}" data-s="aprobada">Aprobar</button><button class="btn sm b-ghost" data-act="corr" data-id="${c.id}" data-s="rechazada">Rechazar</button></div>` : '<p class="muted" style="margin:4px 0 0">Esperando respuesta</p>'}</div>`).join('')}${st.isAdmin() ? '<p class="muted" style="margin:0">Al aprobar, el administrador aplica el cambio (por ejemplo, desmarcar y volver a marcar la tarea). El original queda en el historial.</p>' : ''}</section>`;
+  if (pendC.length) html += `<section class="card" style="border-color:#4A3414;background:#1C130A"><p class="lbl" style="color:#FFC978">Correcciones pendientes</p>${pendC.map((c) => `<div><b class="small">${esc(st.member(c.requested_by).name)}:</b> <span class="small">${esc(c.text)}</span>${c.requested_by !== S.me.id ? `<div class="grid2" style="margin-top:8px"><button class="btn sm b-amber" data-act="corr" data-id="${c.id}" data-s="aprobada">Aprobar</button><button class="btn sm b-ghost" data-act="corr" data-id="${c.id}" data-s="rechazada">Rechazar</button></div>` : '<p class="muted" style="margin:4px 0 0">Esperando respuesta</p>'}</div>`).join('')}${st.isAdmin() ? '<p class="muted" style="margin:0">Al aprobar, se aplica el cambio (por ejemplo, desmarcar y volver a marcar la tarea). El original queda en el historial.</p>' : ''}</section>`;
   html += `<div class="row" style="flex-wrap:wrap;gap:6px">${F.map(([k, t]) => `<button class="btn sm ${ui.histF === k ? 'b-amber' : 'b-ghost'}" data-act="histF" data-k="${k}">${t}</button>`).join('')}</div>`;
   let lastDay = '';
   html += `<section class="card" style="padding:6px 16px"><div class="list">${rows.map((x) => {
@@ -2231,16 +2314,18 @@ function memberCard(m, o = {}) {
   const ok = st.PHONE_RE.test(ph);
   const bad = ph.length > 0 && !ok;
   const col = o.color || COLOR[m.role] || ['#22242C', '#C9C9D1'];
-  const roleCh = { admin: ['Administrador', '#2A2416', '#FFC978'], socio: ['Socio', '#18233A', '#A9C7FF'], colaborador: ['Colaborador', '#21163A', '#D6C2FF'] }[m.role] || ['', '#22242C', '#C9C9D1'];
+  // 1.5: el líder lleva la etiqueta "Socio" (y debajo "Líder de proyecto"); el socio con apoyo, "Socio con apoyo".
+  const roleCh = { admin: ['Socio', '#18233A', '#A9C7FF'], socio: [m.apoyo ? 'Socio con apoyo' : 'Socio', '#18233A', '#A9C7FF'], colaborador: ['Colaborador', '#21163A', '#D6C2FF'] }[m.role] || ['', '#22242C', '#C9C9D1'];
   const pending = !m.user_id && m.invite_code && !o.static;
   const expired = pending && m.invite_expires && new Date(m.invite_expires) < new Date();
   const editing = (ui.memEdit || {})[m.id];
-  const sub = o.sub != null ? o.sub : pending ? (expired ? 'La invitación venció' : 'Invitación pendiente · vence ' + R.fmtDay(R.limaDate(m.invite_expires))) : m.role === 'socio' ? (m.apoyo ? 'Recibe apoyo en el video final' : 'Socio') : m.role === 'admin' ? 'Administra el equipo' : 'Colaborador';
+  const sub = o.sub != null ? o.sub : pending ? (expired ? 'La invitación venció' : 'Invitación pendiente · vence ' + R.fmtDay(R.limaDate(m.invite_expires))) : m.role === 'socio' ? (m.apoyo ? 'Williams hace su video final si envía el montaje a tiempo'.replace('Williams', LN()) : 'Edita sus videos completos') : m.role === 'admin' ? 'Confirma las llegadas y revisa las entregas' : 'Colaborador';
   const msg = m.role === 'colaborador' ? `Hola ${m.name.split(' ')[0]}, te invito a trabajar con nosotros en la app de registro. Entra aquí para ver las condiciones del encargo: ${pending ? inviteLink(m) : ''}` : `Hola, te invito como Socio a nuestro equipo en la app de registro. Ahí marcamos nuestras tareas y vemos cuánto le toca a cada uno: ${pending ? inviteLink(m) : ''}`;
   return `<section class="mcard">
     <div class="row" style="gap:12px">
       <span class="av" style="width:46px;height:46px;background:${col[0]};color:${col[1]};font-size:17px">${esc(String(name || '?').charAt(0).toUpperCase())}</span>
       <div style="flex:1;min-width:0">${editing && canEdit && !o.static ? `<input class="in" data-mf="name" data-id="${m.id}" value="${esc(name)}" aria-label="Nombre de ${esc(m.name)}" style="min-height:40px">` : `<b class="num" style="display:block;font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}${m.id === me.id ? ' (tú)' : ''}</b>`}
+        ${m.role === 'admin' && !o.static ? `<span class="leadtag">${icon.star('currentColor', 12)}Líder de proyecto</span>` : ''}
         <span class="muted" style="display:block;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${expired ? 'color:var(--u0)' : ''}">${esc(sub)}</span></div>
       <span class="rolechip" style="background:${roleCh[1]};color:${roleCh[2]}">${roleCh[0]}</span>
       ${canEdit && !o.static ? `<button class="ibtn" data-act="memEdit" data-id="${m.id}" aria-label="Editar nombre">${icon.pen('currentColor', 15)}</button>` : ''}
@@ -2250,7 +2335,21 @@ function memberCard(m, o = {}) {
       <div class="row" style="gap:8px"><span class="pfx">+51</span>${canEdit ? `<input class="in" type="tel" inputmode="numeric" maxlength="11" data-mf="phone" data-id="${m.id}" value="${esc(fmtPhone(ph))}" placeholder="9XX XXX XXX" aria-label="WhatsApp de ${esc(m.name)}" style="flex:1;min-width:0;${bad ? 'border-color:var(--u0)' : ''}">` : `<span class="in" style="flex:1;display:flex;align-items:center">${esc(fmtPhone(ph))}</span>`}<span class="okdot"${ok ? '' : ' hidden'}>${icon.tick}</span></div>
       <span class="small wabad" style="color:#FFC978;font-weight:600"${bad ? '' : ' hidden'}>Debe tener 9 dígitos y empezar con 9</span>
       <a class="linkbtn watry" href="https://wa.me/51${ph}?text=${encodeURIComponent('Hola')}" target="_blank" rel="noopener" style="color:#A7F3D0;text-decoration:none;align-self:flex-start"${ok ? '' : ' hidden'}>Probar chat ↗</a></div>` : ''}
-    ${o.extra || ''}</section>`;
+    ${apoyoSwitch(m, o)}${o.extra || ''}</section>`;
+}
+// 1.5 · Integrantes D: interruptor "Recibe apoyo en la edición" (lo propone el líder y lo acepta el socio).
+function apoyoSwitch(m, o) {
+  if (!st.isAdmin() || m.role !== 'socio' || o.static) return '';
+  const prop = st.proposals().find((x) => x.kind === 'apoyo' && x.status === 'pendiente' && x.data.member === m.id);
+  if (prop) return `<div class="pendrow"><span class="hdot blue"></span><p>Esperando que ${first(m)} acepte ${prop.data.apoyo ? 'recibir apoyo' : 'editar sin apoyo'}</p><button class="linkbtn" data-act="propWithdraw" data-id="${prop.id}">Retirar</button></div>`;
+  const on = !!m.apoyo;
+  const asking = (ui.apoyoAsk || null) === m.id;
+  const sw = `<div class="swrow"><span style="flex:1;min-width:0"><b>Recibe apoyo en la edición</b><small>${on ? 'Tiene su plazo de apoyo y ' + LN() + ' revisa lo que entrega por su cuenta' : 'Mismos plazos que ' + LN() + ': 12:00 montaje y 18:00 video final'}</small></span>
+    <button type="button" class="sw${on ? ' on' : ''}" role="switch" aria-checked="${on}" aria-label="Recibe apoyo en la edición" data-act="apoyoAsk" data-id="${m.id}"><i></i></button></div>`;
+  if (!m.user_id) return sw.replace('data-act="apoyoAsk"', 'data-act="apoyoPend"');
+  if (!asking) return sw;
+  return sw + `<div class="askbox"><b>${on ? '¿Quitar el apoyo a ' + first(m) + '?' : '¿Dar apoyo a ' + first(m) + '?'}</b>${apoyoFacts(!on, first(m), false).map((f) => `<p>${f}</p>`).join('')}
+    <div class="row" style="gap:8px"><button class="btn b-ghost" style="flex:1" data-act="apoyoAsk" data-id="${m.id}">Cancelar</button><button class="btn x-amber" style="flex:1.4" data-act="apoyoGo" data-id="${m.id}">Proponer a ${first(m)}</button></div></div>`;
 }
 function vIntegrantes() {
   if (!st.isAdmin()) return adminOnly('');
@@ -2267,7 +2366,7 @@ function vIntegrantes() {
     const sub = js.length ? js.map((j) => `Edición · ${j.video_ids.length} ${j.video_ids.length === 1 ? 'video' : 'videos'} · ${{ propuesto: 'por aprobar', invitado: 'invitado', activo: 'trabajando', finalizado: 'por confirmar', cerrado: 'cerrado' }[j.status]}`).join(' · ') : null;
     return memberCard(m, { sub: !m.user_id && m.invite_code ? null : sub || 'Sin encargo activo', extra: js.length ? `<div class="row" style="gap:8px;flex-wrap:wrap">${js.map((j) => `<a class="btn sm b-ghost" href="#/encargo/${j.id}">Ver encargo · ${j.video_ids.length} ${j.video_ids.length === 1 ? 'video' : 'videos'}</a>`).join('')}</div>` : `<button class="btn sm b-ghost" data-act="jobNewFor" data-id="${m.id}">Armar un encargo</button>` });
   }).join('');
-  html += memberCard({ id: 'G', name: 'Guillermo', role: 'colaborador', phone: String(gph).replace(/\D/g, ''), user_id: 'x', active: true }, { static: true, canEdit: true, sub: 'Preproducción · 80 % cuando lo envían', color: ['#C9B2FF', '#160F22'] })
+  html += memberCard({ id: 'G', name: 'Guillermo', role: 'colaborador', phone: String(gph).replace(/\D/g, ''), user_id: 'x', active: true }, { static: true, canEdit: true, sub: 'Preproducción · 80 % si lo envía un socio con apoyo; si no, 100 %', color: ['#C9B2FF', '#160F22'] })
     .replace('data-mf="phone" data-id="G"', 'data-mf="gphone" data-id="G"');
   html += `<button class="dashbtn" data-act="memInvite">${icon.plus}Invitar integrante</button>
     <button class="hb x-amber" data-act="memSave">Guardar</button>
@@ -2572,14 +2671,16 @@ const RULE_DEF = [
 const ENT_DEF = [
   ['mon', 'Días de apoyo', 'antes de publicar · entregas al límite', 0, 0, 0, (x) => x + ' días'], ['monh', 'Hora del apoyo', 'último envío del montaje', 0, 0, 0, R.hm],
   ['self', 'Entrega por su cuenta', 'hasta esta hora del día anterior', 0, 0, 0, R.hm], ['auto', 'Pasa al líder', 'si nadie lo tomó', 0, 0, 0, R.hm],
-  ['fix', 'Corregir cambios', 'si se pidieron cambios', 0, 0, 0, R.hm], ['fin', 'Video final', 'días antes de publicar, 23:59', 0, 0, 0, (x) => x + ' día antes']];
+  ['fix', 'Corregir cambios', 'si se pidieron cambios', 0, 0, 0, R.hm],
+  ['pmon', 'Montaje · sin apoyo', 'día antes de publicar', 0, 0, 0, R.hm], ['pfin', 'Video final · sin apoyo', 'día antes; luego se puede tomar', 0, 0, 0, R.hm],
+  ['prev', 'Revisión · sin apoyo', 'si no se revisa, se aprueba', 0, 0, 0, R.hm], ['pfix', 'Corregir · sin apoyo', 'si se pidieron cambios', 0, 0, 0, R.hm], ['fin', 'Video final', 'días antes de publicar, 23:59', 0, 0, 0, (x) => x + ' día antes']];
 const PCT_DEF = [['pre', 'Preproducción', 'pre'], ['rod', 'Rodaje', 'prod'], ['mon', 'Montaje', 'post'], ['aca', 'Video final', 'star']];
 const REM_DEF = [
   ['Reuniones y rodajes', [['reu', 'pre', 'Reunión de preproducción', '4 h antes y 30 min antes', 'A los dos'], ['rod', 'prod', 'Rodaje', 'El día anterior a las 20:00 y 1 h antes', 'A los dos'], ['arr', 'prod', 'Llegada sin marcar', '10 min después de la hora, si aún no marcaste', 'A quien falte marcar']]],
   ['Entregas', [['pre', 'pre', 'Guion y storyboard por vencer', '3 h antes del plazo', 'Al dueño del video'], ['take', 'pre', 'Tarea disponible para tomar', 'Cuando vence una tarea de tu compañero', 'Al otro socio'], ['mon', 'post', 'Montaje por vencer', '24 h antes y 6 h antes', 'Al dueño del video'], ['fin', 'post', 'Video final por vencer', '6 h antes', 'A quien le toca el final']]],
   ['Equipo', [['team', 'team', 'Avisos de tu compañero', 'Si avisa que no irá, pide finalizar una reunión o marca su llegada', 'Al otro socio · a ti para confirmar']]]
 ];
-function adminOnly(body) { return st.isAdmin() ? body : `${backTo('#/', 'Inicio')}${banner('bad', 'Solo para el administrador', 'Esta sección la ve solo quien administra el equipo.')}`; }
+function adminOnly(body) { return st.isAdmin() ? body : `${backTo('#/', 'Inicio')}${banner('bad', 'Solo para el líder de proyecto', 'Esta sección la ve solo el líder de proyecto.')}`; }
 function aitem(href, tint, ic, title, sub, badge = '') {
   return `<a class="ait" href="${href}"><span class="tic tint-${tint}">${ic}</span><span class="ttx"><b>${title}</b><span>${sub}</span></span>${badge}${icon.chev}</a>`;
 }
@@ -2599,7 +2700,7 @@ function vAdmin(sub) {
   const remOn = REM_DEF.reduce((a, g) => a + g[1].filter((r) => rem[r[0]] !== false).length, 0);
   const L = st.look();
   let html = `${backTo('#/', 'Inicio')}<div><div class="between" style="align-items:center"><h1 style="font-size:28px">Administrador</h1><span class="pill-amber">${icon.shield}Solo tú</span></div><p class="sub">Tu socio no ve esta sección. Lo que toca el acuerdo se propone y se aplica cuando él lo aprueba.</p></div>`;
-  if (pend.length) html += `<section class="pendbox"><div class="row" style="gap:8px"><span class="hdot blue"></span><b class="small" style="color:#C9D8FF">Esperando que tu socio apruebe · ${pend.length}</b></div>${pend.map((p) => `<a class="penditem" href="#/propuesta/${p.id}"><span style="flex:1"><b class="small">${p.kind === 'pct' ? 'Porcentajes del acuerdo' : 'Reglas de registro'}</b><br><span class="muted">${propSummary(p)} · ${R.fmtWhen(p.created_at)}</span></span><span class="gchip g-next">Pendiente</span></a>`).join('')}</section>`;
+  if (pend.length) html += `<section class="pendbox"><div class="row" style="gap:8px"><span class="hdot blue"></span><b class="small" style="color:#C9D8FF">Esperando que tu socio apruebe · ${pend.length}</b></div>${pend.map((p) => `<a class="penditem" href="${p.kind === 'apoyo' ? '#/admin/integrantes' : '#/propuesta/' + p.id}"><span style="flex:1"><b class="small">${p.kind === 'pct' ? 'Porcentajes del acuerdo' : p.kind === 'apoyo' ? 'Apoyo en la edición · ' + esc(first(st.member(p.data.member) || { name: 'socio' })) : 'Reglas de registro'}</b><br><span class="muted">${propSummary(p)} · ${R.fmtWhen(p.created_at)}</span></span><span class="gchip g-next">Pendiente</span></a>`).join('')}</section>`;
   html += `<div><p class="lbl alb">Acuerdo · con aprobación del socio</p><div class="agrp">
     ${aitem('#/admin/porcentajes', 'pre', icon.pie('var(--c-pre)'), 'Porcentajes del acuerdo', `Pre ${pct.pre} · Rodaje ${pct.rod} · Montaje ${pct.mon} · Final ${pct.aca}`, st.pendingProposal('pct') ? '<span class="gchip g-next">1 propuesta</span>' : '')}
     ${aitem('#/admin/entregas', 'post', icon.cut('var(--c-post)', 19), 'Entregas al límite', (() => { const r = Object.assign({}, R.DEFAULT_RULES, S0.rules || {}); return `Apoyo ${r.mon} días · ${R.hm(r.monh)} · pasa a ti ${R.hm(r.auto)}`; })())}
@@ -2616,6 +2717,7 @@ function vAdmin(sub) {
 }
 function propSummary(p) {
   const old = p.old || {};
+  if (p.kind === 'apoyo') return `${esc(st.member(p.data.member).name)} · ${p.data.apoyo ? 'con apoyo' : 'sin apoyo'} en la edición`;
   if (p.kind === 'pct') return PCT_DEF.map(([k, n]) => `${n.split(' ')[0]} ${p.data[k]}`).join(' · ');
   const all = RULE_DEF.flatMap((g) => g[1]).concat(ENT_DEF);
   return Object.entries(p.data).map(([k, v]) => {
@@ -2698,7 +2800,7 @@ function vAdminLook() {
   const tileP = (K, ic, on) => `<span class="stile" style="min-height:70px;border-radius:16px;cursor:default;background:${over(L['st' + K], surf, on ? L.stOn : L.stOff)};border-color:${over(L['bd' + K], surf, L.bdOp)};color:${on ? L.fgOn : (isL ? '#15161C' : '#F4F4F5')}">${ic(on ? L.fgOn : L['bd' + K], 20)}<span style="font-size:10px">${{ Pre: 'Preproducción', Rod: 'Rodaje', Post: 'Posproducción' }[K]}</span></span>`;
   html += `<section class="card" style="gap:12px;background:${isL ? '#F6F5F2' : '#0B0C10'}"><p class="lbl">Vista previa · ${mode === 'dark' ? 'noche' : 'día'}</p>
     <div class="racha" style="background:${over(lvP[0], (isL ? '#F6F5F2' : '#0B0C10'), L.opRacha == null ? 100 : L.opRacha)};border-color:${lvP[1]};padding:12px 14px"><div class="rfire" style="width:60px;height:70px">${icon.flame(lvP[2], 44)}</div><div class="rtx"><p class="lbl" style="color:${lvP[3]}">Tu racha</p><b class="num" style="font-size:32px;line-height:1;color:${lvP[3]}">15</b><span class="rlv" style="--lvc:${lvP[2]};--lvt:${lvP[3]};--lvchip:${over(lvP[2], lvP[0], 18)}">Nivel 3 · Responsable</span></div></div>
-    <div class="dsqs">${[['HOY', 'u0'], ['DOM', 'u1'], ['LUN', 'u2'], ['MAR', null]].map(([d, k], i) => `<div class="dsq ${k ? '' : 'd-none'} ${i === 0 ? 'on' : ''}" style="${k ? `--uc:${L[k]}` : ''}"><span class="dw">${d}</span><b class="num">${i + 1}</b></div>`).join('')}</div>
+    <div class="actbox" style="background:${over(surf, (isL ? '#F6F5F2' : '#0B0C10'), L.opAct == null ? 100 : L.opAct)};padding:10px"><div class="dsqs">${[['HOY', 'u0'], ['DOM', 'u1'], ['LUN', 'u2'], ['MAR', null]].map(([d, k], i) => `<div class="dsq ${k ? '' : 'd-none'} ${i === 0 ? 'on' : ''}" style="${k ? `--uc:${L[k]}` : ''}"><span class="dw">${d}</span><b class="num">${i + 1}</b></div>`).join('')}</div><div class="small" style="padding:2px 4px 4px;font-weight:600">Tus actividades del día</div></div>
     <div class="stiles">${tileP('Pre', icon.pen, stage === 'Pre')}${tileP('Rod', icon.cam, stage === 'Rod')}${tileP('Post', icon.cut, stage === 'Post')}</div>
     <div class="grid2"><div style="border-radius:16px;padding:12px;background:${over(L.meta[0], (isL ? '#F6F5F2' : '#0B0C10'), L.opMeta == null ? 100 : L.opMeta)};border:1px solid ${L.meta[1]}"><p class="lbl" style="color:${L.meta[2]}">Meta del equipo</p><b class="num" style="font-size:24px;color:${isL ? '#15161C' : '#F4F4F5'}">56%</b><div style="height:8px;border-radius:9px;background:${L.meta[3]};margin-top:6px"><div style="width:56%;height:100%;border-radius:9px;background:${L.meta[2]}"></div></div></div>
       <div style="border-radius:16px;padding:12px;background:${over(L.wallet[0], (isL ? '#F6F5F2' : '#0B0C10'), L.opWallet == null ? 100 : L.opWallet)};border:1px solid ${L.wallet[1]}"><p class="lbl" style="color:${L.wallet[2]}">En la billetera</p><b class="num" style="font-size:24px;color:${L.wallet[3]}">S/ 156.25</b></div></div>
@@ -2810,6 +2912,22 @@ function vAdminPractice() {
   html += `<p class="muted" style="margin:-6px 0 0;text-align:center">Solo cambia este celular. Tu socio sigue viendo los datos reales.</p>`;
   return html;
 }
+// 1.5 · Qué cambia al dar o quitar el apoyo en la edición (Integrantes D).
+function apoyoFacts(on, name, you) {
+  const L = LN();
+  const su = you ? 'tus' : 'sus', tu = you ? 'tu' : 'su';
+  return on ? [
+    'Rige desde los videos que aún no se graban. Los que ya están en edición siguen igual.',
+    `${you ? 'Envías tu' : name + ' envía su'} montaje hasta 2 días antes de publicar a las 21:00 y ${L} hace ${tu} video final.`,
+    `Si no llega a tiempo, a las 12:00 del día antes el video pasa a ${L}.`,
+    `${you ? 'Ya no tomas' : name + ' ya no toma'} la edición de otros.`
+  ] : [
+    'Rige desde los videos que aún no se graban. Los que ya están en edición siguen igual.',
+    `${you ? 'Editas tus' : name + ' edita ' + su} videos completos: montaje hasta las 12:00 y video final hasta las 18:00 del día antes de publicar.`,
+    `${L} revisa ${tu} entrega. Desde las 18:00, si no entregó, otro socio puede tomar el video.`,
+    `Los videos de ${L} también vencen a las 18:00, y ${you ? 'tú puedes' : name + ' puede'} tomarlos si no entrega.`
+  ];
+}
 function vProposal(id) {
   const p = st.proposals().find((x) => x.id === id);
   if (!p) return `${backTo('#/', 'Inicio')}<p class="empty">Propuesta no encontrada.</p>`;
@@ -2817,6 +2935,17 @@ function vProposal(id) {
   const who = st.member(p.proposed_by);
   const old = p.old || {};
   let rows = '';
+  if (p.kind === 'apoyo') {
+    const tm = st.member(p.data.member);
+    const facts = apoyoFacts(p.data.apoyo, first(tm), p.data.member === me.id);
+    rows = facts.map((f) => `<div class="srow"><span class="ttx"><span style="color:var(--tx2);font-size:13px;line-height:1.45">${f}</span></span></div>`).join('');
+    const status0 = { pendiente: ['Pendiente', 'next'], aprobada: ['Aceptada', 'done'], rechazada: ['Rechazada', 'past'], retirada: ['Retirada', 'past'] }[p.status];
+    let h = `${backTo('#/', 'Inicio')}<div><div class="between" style="align-items:center"><p class="lbl">Propuesta de ${esc(who.name)}</p><span class="gchip g-${status0[1]}">${status0[0]}</span></div><h1 style="font-size:24px">${p.data.apoyo ? (p.data.member === me.id ? 'Recibir apoyo en la edición' : 'Dar apoyo a ' + first(tm)) : (p.data.member === me.id ? 'Quitarte el apoyo en la edición' : 'Quitar el apoyo a ' + first(tm))}</h1></div><div class="agrp">${rows}</div>`;
+    if (p.status === 'pendiente' && p.data.member === me.id) h += `<div class="row" style="gap:10px"><button class="btn b-ghost" style="flex:1" data-act="propDecide" data-id="${p.id}" data-s="rechazada">Rechazar</button><button class="btn b-mint" style="flex:2" data-act="propDecide" data-id="${p.id}" data-s="aprobada">Aceptar</button></div>`;
+    else if (p.status === 'pendiente' && p.proposed_by === me.id) h += `<button class="btn b-ghost" data-act="propWithdraw" data-id="${p.id}">Retirar propuesta</button>`;
+    else if (p.decided_by) h += banner(p.status === 'aprobada' ? 'ok' : 'wait', `${status0[0]} por ${esc(st.member(p.decided_by).name)}`, R.fmtWhen(p.decided_at));
+    return h;
+  }
   if (p.kind === 'pct') {
     const was = Object.assign({}, R.DEFAULT_PCT, old);
     rows = PCT_DEF.map(([k, n, ic]) => `<div class="srow${was[k] !== p.data[k] ? ' ch' : ''}"><span class="tic tint-${ic}">${stageIc(ic)}</span><span class="ttx"><b>${n}</b><span>Antes ${was[k]} %</span></span><b class="num sval">${p.data[k]} %</b></div>`).join('');
@@ -2847,7 +2976,7 @@ function sheetMark(v, k, hireId) {
   const cm = R.canMark(v, k, S.me, st.ctx(v.project_id), new Date(), { hire: h });
   return `<form data-form="mark" class="" style="display:contents"><input type="hidden" name="v" value="${v.id}"><input type="hidden" name="k" value="${k}"><input type="hidden" name="h" value="${hireId || ''}">
   <h2>${R.KIND_LABEL[k]} · video ${v.num}</h2>
-  ${h ? `<div class="banner bn-fm"><div><b>Con Guillermo · contratado por ${esc(st.member(h.hired_by).name)}</b><p>Quedará como "Hecho por Guillermo". Recibes ${R.money(val * 0.8)} (80 %) y ${R.money(val * 0.2)} siguen siendo de ${esc(st.member(h.hired_by).name)}. No suma ni resta racha.</p></div></div>` : ''}
+  ${h ? `<div class="banner bn-fm"><div><b>Con Guillermo · contratado por ${esc(st.member(h.hired_by).name)}</b><p>Quedará como "Hecho por Guillermo". ${gp(h) < 1 ? `Recibes ${R.money(val * gp(h))} (${gTxt(h)}) y ${R.money(val * (1 - gp(h)))} siguen siendo de ${esc(st.member(h.hired_by).name)}` : `Recibes ${R.money(val)} (todo)`}. No suma ni resta racha.</p></div></div>` : ''}
   ${cm.claimed ? banner('wait', `Entregas lo que tomaste de ${esc(st.member(v.owner).name)}`, `Cobras ${R.money(val)} y sumas +${R.PTS.rescue} puntos de rescate.`) : ''}
   ${cm.late ? banner('warn', 'Fuera de plazo', 'Se paga igual, pero resta 3 puntos de racha.') : ''}
   ${cm.apoyo ? banner('wait', 'Acabado de apoyo (5.5)', `Si el montaje llegó a tiempo, el pago es de ${esc(st.member(v.owner).name)}.`) : ''}
@@ -2932,7 +3061,9 @@ function render() {
   const r = location.hash.replace(/^#\/?/, '').split('/');
   let html;
   ui.wantAnim = null;
-  if (!S.session) html = vLogin(r[0] === 'i' ? r[1] : null);
+  if (!S.session) html = vLogin(r[0] === 'i' ? r[1] : (st.pendingInvite() || {}).code || null);
+  else if (S.inviteErr) html = vInviteTaken();
+  else if (S.inviteDone) html = vInviteDone();
   else if (!S.teamId || !S.me) html = vNoTeam(r[0] === 'i' ? r[1] : ui.inviteCode);
   else if (r[0] === 'i' && r[1]) html = S.me.role === 'colaborador' ? colabLayout(vAccept(r[1])) : layout('home', vAccept(r[1]));
   else if (S.me.role === 'colaborador') html = colabLayout(vColab());
@@ -3228,6 +3359,9 @@ const ACT = {
   corr: async (el) => { const c = S.data.corrections.find((x) => x.id === el.dataset.id); await st.decideCorrection(c, el.dataset.s); },
   rename: async (el) => { const m = st.member(el.dataset.id); const n = prompt('Nombre (así aparecerá en avisos, recibos e historial):', m.name); if (n && n.trim() && n.trim() !== m.name) await st.renameMember(m.id, n); },
   // ---------- 1.4 · Integrantes C ----------
+  apoyoAsk: (el) => { ui.apoyoAsk = ui.apoyoAsk === el.dataset.id ? null : el.dataset.id; render(); },
+  apoyoPend: () => st.toast('Aún no entra al equipo: cancela la invitación y vuelve a invitarlo con la etiqueta que quieras', 'bad'),
+  apoyoGo: async (el) => { const m = st.member(el.dataset.id); await st.proposeApoyo(m, !m.apoyo); ui.apoyoAsk = null; render(); },
   memEdit: (el) => { ui.memEdit = Object.assign({}, ui.memEdit, { [el.dataset.id]: !(ui.memEdit || {})[el.dataset.id] }); render(); },
   memRenew: async (el) => { await st.renewInvite(st.member(el.dataset.id)); },
   memCancel: async (el) => { const m = st.member(el.dataset.id); if (confirm(`¿Cancelar la invitación de ${m.name}? El enlace dejará de funcionar.`)) await st.cancelInvite(m); },
@@ -3302,15 +3436,45 @@ const ACT = {
     openSheet(`<h2>Contratar a Guillermo</h2>
     <p class="sub" style="margin:0">Para la reunión del ${R.fmtWhen(e.starts_at)}.</p>
     <div class="card tight"><div class="between small"><span class="muted">Hace</span><b>Tus guiones y storyboards de esta semana</b></div>
-    <div class="between small"><span class="muted">Cobra</span><b>80 % · ${R.money(val * 0.8)} por video</b></div>
+    <div class="between small"><span class="muted">Cobra</span><b>${gTxt(S.me)} · ${R.money(val * gp(S.me))} por video</b></div>
     <div class="between small"><span class="muted">Lo recibe</span><b>${esc(other ? other.name : 'tu compañero')}</b></div>
-    <div class="between small"><span class="muted">Tú conservas</span><b>20 % · ${R.money(val * 0.2)} por video</b></div></div>
+    ${gp(S.me) < 1 ? `<div class="between small"><span class="muted">Tú conservas</span><b>${Math.round((1 - gp(S.me)) * 100)} % · ${R.money(val * (1 - gp(S.me)))} por video</b></div>` : '<div class="between small"><span class="muted">Tú conservas</span><b>Nada: lo cedes todo</b></div>'}</div>
     <p class="muted" style="margin:0">Tu compañero tiene que aceptar. Tu asistencia queda como "no requerida": no es falta ni suma racha. El rodaje y la edición de tus videos siguen siendo tuyos.</p>
     <button class="btn b-purple" data-act="hireGo" data-e="${e.id}">Contratar</button><button class="btn b-ghost" data-act="close">Cancelar</button>`);
   },
   hireGo: async (el) => { const e = evById(el.dataset.e); sheetHtml = null; await st.hireGuillermo(e); },
   hireDecide: async (el) => { const h = S.data.hires.find((x) => x.id === el.dataset.id); await st.decideHire(h, el.dataset.s); },
   signOut: () => st.signOut(),
+  // 1.5 · Invitación en un paso
+  invOk: (el) => { ui.invOk = el.checked; ui.invNudge = false; render(); },
+  invMore: () => { ui.invMore = !ui.invMore; render(); },
+  invMailOff: () => { ui.invMail = null; render(); },
+  invAcc: async (el) => {
+    const code = el.dataset.code;
+    const info = ui.inviteInfo || {};
+    const ok = info.role === 'colaborador' || ui.invOk;
+    if (!ok) { ui.invNudge = true; render(); return; }
+    const nameEl = document.querySelector('[name=invname]');
+    const name = nameEl ? nameEl.value.trim() : '';
+    ui.invName = name || null;
+    st.savePendingInvite({ code, ok: true, name });
+    if (el.dataset.k === 'google') { location.href = st.googleUrl(); return; }
+    if (el.dataset.k === 'demo') { ui.email = 'invitado' + Math.floor(Math.random() * 1000) + '@demo'; await st.verifyCode(ui.email, '000000'); location.hash = '#/'; render(); return; }
+    ui.invMail = 'form'; render();
+  },
+  invAccept: async (el) => {
+    const info = ui.inviteInfo || {};
+    if (info.role !== 'colaborador' && !ui.invOk && !((st.pendingInvite() || {}).ok)) { ui.invNudge = true; render(); return; }
+    const nameEl = document.querySelector('[name=invname]');
+    const okd = await st.acceptInvite(el.dataset.code, nameEl ? nameEl.value.trim() : '');
+    if (okd === false) { render(); return; }
+    S.inviteDone = { name: S.me ? S.me.name : '', at: new Date() };
+    ui.inviteInfo = null; ui.invOk = false; location.hash = '#/'; render();
+  },
+  invSeen: () => { ui.inviteInfo = null; ui.invOk = false; ui.invMail = null; location.hash = '#/'; st.inviteSeen(); },
+  invDrop: () => { st.clearPendingInvite(); ui.inviteInfo = null; location.hash = '#/'; st.inviteSeen(); },
+  invForget: () => { st.clearPendingInvite(); ui.inviteInfo = null; ui.inviteCode = null; location.hash = '#/'; render(); },
+  switchAccount: () => st.switchAccount(),
   google: () => { location.href = st.googleUrl(); },
   demoAs: (el) => { ui.undo = null; ui.rpop = null; return st.demoSwitch(el.dataset.id); },
   demoReset: async () => { if (!confirm('¿Reiniciar el ejemplo? Se borra lo que probaste.')) return; if (st.practice()) { let k = 'con'; try { k = localStorage.getItem('ra-seed') || 'con'; } catch (e) { /* */ } await seedDemo(k); location.hash = '#/'; location.reload(); } else st.demoReset(); },
@@ -3332,7 +3496,10 @@ const FORM = {
   verify: async (f) => { await st.verifyCode(ui.email, f.code.trim()); location.hash = location.hash || '#/'; render(); },
   createTeam: async (f) => { await st.createTeam(f.team.trim(), f.me.trim()); location.hash = '#/equipo'; },
   goInvite: (f) => { location.hash = '#/i/' + f.code.trim().toUpperCase(); },
-  accept: async (f) => { await st.acceptInvite(f.code, f.name.trim()); ui.inviteInfo = null; location.hash = '#/'; st.toast('¡Ya eres parte del equipo!'); },
+  invMail: async (f) => {
+    ui.email = f.email.trim().toLowerCase();
+    await st.sendCode(ui.email); ui.invMail = 'sent'; ui.codeSent = true; render();
+  },
   invite: async (f, form) => { await st.invite(f.name.trim(), 'socio', !!form.apoyo.checked); form.reset(); },
   project: async (f) => { await st.createProject({ client: f.client.trim(), name: f.name.trim(), budget: Number(f.budget), videos_total: Number(f.videos), start_date: f.start }); location.hash = '#/videos'; },
   plan: async (f) => {
@@ -3353,6 +3520,7 @@ const FORM = {
     const n = Number(f.n);
     const videos = Array.from({ length: n }, (_, i) => ({ publish_date: f['pub' + i], owner: f['own' + i], title: (f['tit' + i] || '').trim() }));
     const rd = R.limaDate(rod.starts_at);
+    if (videos.some((v) => !v.publish_date || v.publish_date <= rd)) throw new Error('La publicación debe ser después del rodaje (' + R.fmtDay(rd) + ')');
     // 1.4: aviso de choque (apoyo en día de rodaje o reunión, o poco tiempo entre rodaje y publicación).
     const base = S.data.videos.filter((x) => x.project_id === rod.project_id).reduce((m, x) => Math.max(m, x.num), 0);
     const list = choquesDe(videos.map((v, i) => Object.assign({}, v, { num: base + i + 1, rodajeDate: rd })));
@@ -3434,6 +3602,9 @@ async function doReparto(rod, videos) {
   const mt = S.data.events.find((e) => e.kind === 'reunion' && e.rodaje_id === rod.id && active(e) && !e.ended_at);
   location.hash = mt ? '#/e/' + mt.id : '#/videos';
 }
+// 1.5 · Sin zoom con dos dedos (Safari ignora user-scalable=no): la app siempre encaja en la pantalla.
+['gesturestart', 'gesturechange'].forEach((ev) => document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
+document.addEventListener('touchmove', (e) => { if (e.touches && e.touches.length > 1) e.preventDefault(); }, { passive: false });
 document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
@@ -3461,6 +3632,7 @@ document.addEventListener('input', (e) => {
   if (d.inv) { ui.inv = ui.inv || {}; ui.inv[d.inv] = t.type === 'checkbox' ? t.checked : t.value; }
   if (d.job && ui.job) ui.job[d.job] = t.value;
   if (d.obs) { ui.obs = ui.obs || {}; ui.obs[d.obs] = t.value; }
+  if (t.name === 'invname') ui.invName = t.value;
 });
 document.addEventListener('change', (e) => { const d = e.target.dataset || {}; if (d.inv && e.target.type === 'checkbox') { ui.inv = ui.inv || {}; ui.inv.apoyo = e.target.checked; } });
 document.addEventListener('submit', async (e) => {
