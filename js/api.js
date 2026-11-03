@@ -1,5 +1,6 @@
 // Capa de datos. Misma interfaz para Supabase (real) y para el modo demo (en este navegador).
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
+import * as R from './rules.js';
 
 const TABLES = ['members', 'projects', 'videos', 'tasks', 'events', 'attendance', 'hires', 'log', 'corrections', 'proposals', 'claims'];
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(16).slice(2) + Date.now().toString(16));
@@ -111,6 +112,16 @@ class DemoAPI {
   switchUser(id) { this.db.who = id; this.persist(); }
   me(teamId) { return this.db.members.find((m) => m.team_id === teamId && m.user_id === this.db.who && m.active); }
   partner(teamId) { const m = this.me(teamId); return m && (m.role === 'admin' || m.role === 'socio'); }
+  // 1.4: la demo usa las mismas reglas que la app (y que la base) para la posproducción y el deshacer.
+  ctxFor(projectId) {
+    const d = this.db;
+    const videos = d.videos.filter((v) => v.project_id === projectId);
+    const vids = new Set(videos.map((v) => v.id));
+    const events = d.events.filter((e) => e.project_id === projectId);
+    const evIds = new Set(events.map((e) => e.id));
+    return { members: d.members, projects: d.projects, videos, tasks: d.tasks.filter((t) => vids.has(t.video_id)), events, attendance: d.attendance.filter((a) => evIds.has(a.event_id)), hires: d.hires.filter((h) => evIds.has(h.event_id)), claims: d.claims.filter((c) => vids.has(c.video_id)), jobs: [] };
+  }
+  acOf(v) { return this.db.tasks.find((t) => t.video_id === v.id && t.kind === 'acabado' && !t.void && t.done_by === v.owner); }
   log(teamId, projectId, type, data, actor) {
     const n = (data && data.new) || {};
     const when = this.seeding ? (n.done_at || n.arrived_at || n.created_at || new Date().toISOString()) : new Date().toISOString();
@@ -155,6 +166,37 @@ class DemoAPI {
       const t = this.db.teams.find((x) => x.id === a.t); t.settings = Object.assign({}, t.settings || {}); t.settings[a.k] = a.v;
       this.log(a.t, null, 'settings.' + a.k, { new: a.v }); this.persist(); return t.settings;
     }
+    if (fn === 'review_video' || fn === 'review_undo' || fn === 'redeliver' || fn === 'redeliver_undo') {
+      const v = this.db.videos.find((x) => x.id === a.v);
+      const me = v && this.me(v.team_id);
+      if (!v || !me) throw new Error('Sin permiso');
+      const c = this.ctxFor(v.project_id);
+      const st = R.videoState(v, c, new Date());
+      const k = this.acOf(v);
+      const now = new Date().toISOString();
+      const old = k ? JSON.parse(JSON.stringify(k)) : null;
+      if (fn === 'review_video') {
+        if (me.role !== 'admin') throw new Error('Solo el administrador revisa las entregas');
+        if (!k || k.review !== 'pendiente') throw new Error('No hay una entrega por revisar');
+        if (new Date() > st.d.finalDue) throw new Error('Venció el plazo de revisión: la entrega se aprobó sola');
+        let res = 'aprobada';
+        if (!a.ok) { if (!String(a.motivo || '').trim()) throw new Error('Escribe qué debe corregir'); res = !k.review_round && new Date() <= st.d.fixDue ? 'cambios' : 'rechazada'; }
+        Object.assign(k, { review: res, review_at: now, review_by: me.id }, a.ok ? {} : { review_note: String(a.motivo).trim() }, res === 'cambios' ? { review_round: 1 } : {});
+      } else if (fn === 'review_undo') {
+        if (!R.canUndoReview(k, me, c, new Date())) throw new Error('Solo se deshace en los primeros 10 minutos');
+        if (this.db.tasks.find((t) => t.video_id === v.id && t.kind === 'montaje' && !t.void && t.done_by !== v.owner)) throw new Error('Ya empezaste a editar el video');
+        Object.assign(k, { review: 'pendiente', review_at: null, review_by: null }, old.review === 'cambios' ? { review_round: 0, review_note: null } : {});
+      } else if (fn === 'redeliver') {
+        if (v.owner !== me.id) throw new Error('Solo el dueño entrega su video');
+        if (st.post.phase !== 'cambios') throw new Error('No hay cambios pendientes o venció el plazo para corregir');
+        Object.assign(k, { review: 'pendiente', redelivered_at: now });
+      } else {
+        if (!R.canUndoRedeliver(k, me, c, new Date())) throw new Error('Solo se deshace en los primeros 10 minutos');
+        Object.assign(k, { review: 'cambios', redelivered_at: null });
+      }
+      this.log(v.team_id, v.project_id, 'tasks.update', { new: JSON.parse(JSON.stringify(k)), old });
+      this.persist(); return k.review;
+    }
     if (fn === 'move_video') {
       const v = this.db.videos.find((x) => x.id === a.v);
       if (!v || !this.partner(v.team_id)) throw new Error('Sin permiso');
@@ -182,16 +224,39 @@ class DemoAPI {
   async insert(table, row) {
     if (!this.partner(row.team_id)) throw new Error('Sin permiso');
     if (table === 'log') { const r = Object.assign({ id: ++this.logId, at: new Date().toISOString() }, row); this.db.log.push(r); this.persist(); return r; }
-    if (table === 'tasks' && this.db.tasks.find((t) => t.video_id === row.video_id && t.kind === row.kind)) throw new Error('Esa tarea ya está marcada');
+    if (table === 'tasks' && this.db.tasks.find((t) => t.video_id === row.video_id && t.kind === row.kind && !t.void)) throw new Error('Esa tarea ya está marcada');
+    let voidOwn = null;
+    if (table === 'tasks') {
+      row = Object.assign({}, row, { review: null, review_at: null, review_by: null, review_note: null, review_round: 0, redelivered_at: null, void: false });
+      const v = this.db.videos.find((x) => x.id === row.video_id);
+      if (!this.seeding && v && !row.split && (row.kind === 'montaje' || row.kind === 'acabado')) {
+        const me = this.me(row.team_id);
+        const cm = R.canMark(v, row.kind, me, this.ctxFor(v.project_id), new Date());
+        if (!cm.ok) throw new Error(cm.why || 'Todavía no se puede marcar');
+        if (cm.self) row.review = 'pendiente';
+        if (row.kind === 'montaje' && cm.take && v.owner !== me.id) voidOwn = v;
+      }
+    }
     if (table === 'attendance' && this.db.attendance.find((t) => t.event_id === row.event_id && t.member_id === row.member_id)) throw new Error('Ya existe');
     if (table === 'claims') {
       const me = this.me(row.team_id);
       if (!me || row.member_id !== me.id) throw new Error('Solo puedes tomar a tu nombre');
       if (this.db.claims.find((c) => c.video_id === row.video_id && c.kind === row.kind && (c.rodaje_id || null) === (row.rodaje_id || null))) throw new Error('Ya lo tomó alguien');
-      if (this.db.tasks.find((t) => t.video_id === row.video_id && t.kind === row.kind)) throw new Error('Esa tarea ya está hecha');
+      if (row.kind !== 'montaje' && this.db.tasks.find((t) => t.video_id === row.video_id && t.kind === row.kind && !t.void)) throw new Error('Esa tarea ya está hecha');
+      if (row.kind === 'montaje' && !this.seeding) {
+        const v = this.db.videos.find((x) => x.id === row.video_id);
+        if (!R.canMark(v, 'montaje', me, this.ctxFor(v.project_id), new Date()).claim) throw new Error('Solo se puede tomar si no entregó el video completo a las 08:00, hasta las 12:00');
+      }
+    }
+    if (voidOwn) {
+      for (const t of this.db.tasks.filter((x) => x.video_id === voidOwn.id && (x.kind === 'montaje' || x.kind === 'acabado') && x.done_by === voidOwn.owner && !x.void)) {
+        const old = JSON.parse(JSON.stringify(t));
+        Object.assign(t, { void: true, voided_at: new Date().toISOString() });
+        this.log(t.team_id, t.project_id, 'tasks.update', { new: JSON.parse(JSON.stringify(t)), old });
+      }
     }
     const r = Object.assign({ id: uuid(), created_at: new Date().toISOString() }, row);
-    if (table === 'tasks' && !r.done_at) r.done_at = new Date().toISOString();
+    if (table === 'tasks' && (!r.done_at || !this.seeding)) r.done_at = new Date().toISOString();
     this.db[table].push(r);
     this.log(r.team_id, this.projectOf(table, r), table + '.insert', { new: r, old: null });
     // 1.3 (igual que la base): grabar sin storyboard lo reparte mitad y mitad y lo cierra.
@@ -228,8 +293,9 @@ class DemoAPI {
     if (i < 0) return;
     const r = this.db[table][i];
     const me = this.me(r.team_id);
-    const ownClaim = table === 'claims' && me && r.member_id === me.id && !this.db.tasks.find((t) => t.video_id === r.video_id && t.kind === r.kind);
-    if (!me || (me.role !== 'admin' && !ownClaim) || table === 'log') throw new Error('Sin permiso');
+    const ownClaim = table === 'claims' && me && r.member_id === me.id && R.within(r.created_at) && !this.db.tasks.find((t) => t.video_id === r.video_id && t.kind === r.kind && !t.void && t.done_by === me.id);
+    const ownTask = table === 'tasks' && me && (() => { const v = this.db.videos.find((x) => x.id === r.video_id); return v && R.canUndo(r, me, this.ctxFor(v.project_id), new Date()); })();
+    if (!me || (me.role !== 'admin' && !ownClaim && !ownTask) || table === 'log') throw new Error(table === 'tasks' || table === 'claims' ? 'Solo se deshace en los primeros 10 minutos' : 'Sin permiso');
     this.db[table].splice(i, 1);
     this.log(r.team_id, this.projectOf(table, r), table + '.delete', { new: null, old: r });
     if (table === 'tasks' && r.kind === 'rodaje') {

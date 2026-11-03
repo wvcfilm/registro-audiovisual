@@ -84,9 +84,9 @@ test('apoyo en el acabado se le paga al dueño; montaje no entregado pasa al que
   assert.equal(s4.apoyo, false);
 });
 
-test('racha: W 40 (24 entregas + 8 llegadas + 8 puntos de reunión); S suma 14 neto y nunca baja de cero', () => {
+test('racha: W 43 (24 entregas + 8 llegadas + 8 puntos de reunión + 3 por rescatar el video que pasó a él); S suma 14 neto y nunca baja de cero', () => {
   const { ctx } = scenario();
-  assert.equal(streak('W', ctx, NOW).pts, 40);
+  assert.equal(streak('W', ctx, NOW).pts, 43);
   assert.equal(streak('W', ctx, NOW).level.name, 'Imparable');
   const net = streakEvents('S', ctx, NOW).reduce((a, e) => a + e.pts, 0);
   assert.equal(net, 14);

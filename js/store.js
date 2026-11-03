@@ -72,6 +72,7 @@ export function ctx(projectId = S.projectId) {
   const evIds = new Set(events.map((e) => e.id));
   return {
     members: d.members,
+    projects: d.projects,
     videos,
     tasks: d.tasks.filter((t) => vids.has(t.video_id)),
     events,
@@ -152,18 +153,18 @@ export function reparto(rodaje, videos) {
     const p = project();
     let num = S.data.videos.filter((v) => v.project_id === p.id).reduce((m, v) => Math.max(m, v.num), 0);
     const ids = [];
-    for (const v of videos) { num++; ids.push((await api.insert('videos', Object.assign({ team_id: S.teamId, project_id: p.id, num, publish_date: v.publish_date, owner: v.owner }, v.title ? { title: v.title } : {}))).id); }
+    for (const v of videos) { num++; ids.push((await api.insert('videos', Object.assign({ team_id: S.teamId, project_id: p.id, num, publish_date: v.publish_date, owner: v.owner }, v.title ? { title: v.title } : {}, v.apoyo_due ? { apoyo_due: v.apoyo_due } : {}))).id); }
     const all = rodaje.video_ids.concat(ids);
     await api.update('events', rodaje.id, { video_ids: all });
     for (const m of S.data.events.filter((e) => e.kind === 'reunion' && e.rodaje_id === rodaje.id && (!e.status || e.status === 'activo'))) await api.update('events', m.id, { video_ids: all });
   }, 'Reparto guardado');
 }
 export function endMeeting(e) {
-  if (S.me.role === 'admin' || adminAbsent(e, ctx(e.project_id))) return run(() => api.update('events', e.id, { ended_at: new Date().toISOString() }), 'Reunión finalizada');
+  if (S.me.role === 'admin' || adminAbsent(e, ctx(e.project_id))) return run(() => api.update('events', e.id, { ended_at: new Date().toISOString(), ended_set_at: new Date().toISOString(), ended_by: S.me.id }), 'Reunión finalizada');
   return run(() => api.update('events', e.id, { end_requested_at: new Date().toISOString(), end_requested_by: S.me.id }), 'Solicitud enviada al administrador');
 }
-export const confirmEnd = (e) => run(() => api.update('events', e.id, { ended_at: e.end_requested_at || new Date().toISOString() }), 'Reunión finalizada');
-export const cancelEvent = (e, note) => run(() => api.update('events', e.id, { status: 'cancelado', cancel_note: note || null }), 'Cancelado');
+export const confirmEnd = (e) => run(() => api.update('events', e.id, { ended_at: e.end_requested_at || new Date().toISOString(), ended_set_at: new Date().toISOString(), ended_by: S.me.id }), 'Reunión finalizada');
+export const cancelEvent = (e, note) => run(() => api.update('events', e.id, { status: 'cancelado', cancel_note: note || null, canceled_at: new Date().toISOString() }), 'Cancelado');
 export const deleteEvent = (e) => run(() => api.remove('events', e.id), 'Borrado');
 export const moveEvent = (e, date, time) => run(() => api.update('events', e.id, { starts_at: at(date, time).toISOString() }), 'Fecha cambiada');
 // Reprogramar el rodaje completo: nuevo rodaje con los mismos videos; el anterior queda como "reprogramado".
@@ -221,7 +222,7 @@ export function checkIn(event) {
   }, S.me.role === 'admin' ? 'Llegada registrada' : 'Llegada enviada: el administrador la confirma');
 }
 export function confirmArrival(att, mode) {
-  return run(() => api.update('attendance', att.id, { arrived_at: mode === 'claimed' ? att.claimed_at : new Date().toISOString(), confirmed_by: S.me.id }), 'Llegada confirmada');
+  return run(() => api.update('attendance', att.id, { arrived_at: mode === 'claimed' ? att.claimed_at : new Date().toISOString(), confirmed_by: S.me.id, confirmed_at: new Date().toISOString() }), 'Llegada confirmada');
 }
 
 export function sendNotice(event, n) {
@@ -360,3 +361,22 @@ export function repartoReunion(meeting, rows) {
   if (!rod) return Promise.reject(new Error('La reunión no tiene rodaje'));
   return reparto(rod, rows);
 }
+
+// ==================================================================
+// 1.4 · Entregas al límite y deshacer en 10 minutos
+// ==================================================================
+export const reviewDelivery = (video, ok, motivo) => run(() => api.rpc('review_video', { v: video.id, ok: !!ok, motivo: motivo || null }), null);
+export const reviewUndo = (video) => run(() => api.rpc('review_undo', { v: video.id }), 'Decisión deshecha');
+export const redeliver = (video) => run(() => api.rpc('redeliver', { v: video.id }), null);
+export const redeliverUndo = (video) => run(() => api.rpc('redeliver_undo', { v: video.id }), 'Entrega deshecha');
+// Deshacer la llegada propia o la confirmación de la llegada del socio.
+export function undoArrival(att) {
+  if (att.member_id === S.me.id) return run(() => api.update('attendance', att.id, { claimed_at: null, arrived_at: null, confirmed_by: null, confirmed_at: null }), 'Llegada deshecha');
+  return run(() => api.update('attendance', att.id, { arrived_at: null, confirmed_by: null, confirmed_at: null }), 'Confirmación deshecha');
+}
+export const undoEnd = (e) => run(() => api.update('events', e.id, { ended_at: null, ended_set_at: null, ended_by: null }), 'La reunión sigue abierta');
+export const undoCancel = (e) => run(() => api.update('events', e.id, { status: 'activo', cancel_note: null, canceled_at: null }), 'Cancelación deshecha');
+export const undoDecision = (att) => run(() => api.update('attendance', att.id, { notice: Object.assign({}, att.notice, { decision: null, decided_at: null, decided_by: null }) }), 'Respuesta deshecha');
+// Choque de fechas: adelantar el montaje (con apoyo) o mover la publicación.
+export const setApoyoDue = (video, iso) => run(() => api.update('videos', video.id, { apoyo_due: iso }), 'Montaje adelantado');
+export const setPublish = (video, date) => run(() => api.update('videos', video.id, { publish_date: date }), 'Fecha de publicación cambiada');

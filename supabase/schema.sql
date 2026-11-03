@@ -997,3 +997,459 @@ begin
 end $$;
 
 grant execute on function confirm_due, take_limit, has_claim, move_video to authenticated;
+
+-- =====================================================================
+-- Versión 1.4: entregas al límite (apoyo, entrega por su cuenta, revisión y rescate)
+-- y deshacer en 10 minutos (nunca después del plazo de esa acción)
+-- =====================================================================
+alter table tasks add column if not exists review text;              -- entrega por su cuenta: pendiente | aprobada | cambios | rechazada
+alter table tasks add column if not exists review_at timestamptz;
+alter table tasks add column if not exists review_by uuid references members(id);
+alter table tasks add column if not exists review_note text;
+alter table tasks add column if not exists review_round int not null default 0;
+alter table tasks add column if not exists redelivered_at timestamptz;
+alter table tasks add column if not exists void boolean not null default false;   -- lo que marcó el dueño de un video que pasó al administrador
+alter table tasks add column if not exists voided_at timestamptz;
+alter table videos add column if not exists apoyo_due timestamptz;     -- montaje adelantado por un choque de fechas
+alter table attendance add column if not exists confirmed_at timestamptz;
+alter table events add column if not exists ended_set_at timestamptz;
+alter table events add column if not exists ended_by uuid references members(id);
+alter table events add column if not exists canceled_at timestamptz;
+do $$ begin
+  alter table tasks add constraint tasks_review_chk check (review is null or review in ('pendiente', 'aprobada', 'cambios', 'rechazada'));
+exception when duplicate_object then null; end $$;
+-- Una sola tarea vigente por video y tipo (las anuladas quedan como registro).
+alter table tasks drop constraint if exists tasks_video_id_kind_key;
+create unique index if not exists tasks_one on tasks (video_id, kind) where not void;
+
+-- Plazos de la posproducción de un video (zona de Lima). Los días de apoyo pueden ser propios del cliente.
+create or replace function post_dues(v uuid) returns table (apoyo timestamptz, self timestamptz, auto timestamptz, fix timestamptz, fin timestamptz)
+language sql stable security definer set search_path = public as $$
+  select coalesce(vv.apoyo_due, lima_at(vv.publish_date - x.mon, '00:00') + make_interval(mins => rule_int(vv.team_id, 'monh', 1260))),
+         lima_at(x.eve, '00:00') + make_interval(mins => rule_int(vv.team_id, 'self', 480)),
+         lima_at(x.eve, '00:00') + make_interval(mins => rule_int(vv.team_id, 'auto', 720)),
+         lima_at(x.eve, '00:00') + make_interval(mins => rule_int(vv.team_id, 'fix', 1020)),
+         lima_at(x.eve, '23:59')
+  from videos vv
+  join projects p on p.id = vv.project_id
+  join teams tm on tm.id = vv.team_id
+  cross join lateral (select greatest(2, coalesce(nullif(tm.settings->'rules'->'cli'->>p.client, '')::int, rule_int(vv.team_id, 'mon', 2))) as mon,
+                             vv.publish_date - rule_int(vv.team_id, 'fin', 1) as eve) x
+  where vv.id = v
+$$;
+
+-- En qué momento está la posproducción de un video (igual que postState en js/rules.js).
+create or replace function post_phase(v uuid) returns text
+language plpgsql stable security definer set search_path = public as $$
+declare vv videos; ow members; d record; mo tasks; ac tasks; rv text;
+begin
+  select * into vv from videos where id = v;
+  select * into ow from members where id = vv.owner;
+  if not coalesce(ow.apoyo, false) then return 'normal'; end if;
+  select * into d from post_dues(v);
+  select * into mo from tasks where video_id = v and kind = 'montaje' and not void;
+  select * into ac from tasks where video_id = v and kind = 'acabado' and not void;
+  if mo.id is not null and mo.done_by = vv.owner and mo.done_at <= d.apoyo and not (ac.id is not null and ac.done_by = vv.owner and ac.review is not null) then return 'apoyo'; end if;
+  if ac.id is not null and ac.done_by = vv.owner then
+    rv := case when ac.review = 'pendiente' and now() > d.fin then 'aprobada' else ac.review end;
+  end if;
+  if mo.id is not null and mo.done_by <> vv.owner and coalesce((select role from members where id = mo.done_by), '') <> 'colaborador' then return 'pasado'; end if;
+  if exists (select 1 from claims where video_id = v and kind = 'montaje' and status = 'activa') then return 'pasado'; end if;
+  if rv = 'rechazada' then return 'pasado'; end if;
+  if rv = 'cambios' and now() > d.fix then return 'pasado'; end if;
+  if rv is null and now() > d.auto then return 'pasado'; end if;
+  if rv = 'aprobada' then return 'aprobado'; end if;
+  if rv = 'pendiente' then return 'revision'; end if;
+  if rv = 'cambios' then return 'cambios'; end if;
+  if now() <= d.apoyo then return 'abierto'; end if;
+  if now() <= d.self then return 'solo'; end if;
+  return 'riesgo';
+end $$;
+
+-- Tomar el video: hasta el plazo del video final.
+create or replace function take_limit(v uuid, k text) returns timestamptz
+language sql stable security definer set search_path = public as $$
+  select case when k in ('guion', 'storyboard')
+    then (select r.starts_at - make_interval(hours => rule_int(r.team_id, 'take', 5)) from events r where r.kind = 'rodaje' and r.status = 'activo' and v = any(r.video_ids) order by r.starts_at limit 1)
+    else (select fin from post_dues(v))
+  end
+$$;
+
+-- ---------- Tareas (1.4): entregas al límite ----------
+create or replace function guard_task() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  me uuid := my_member(new.team_id); mrole text; v videos; vowner members; r events; h hires;
+  due timestamptz; att attendance; oatt attendance; md timestamptz; ph text; pd record;
+begin
+  -- El storyboard repartido lo crea la base al grabar (no se marca desde la app).
+  if new.split then
+    if pg_trigger_depth() < 2 then raise exception 'El storyboard repartido lo registra la app al grabar'; end if;
+    new.done_at := now();
+    return new;
+  end if;
+  if new.done_by is distinct from me then raise exception 'Solo puedes marcar tus propias tareas'; end if;
+  -- Estos campos los pone solo la base.
+  new.void := false; new.voided_at := null; new.review := null; new.review_at := null; new.review_by := null;
+  new.review_note := null; new.review_round := 0; new.redelivered_at := null;
+  select role into mrole from members where id = me;
+  select * into v from videos where id = new.video_id;
+  select * into vowner from members where id = v.owner;
+  if new.hire_id is not null then
+    select * into h from hires where id = new.hire_id;
+    if h.status <> 'aceptada' or h.present <> new.done_by then raise exception 'Contratación de Guillermo no válida'; end if;
+    if new.kind not in ('guion', 'storyboard') then raise exception 'Guillermo solo hace guiones y storyboards'; end if;
+  end if;
+  if new.kind in ('guion', 'storyboard') then
+    due := pre_due(v.id);
+    if me = v.owner and new.hire_id is null and due is not null and now() > due then
+      raise exception 'Venció el plazo: esta tarea pasó a tu compañero';
+    end if;
+    if me <> v.owner and new.hire_id is null then
+      if due is null or now() <= due then raise exception 'La preproducción de tu compañero solo se puede tomar después de su plazo'; end if;
+      if not has_claim(v.id, new.kind, me) then raise exception 'Primero tómala (o pasó el límite para entregarla)'; end if;
+    end if;
+  elsif new.kind = 'rodaje' then
+    r := video_rodaje(v.id);
+    if r.id is null then raise exception 'Este video no tiene rodaje agendado'; end if;
+    if now() < r.starts_at - make_interval(mins => rule_int(new.team_id, 'open', 15)) or lima_day(now()) <> lima_day(r.starts_at) then
+      raise exception 'El rodaje solo se marca el día del rodaje, desde que se abre la llegada';
+    end if;
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'guion') then
+      raise exception 'Sin guion no se graba: reprograma el video';
+    end if;
+    select * into att from attendance where event_id = r.id and member_id = me;
+    if att.arrived_at is null then raise exception 'Primero tu llegada al rodaje tiene que estar confirmada'; end if;
+    if me <> v.owner then
+      select * into oatt from attendance where event_id = r.id and member_id = v.owner;
+      if oatt.arrived_at is not null then raise exception 'El dueño del video está en el rodaje: lo marca él'; end if;
+      if (oatt.notice->>'sent_at') is not null
+         and (oatt.notice->>'sent_at')::timestamptz <= confirm_due(r.id)
+         and coalesce(oatt.notice->>'choice', '') <> 'other' then
+        raise exception 'Avisó a tiempo: sus videos se reprograman, salvo que acepte que los grabes';
+      end if;
+    end if;
+  elsif new.kind = 'montaje' then
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'rodaje' and not void) then raise exception 'Primero tiene que grabarse el video'; end if;
+    if vowner.apoyo then
+      ph := post_phase(v.id);
+      if me = v.owner then
+        if ph = 'pasado' then raise exception 'El video pasó al administrador: ya no puedes entregarlo'; end if;
+      elsif mrole <> 'admin' then
+        raise exception 'Este montaje le corresponde al dueño del video';
+      elsif ph <> 'pasado' then
+        raise exception 'Todavía es de tu socio: si no entrega, podrás tomarlo desde las 08:00';
+      else
+        select * into pd from post_dues(v.id);
+        if now() > pd.fin then raise exception 'Pasó el plazo del video final'; end if;
+        if exists (select 1 from claims where video_id = v.id and kind = 'montaje' and status = 'activa' and member_id <> me) then raise exception 'Ya lo tomó otra persona'; end if;
+        -- Lo que marcó el dueño deja de contar (queda en el historial).
+        update tasks set void = true, voided_at = now() where video_id = v.id and kind in ('montaje', 'acabado') and done_by = v.owner and not void;
+      end if;
+    elsif me <> v.owner then
+      raise exception 'Este montaje le corresponde al dueño del video';
+    end if;
+  elsif new.kind = 'acabado' then
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje' and not void) then raise exception 'Primero tiene que estar el montaje'; end if;
+    if vowner.apoyo then
+      ph := post_phase(v.id);
+      if me = v.owner then
+        if ph = 'pasado' then raise exception 'El video pasó al administrador: ya no puedes entregarlo'; end if;
+        if ph = 'apoyo' then raise exception 'Tu video final lo hace el administrador como apoyo'; end if;
+        if ph in ('revision', 'cambios', 'aprobado') then raise exception 'Ya entregaste este video'; end if;
+        new.review := 'pendiente'; -- entrega por su cuenta: el administrador la revisa
+      elsif mrole = 'admin' then
+        if ph = 'pasado' then
+          if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje' and not void and done_by = me) then raise exception 'Primero haz el montaje'; end if;
+        elsif ph <> 'apoyo' then
+          raise exception 'Tu socio entrega este video por su cuenta: revísalo cuando lo entregue';
+        end if;
+      else
+        raise exception 'El video final lo hace el dueño o el administrador';
+      end if;
+    elsif me <> v.owner and mrole <> 'admin' then
+      raise exception 'El video final lo hace el dueño o el administrador';
+    end if;
+  end if;
+  new.split := false; new.split_with := null;
+  new.done_at := now();
+  return new;
+end $$;
+
+
+-- ---------- Tomar (1.4): el video en riesgo se toma desde las 08:00 hasta que pasa solo a las 12:00 ----------
+create or replace function guard_claim() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare me uuid := my_member(new.team_id); mrole text; v videos; vowner members; r events;
+begin
+  select role into mrole from members where id = me;
+  select * into v from videos where id = new.video_id;
+  select * into vowner from members where id = v.owner;
+  if mrole not in ('admin', 'socio') then raise exception 'Solo los socios toman tareas'; end if;
+  if me = v.owner then raise exception 'Es tu propia tarea'; end if;
+  if new.kind in ('guion', 'storyboard') then
+    if exists (select 1 from tasks where video_id = v.id and kind = new.kind and not void) then raise exception 'Esa tarea ya está hecha'; end if;
+    r := video_rodaje(v.id);
+    if r.id is null then raise exception 'Este video no tiene rodaje agendado'; end if;
+    if now() <= pre_due(v.id) then raise exception 'Todavía está en el plazo de tu compañero'; end if;
+    new.rodaje_id := r.id;
+  else
+    if mrole <> 'admin' or not coalesce(vowner.apoyo, false) then raise exception 'Este video le corresponde a su dueño'; end if;
+    if post_phase(v.id) <> 'riesgo' then raise exception 'Solo se puede tomar si no entregó el video completo a las 08:00, hasta las 12:00'; end if;
+    new.rodaje_id := null;
+  end if;
+  new.limit_at := take_limit(v.id, new.kind);
+  if now() > new.limit_at then raise exception 'Pasó el límite para tomarlo'; end if;
+  new.member_id := me; new.project_id := v.project_id; new.status := 'activa'; new.created_at := now();
+  return new;
+end $$;
+drop trigger if exists claims_guard on claims;
+create trigger claims_guard before insert on claims for each row execute function guard_claim();
+-- Deshacer un "Tomar": 10 minutos y si todavía no entregó nada.
+drop policy if exists claims_delete on claims;
+create policy claims_delete on claims for delete using (member_id = my_member(team_id)
+  and now() <= created_at + make_interval(mins => rule_int(team_id, 'undo', 10))
+  and not exists (select 1 from tasks t where t.video_id = claims.video_id and t.kind = claims.kind and not t.void and t.done_by = claims.member_id));
+
+-- ---------- Deshacer (1.4): 10 minutos y nunca después del plazo de esa acción ----------
+create or replace function undo_limit(t uuid) returns timestamptz
+language plpgsql stable security definer set search_path = public as $$
+declare k tasks; vv videos; ow members; d record;
+begin
+  select * into k from tasks where id = t;
+  select * into vv from videos where id = k.video_id;
+  select * into ow from members where id = vv.owner;
+  if k.kind = 'rodaje' then return lima_at(lima_day(k.done_at) + 1, '00:00'); end if;
+  if k.kind not in ('montaje', 'acabado') then return null; end if;
+  select * into d from post_dues(vv.id);
+  if coalesce(ow.apoyo, false) and k.done_by = vv.owner then
+    if k.kind = 'montaje' then return case when k.done_at <= d.apoyo then d.apoyo else d.auto end; end if;
+    return case when k.review_round > 0 then d.fix else d.auto end;
+  end if;
+  return d.fin;
+end $$;
+create or replace function can_undo(t uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from tasks k where k.id = t and k.done_by = my_member(k.team_id) and not k.split and not k.void and (
+    (k.kind in ('guion', 'storyboard') and (pre_due(k.video_id) is null or now() <= pre_due(k.video_id)))
+    or (k.kind not in ('guion', 'storyboard')
+        and now() <= least(k.done_at + make_interval(mins => rule_int(k.team_id, 'undo', 10)), undo_limit(k.id))
+        and not (k.kind = 'acabado' and (coalesce(k.review, 'pendiente') <> 'pendiente' or k.redelivered_at is not null))
+        and not (k.kind = 'montaje' and exists (select 1 from tasks a where a.video_id = k.video_id and a.kind = 'acabado' and not a.void)))))
+$$;
+drop policy if exists tasks_delete on tasks;
+create policy tasks_delete on tasks for delete using (is_admin(team_id) or can_undo(id));
+
+-- ---------- Revisar la entrega por su cuenta (solo el administrador) ----------
+-- ok = aprobar. Si no: la primera vez y antes de las 17:00 pide cambios; si no, la rechaza (el video pasa al administrador).
+drop function if exists review_video(uuid, boolean, text);
+create or replace function review_video(v uuid, ok boolean, motivo text default null) returns text
+language plpgsql security definer set search_path = public as $$
+declare vv videos; k tasks; d record; me uuid; res text;
+begin
+  select * into vv from videos where id = v;
+  if vv.id is null or not is_admin(vv.team_id) then raise exception 'Solo el administrador revisa las entregas'; end if;
+  me := my_member(vv.team_id);
+  select * into k from tasks where video_id = v and kind = 'acabado' and not void and done_by = vv.owner;
+  if k.id is null or k.review is distinct from 'pendiente' then raise exception 'No hay una entrega por revisar'; end if;
+  select * into d from post_dues(v);
+  if now() > d.fin then raise exception 'Venció el plazo de revisión: la entrega se aprobó sola'; end if;
+  if ok then res := 'aprobada';
+  elsif coalesce(trim(motivo), '') = '' then raise exception 'Escribe qué debe corregir';
+  elsif k.review_round = 0 and now() <= d.fix then res := 'cambios';
+  else res := 'rechazada';
+  end if;
+  update tasks set review = res, review_at = now(), review_by = me, review_note = case when ok then review_note else trim(motivo) end,
+    review_round = case when res = 'cambios' then 1 else review_round end where id = k.id;
+  return res;
+end $$;
+create or replace function review_undo(v uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare vv videos; k tasks; d record;
+begin
+  select * into vv from videos where id = v;
+  if vv.id is null or not is_admin(vv.team_id) then raise exception 'Sin permiso'; end if;
+  select * into k from tasks where video_id = v and kind = 'acabado' and not void and done_by = vv.owner;
+  select * into d from post_dues(v);
+  if k.id is null or k.review not in ('aprobada', 'cambios', 'rechazada') or k.review_by is distinct from my_member(vv.team_id) then raise exception 'No hay una decisión tuya para deshacer'; end if;
+  if now() > k.review_at + make_interval(mins => rule_int(vv.team_id, 'undo', 10)) or now() > d.fin then raise exception 'Solo se deshace en los primeros 10 minutos'; end if;
+  if k.redelivered_at is not null and k.redelivered_at > k.review_at then raise exception 'Tu socio ya entregó la corrección'; end if;
+  if exists (select 1 from tasks where video_id = v and kind = 'montaje' and not void and done_by <> vv.owner) then raise exception 'Ya empezaste a editar el video'; end if;
+  update tasks set review = 'pendiente', review_at = null, review_by = null,
+    review_round = case when k.review = 'cambios' then 0 else review_round end,
+    review_note = case when k.review = 'cambios' then null else review_note end where id = k.id;
+end $$;
+-- El dueño entrega la corrección (hasta las 17:00) y la puede deshacer 10 minutos.
+create or replace function redeliver(v uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare vv videos; k tasks; d record;
+begin
+  select * into vv from videos where id = v;
+  if vv.id is null or vv.owner is distinct from my_member(vv.team_id) then raise exception 'Solo el dueño entrega su video'; end if;
+  if post_phase(v) <> 'cambios' then raise exception 'No hay cambios pendientes o venció el plazo para corregir'; end if;
+  select * into k from tasks where video_id = v and kind = 'acabado' and not void and done_by = vv.owner;
+  update tasks set review = 'pendiente', redelivered_at = now() where id = k.id;
+end $$;
+create or replace function redeliver_undo(v uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare vv videos; k tasks; d record;
+begin
+  select * into vv from videos where id = v;
+  if vv.id is null or vv.owner is distinct from my_member(vv.team_id) then raise exception 'Sin permiso'; end if;
+  select * into k from tasks where video_id = v and kind = 'acabado' and not void and done_by = vv.owner;
+  select * into d from post_dues(v);
+  if k.id is null or k.review <> 'pendiente' or k.redelivered_at is null then raise exception 'No hay una corrección para deshacer'; end if;
+  if now() > k.redelivered_at + make_interval(mins => rule_int(vv.team_id, 'undo', 10)) or now() > d.fix then raise exception 'Solo se deshace en los primeros 10 minutos'; end if;
+  update tasks set review = 'cambios', redelivered_at = null where id = k.id;
+end $$;
+grant execute on function post_dues, post_phase, undo_limit, review_video, review_undo, redeliver, redeliver_undo to authenticated;
+
+-- ---------- Asistencia (1.4): deshacer la llegada, su confirmación y la respuesta a un aviso en 10 minutos ----------
+create or replace function guard_attendance() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare me uuid := my_member(new.team_id); mrole text; ev events; undo interval := make_interval(mins => rule_int(new.team_id, 'undo', 10));
+begin
+  select role into mrole from members where id = me;
+  select * into ev from events where id = new.event_id;
+  if new.rsvp is distinct from (case when tg_op = 'INSERT' then null else old.rsvp end) then
+    if new.member_id <> me then raise exception 'Solo puedes confirmar tu propia asistencia'; end if;
+    if now() > confirm_due(ev.id) then raise exception 'Venció el plazo para confirmar'; end if;
+    new.rsvp_at := now();
+  end if;
+  -- Deshacer "Llegué" (propio, 10 min) o la confirmación del administrador (10 min).
+  if tg_op = 'UPDATE' and old.arrived_at is not null and new.arrived_at is null then
+    if new.member_id <> me and not (mrole = 'admin' and old.confirmed_by = me and now() <= coalesce(old.confirmed_at, old.arrived_at) + undo) then
+      raise exception 'Solo se deshace en los primeros 10 minutos';
+    end if;
+    if new.member_id = me and now() > coalesce(old.claimed_at, old.arrived_at) + undo then raise exception 'Solo se deshace en los primeros 10 minutos'; end if;
+    new.confirmed_by := null; new.confirmed_at := null;
+  end if;
+  if tg_op = 'UPDATE' and old.claimed_at is not null and new.claimed_at is null then
+    if new.member_id <> me or now() > old.claimed_at + undo then raise exception 'Solo se deshace en los primeros 10 minutos'; end if;
+    if new.arrived_at is not null and new.member_id <> me then raise exception 'Primero deshaz la confirmación'; end if;
+    new.arrived_at := null;
+  end if;
+  if tg_op = 'UPDATE' and (old.notice->>'decision') is not null and (new.notice is not null and (new.notice->>'decision') is null) then
+    if new.member_id = me or now() > (old.notice->>'decided_at')::timestamptz + undo then raise exception 'La respuesta solo se deshace en los primeros 10 minutos'; end if;
+  end if;
+  if new.claimed_at is not null and (tg_op = 'INSERT' or old.claimed_at is distinct from new.claimed_at) then
+    if new.member_id <> me then raise exception 'Solo puedes registrar tu propia llegada'; end if;
+    if now() < ev.starts_at - make_interval(mins => rule_int(new.team_id, 'open', 15)) then raise exception 'El registro se abre 15 minutos antes'; end if;
+    new.claimed_at := now();
+    if mrole = 'admin' or admin_absent(new.event_id) then new.arrived_at := new.claimed_at; end if;
+  end if;
+  if new.arrived_at is not null and (tg_op = 'INSERT' or new.arrived_at is distinct from old.arrived_at) then
+    if mrole = 'admin' and new.member_id <> me then
+      if new.claimed_at is null or new.arrived_at is distinct from new.claimed_at then new.arrived_at := now(); end if;
+      new.confirmed_by := me; new.confirmed_at := now();
+    elsif new.member_id = me and (mrole = 'admin' or admin_absent(new.event_id)) then
+      new.arrived_at := coalesce(new.claimed_at, now());
+    else
+      raise exception 'Tu llegada la confirma el administrador';
+    end if;
+  end if;
+  if new.notice ? 'sent_at' and (new.notice->>'sent_at') is not null
+     and (tg_op = 'INSERT' or (old.notice->>'sent_at') is distinct from (new.notice->>'sent_at')) then
+    if new.member_id <> me then raise exception 'Solo puedes enviar tu propio aviso'; end if;
+    new.notice := jsonb_set(new.notice, '{sent_at}', to_jsonb(now()));
+  end if;
+  -- Retirar el "no iré" (cambiar a "voy") solo dentro del plazo.
+  if tg_op = 'UPDATE' and (old.notice->>'sent_at') is not null and (new.notice is null or (new.notice->>'sent_at') is null) then
+    if new.member_id <> me then raise exception 'Solo puedes cambiar tu propio aviso'; end if;
+    if now() > confirm_due(ev.id) then raise exception 'Venció el plazo para cambiar tu respuesta'; end if;
+  end if;
+  if tg_op = 'UPDATE' and (new.notice->>'decision') is not null and (old.notice->>'decision') is distinct from (new.notice->>'decision') then
+    if new.member_id = me then raise exception 'El aviso lo responde tu compañero'; end if;
+    new.notice := jsonb_set(new.notice, '{decided_at}', to_jsonb(now()));
+  end if;
+  return new;
+end $$;
+
+
+-- ---------- Reuniones y rodajes (1.4): deshacer "Finalizar" y "Cancelar" en 10 minutos ----------
+create or replace function guard_event() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare me uuid := my_member(new.team_id); mrole text; rstart timestamptz; undo interval := make_interval(mins => rule_int(new.team_id, 'undo', 10));
+begin
+  select role into mrole from members where id = me;
+  if tg_op = 'INSERT' then
+    new.status := 'activo'; new.ended_at := null; new.end_requested_at := null; new.ended_set_at := null; new.ended_by := null; new.canceled_at := null;
+    if new.kind = 'reunion' then
+      if new.rodaje_id is null then raise exception 'Primero agenda el rodaje'; end if;
+      select starts_at into rstart from events where id = new.rodaje_id and kind = 'rodaje' and status = 'activo';
+      if rstart is null then raise exception 'El rodaje no existe o fue cancelado'; end if;
+      if exists (select 1 from events where rodaje_id = new.rodaje_id and kind = 'reunion' and status = 'activo' and ended_at is null) then
+        raise exception 'Ese rodaje ya tiene una reunión sin finalizar';
+      end if;
+      if new.starts_at >= lima_at(lima_day(rstart) - 1, '00:00') + make_interval(mins => rule_int(new.team_id, 'pre', 1080)) then
+        raise exception 'La reunión tiene que ser antes del plazo de preproducción';
+      end if;
+    end if;
+    return new;
+  end if;
+  if new.end_requested_at is distinct from old.end_requested_at and new.end_requested_at is not null then
+    new.end_requested_at := now(); new.end_requested_by := me;
+  end if;
+  if new.ended_at is distinct from old.ended_at and new.ended_at is not null and old.ended_at is null then
+    if mrole <> 'admin' and not admin_absent(new.id) then raise exception 'La reunión la finaliza el administrador'; end if;
+    new.ended_at := coalesce(old.end_requested_at, new.end_requested_at, now());
+    new.ended_set_at := now(); new.ended_by := me;
+  end if;
+  if old.ended_at is not null and new.ended_at is null then
+    if old.ended_by is distinct from me or now() > coalesce(old.ended_set_at, old.ended_at) + undo then raise exception 'Solo se deshace en los primeros 10 minutos'; end if;
+    new.ended_set_at := null; new.ended_by := null;
+  end if;
+  if new.status is distinct from old.status then
+    if old.status = 'cancelado' and new.status = 'activo' then
+      if mrole <> 'admin' or old.canceled_at is null or now() > old.canceled_at + undo then raise exception 'Solo se deshace en los primeros 10 minutos'; end if;
+      new.canceled_at := null; new.cancel_note := null;
+    else
+      if new.status = 'cancelado' and mrole <> 'admin' then raise exception 'Solo el administrador cancela'; end if;
+      if old.status <> 'activo' then raise exception 'Ya no está activo'; end if;
+      if new.status = 'cancelado' then new.canceled_at := now(); end if;
+    end if;
+  end if;
+  if new.starts_at is distinct from old.starts_at then
+    if exists (select 1 from attendance where event_id = new.id and (arrived_at is not null or claimed_at is not null)) then
+      raise exception 'Ya hay llegadas registradas: reprograma en vez de cambiar la hora';
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists events_guard on events;
+create trigger events_guard before insert or update on events for each row execute function guard_event();
+
+-- ---------- Fecha de publicación y montaje adelantado ----------
+-- Antes del rodaje los cambian los socios (al programar o repartir); después, solo el administrador.
+create or replace function guard_video() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if (new.publish_date is distinct from old.publish_date or new.apoyo_due is distinct from old.apoyo_due)
+     and not is_admin(new.team_id)
+     and exists (select 1 from tasks where video_id = new.id and kind = 'rodaje' and not void) then
+    raise exception 'Después del rodaje, la fecha de publicación la cambia el administrador';
+  end if;
+  return new;
+end $$;
+drop trigger if exists videos_guard on videos;
+create trigger videos_guard before update on videos for each row execute function guard_video();
+
+-- ---------- Propuestas (1.4): validar "Entregas al límite" ----------
+create or replace function check_rules(r jsonb) returns void
+language plpgsql immutable as $$
+begin
+  if r ? 'mon' and (r->>'mon')::int < 2 then raise exception 'El apoyo tiene que ser de al menos 2 días'; end if;
+  if coalesce((r->>'self')::int, 480) >= coalesce((r->>'auto')::int, 720) or coalesce((r->>'auto')::int, 720) >= coalesce((r->>'fix')::int, 1020) or coalesce((r->>'fix')::int, 1020) >= 1439 then
+    raise exception 'Las horas tienen que ir en orden: entrega por su cuenta, pasa al administrador, corregir';
+  end if;
+end $$;
+create or replace function guard_proposal_rules() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'INSERT' and new.kind = 'rules' then
+    perform check_rules(coalesce((select settings->'rules' from teams where id = new.team_id), '{}') || new.data);
+  end if;
+  return new;
+end $$;
+drop trigger if exists proposals_rules_guard on proposals;
+create trigger proposals_rules_guard before insert on proposals for each row execute function guard_proposal_rules();
