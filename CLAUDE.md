@@ -2,7 +2,18 @@
 
 Léeme completo antes de cambiar algo. Aquí está qué es la app, cómo está hecha, todas las reglas y decisiones tomadas con el dueño (Williams, administrador), qué bocetos se eligieron y qué falta.
 
-Versión actual: **1.3.1** (2 nov 2026). Detalle de la 1.3 en los docs del proyecto de Claude: `claude/observaciones-1.3.md` (diseño y reglas) y `claude/version-1.3.md` (código).
+Versión actual: **1.5** (3 nov 2026, rama `v1.5`, publicada en `main`; incluye la 1.4). Detalle en los docs del proyecto de Claude: `claude/reglas-1.5.md` (**reglas y decisiones de la 1.5**: líder, socio con o sin apoyo, horario pareja, invitación en un paso), `claude/observaciones-1.3.md`, `claude/version-1.3.md`, `claude/entregas-al-limite.md` (1.4) y `claude/integrantes-colaborador-1.4.md`.
+
+### Lo nuevo de la 1.5 (resumen; detalle en `claude/reglas-1.5.md`)
+- **Etiquetas**: Williams aparece como **"Socio"**; "Líder de proyecto" solo en Integrantes/Equipo. Los mensajes dicen su nombre (`LN()` en `app.js`), nunca "el administrador" (eso solo en su sección Administrador). En SQL y DemoAPI los errores dicen "el líder".
+- **Socio con apoyo / sin apoyo** (`members.apoyo`): se elige al invitar y se cambia con el **interruptor de Integrantes (Opción D)**: el líder propone (`proposals.kind = 'apoyo'`, `data {member, apoyo}`), el socio acepta o rechaza desde su Inicio. Rige para videos aún no grabados (`videos.apoyo_fixed`, se fija al marcar el rodaje).
+- **Modos de edición** (`R.modeOf`): `apoyo` (reglas 1.4) · `pareja` (hay algún socio sin apoyo: el socio y el líder) · `lider` (todos con apoyo: el líder entrega hasta 23:59) · `colab`. **Pareja** (día antes de publicar): montaje 12:00 (`pmon`, solo aviso) · final 18:00 (`pfin`; el del socio se revisa, el del líder no) · revisión 19:00 (`prev`, luego se aprueba sola) · corregir 21:00 (`pfix`, si no, pasa al líder) · desde 18:00 el otro (líder o socio sin apoyo) **toma directo** hasta 23:59; el dueño aún entrega tarde (−3) mientras no lo tomen · después de 23:59 "Reprogramar entrega". El socio con apoyo nunca toma ediciones. Dinero de la edición (montaje + final) solo a quien entrega el final, al entregar/aprobar. Puntos −3 dueño / +3 quien toma / −4 tomar y no entregar. SQL: `video_mode`, `pair_dues`, `review_limit`, `post_phase` (fases `p_mon`, `p_fin`, `p_tomar`…), `pass_to`, `leader_away`. Horas editables en Administrador → Entregas al límite ("Socios sin apoyo").
+- **Guillermo**: 80/20 solo si contrata un socio con apoyo; cualquier otro (el líder incluido) cede el 100 % (`R.hirePct`). **Storyboard que nadie hizo**: con apoyo 50/50; sin apoyo se reparte entre todos los socios.
+- **Llegadas**: la del líder vale sola y confirma las demás; si el líder no llegó o canceló, la del socio vale sola (`R.leaderAway` / `leader_away()`).
+- **Invitación en un paso (InvitacionA)**: el enlace `#/i/CÓDIGO` muestra la tarjeta pública ("Williams te invita", rol, reglas con "Ver todas", casilla "Leí las reglas…", nombre editable) y **Aceptar con Google / con mi correo**. El código se guarda en `localStorage['ra-invite']` antes de salir a Google o al correo y se acepta solo al volver (`tryPendingInvite` en `store.js`), luego "¡Listo! Ya estás en el equipo" y el historial dice "X aceptó las reglas del acuerdo". Nunca muestra "Crear tu equipo" a un invitado. Cuenta que ya es del equipo → "Cambiar de cuenta" (la invitación sigue guardada). Sesión vencida → vuelve a Entrar (ya no "sin sesión"). `invite_info` devuelve también `rules` y `pct`.
+- **Diseño**: Inicio **P** ("Tus actividades": aviso urgente en su tarjeta; días cuadrados, leyenda y tareas en un mismo fondo `.actbox`) · Posproducción **Edición B** (cada uno ve sus videos y los que debe atender; tarjetas minimizadas que se abren al tocar) · Integrantes **D** · **Opacidad** en Apariencia (`opRacha`, `opHero`, `opAct`, `opMeta`, `opWallet`, `opCards` → variables `--op-*`).
+- **Celular**: sin zoom (viewport + bloqueo de gestos de Safari + letra ≥ 16 px en campos de iPhone); auditado sin desborde a 390 y 360 px en todas las rutas, noche y día.
+- **Modo práctica**: dos ejemplos ("socio con apoyo" y "socio sin apoyo", `seedDemo('con'|'sin')`) y **reloj de práctica** en la barra (−1 h / +1 h / +6 h / +1 día / Ahora; `localStorage['ra-clock']`) para ver cómo cambian los plazos. La invitación también se prueba: crea la invitación, cierra sesión, abre el enlace y "Aceptar (práctica)".
 
 ---
 
@@ -41,8 +52,8 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 - `js/app.js`: todas las pantallas (HTML en plantillas) y manejadores `ACT`/`FORM`. `VERSION` está arriba.
 - `css/app.css`: estilos. Variables de color en `:root`; modo día en `[data-theme=light]`. Desde la 1.2 hay clases con el diseño de los bocetos (`.racha`, `.hero`, `.dsq`, `.trow`, `.tbtn`, `.vcard`, `.meta`, `.wallet`, `.agrp`, `.srow`…).
 - `supabase/schema.sql`: todo el esquema, **idempotente** (se puede volver a pegar entero). Cada versión agrega una sección al final (v1.1, v1.2, v1.3).
-- `sw.js`: caché sin conexión (`CACHE = 'registro-v7'`).
-- `tests/rules.test.js` y `tests/v13.test.js`: `node --test tests/*.test.js` (20 pruebas).
+- `sw.js`: caché sin conexión (`CACHE = 'registro-v9'`).
+- `tests/rules.test.js`, `tests/v13.test.js`, `tests/v14.test.js` y `tests/v15.test.js`: `node --test tests/*.test.js` (37 pruebas).
 
 ### Publicar una versión nueva
 1. Cambiar el código. Subir `VERSION` en `js/app.js` y `CACHE` en `sw.js` (si no, los celulares siguen con la versión vieja).
@@ -56,20 +67,29 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 ### Dinero
 - Valor por video = presupuesto ÷ videos (S/ 1,000 ÷ 16 = **S/ 62.50**). Reparto por defecto: **preproducción 25 %** (guion 12.5 % = S/ 7.81, storyboard 12.5 % = S/ 7.81), **rodaje 35 %** (S/ 21.88), **montaje 16 %** (S/ 10), **video final/acabado 24 %** (S/ 15). Se guarda por proyecto (`projects.pct`); los nuevos toman el de los ajustes del equipo.
 - Se paga a **quien hace la tarea**. La suma siempre cuadra exacto con el presupuesto (probado).
-- **5.5 Apoyo en el acabado**: el socio recibe apoyo; su video final lo hace el administrador, pero **el pago es del socio si su montaje llegó a tiempo**.
-- **5.7 Montaje no entregado**: si el montaje del dueño con apoyo no llega a su plazo, el video pasa al administrador (montaje + final, S/ 25).
+- **Entregas al límite (1.4, reemplaza 5.5 y 5.7)** para quien recibe apoyo (`members.apoyo`). Ejemplo: publica sáb.
+  - **Con apoyo hasta jue 21:00** (`mon` 2 días + `monh` 21:00; por cliente en `rules.cli`; por video `videos.apoyo_due` si se adelantó por un choque): el socio toca "Montaje" (sin enlaces), queda **"S/ 25 en espera"** (sin animación de dinero); el administrador hace el final y ahí el socio cobra montaje + final con animación, **+1** de racha.
+  - **Por su cuenta jue 21:00 → vie 08:00** (`self`): entrega el video completo; queda **por revisar** (`tasks.review = 'pendiente'`). El administrador **Aprueba** o **Pide cambios** (doble confirmación, motivo obligatorio). Aprobado: cobra S/ 25 y **0 puntos**. Sin revisar a las 23:59: se aprueba sola.
+  - **Pedir cambios**: corrige hasta las **17:00** (`fix`, una sola vez, RPC `redeliver`). Si no corrige, o se rechaza la corrección, o se rechaza después de las 17:00 → pasa al administrador.
+  - **En riesgo vie 08:00 → 12:00** (`auto`): si no entregó completo, el administrador puede **"Tomar el video"** (claim `montaje`); el socio aún puede entregar mientras nadie lo tome. **A las 12:00 pasa solo** al administrador.
+  - **Pasó al administrador**: lo que marcó el socio queda anulado (`tasks.void`, gris con candado), mensaje azul "Equipo que cumple: … editará este video y el cliente lo recibe a tiempo". Socio **−3**; administrador **+3** al entregarlo; **−4** si lo tomó y no lo entregó.
+  - Videos propios del administrador, de apoyo y tomados: hasta el **día antes de publicar a las 23:59**.
+  - Fases (igual en `postState` de `rules.js` y `post_phase()` en SQL): normal · abierto · apoyo · solo · riesgo · revision · cambios · aprobado · pasado. Plazos: `post_dues()`.
+  - **Aviso de choque** (Opción B) al programar la semana o repartir: si el último día del apoyo cae en un rodaje o reunión → "Adelantar el montaje de {socio}" / "Publicar un día después" / "Seguir igual"; si entre rodaje y publicación hay menos de días de apoyo + 1 → "Publicar el …" / "Seguir igual (sin apoyo)".
+- **Entrega vencida (1.4): nunca se bloquea.** Pasado el plazo del video final, la tarjeta se pone roja: quien lo tiene a cargo (`videoState().inCharge`) puede **"Entregar igual"** (cuenta como tarde) y el **administrador** puede **"Reprogramar entrega"** (RPC `reprogram_delivery`: nueva fecha de publicación desde mañana, nota opcional; mueve los plazos y queda en `videos.reprog`). Reprogramar sirve para **cualquier video sin entregar**, vencido o no; solo lo hace el administrador (lo coordina por fuera con el cliente). Puntos: reprogramar una entrega vencida que estaba a su cargo **−3** (en vez del −4); entregar tarde **−3**; no entregar a tiempo **−3**; si la tenía tomada y la reprograma, no se suma el −4. Si el video ya había pasado al administrador, se queda con él (`videos.handoff`).
 - **Tardanza se paga** igual (solo resta racha).
-- **Colaborador externo**: el proyecto cubre hasta **S/ 25 por video**; la diferencia la paga el socio que falló. El colaborador no ve el tope ni quién lo cubre. Sin racha para el colaborador.
+- **Colaborador externo (editor, 1.4)**: tablas `jobs` (encargo) y `job_items` (avance por video). El **administrador arma el encargo** (`#/encargo/nuevo`: editor nuevo o existente, videos sin montaje, monto por video, Drive) → **el otro socio lo aprueba** (`propuesto → invitado`) → el editor entra con su enlace y **acepta las condiciones** (`job_accept` → `activo`) → por video: **Entregué el montaje** → revisión 1 (los socios envían observaciones, una por línea, o aprueban) → ajustes en **checklist** → **Entregué el video final** → revisión 2 → últimos ajustes → **subir a Drive** (`{Cliente}_Video{n}_FINAL.mp4`) → **Servicio finalizado** (`job_finish`) → un socio **confirma y registra el pago** (`cerrado`). Todo por RPC `job_step` / `job_undo` (10 min). El proyecto cubre hasta **montaje + final por video** (S/ 25); el **excedente** lo paga el dueño del video, **a medias** o **por definir** (`jobs.payer` = owner / half / tbd; "por definir" sale aparte en el Cierre). El editor **no ve** el tope ni quién cubre (`colab_home` está saneada), no ve las tablas del equipo, no tiene racha y solo ve su vista "Mis videos". Mientras el video está en un encargo, ningún socio puede marcar su montaje/final (`post_phase = 'colab'`).
+- **Integrantes (1.4, Opción C)** en Administrador → Integrantes (`#/admin/integrantes`): grupos Socios y Colaboradores (+ Guillermo, su WhatsApp va en `teams.settings.guillermo`), nombre con lápiz, chip de rol, WhatsApp +51 con ✓ y "Probar chat", invitaciones pendientes (WhatsApp / Copiar / Enlace nuevo `renew_invite` / Cancelar), "Invitar integrante" eligiendo rol (Socio → enlace; Colaborador → arma el encargo) y **Guardar** ("Integrantes guardados · queda en el historial"). La invitación usa `md5(gen_random_uuid())` (ya no `gen_random_bytes`, que en Supabase vive en el esquema `extensions`). Equipo (engranaje) ya no repite la lista: el socio ve solo su ficha.
 - **Guillermo** (colaborador para la preproducción): lo contrata un socio para una reunión a la que no irá y el otro acepta. El que asiste hace esos guiones/storyboards "con Guillermo" y recibe **80 %**; el que contrató conserva 20 %. La asistencia del que contrató queda "no requerida" (ni falta ni racha).
 - **Cierre**: el administrador envía la liquidación, el socio la confirma (o hace una observación), el administrador registra el pago (6.2, 3 días) y se cierra el proyecto.
 
 ### Plazos y orden (configurables en Administrador → Reglas, con aprobación del socio)
 - **Guion y storyboard**: hasta el **día antes del rodaje a las 18:00**. **Desde la 1.2: vencido el plazo, el dueño ya NO puede marcarlo**; pasa a su compañero como "Tomar" (cobra él) y al dueño le resta 3 puntos. El dueño puede deshacer su preproducción hasta el plazo.
 - **Rodaje**: se marca solo el día del rodaje, desde 15 min antes, con guion y storyboard hechos y la **llegada confirmada**.
-- **Montaje**: 2 días antes de publicar a las 21:00 (si recibe apoyo); si no, junto con el final. Requiere rodaje.
-- **Video final**: 1 día antes de publicar a las 21:00. Requiere montaje.
-- **Deshacer** otras tareas: 10 min. El administrador siempre puede deshacer.
-- Valores por defecto en `R.DEFAULT_RULES` (`open 15, punt 10, tol 45, pre 1080 (=18:00), mon 2, fin 1, undo 10, avr 1080, take 5, conf 12, madr 300`; `avm` ya no se usa) y en SQL con `rule_int(team, clave, defecto)` leyendo `teams.settings.rules`.
+- **Montaje**: con apoyo, ver "Entregas al límite"; si no, junto con el final. Requiere rodaje.
+- **Video final**: 1 día antes de publicar a las **23:59** (1.4). Requiere montaje.
+- **Deshacer (1.4)**: todo se puede deshacer **10 min, y nunca después del plazo de esa acción** (`undo_limit()` / `R.undoUntil`): tareas, Tomar, entrega y corrección, aprobar / pedir cambios (`review_undo`), llegada y su confirmación, finalizar reunión, cancelar, respuesta a un aviso. El administrador puede desmarcar tareas siempre (corrección, queda en el historial). Guion y storyboard: hasta su plazo. En la app: "Deshacer" en la barra de abajo 8 s y en la tarjeta los 10 min.
+- Valores por defecto en `R.DEFAULT_RULES` (`open 15, punt 10, tol 45, pre 1080 (=18:00), mon 2, fin 1, undo 10, avr 1080, take 5, conf 12, madr 300`, 1.4: `monh 1260, self 480, auto 720, fix 1020, cli {}`; `avm` ya no se usa) y en SQL con `rule_int(team, clave, defecto)` leyendo `teams.settings.rules`.
 
 ### 1.3 · Tomar, confirmar asistencia y reparto del storyboard
 - **Tomar = comprometerse**: pasado el plazo del dueño, el otro socio "toma" (tabla `claims`, no paga) y luego marca "Hecho" (ahí cobra). Guion y storyboard: hasta **5 h antes del rodaje** (`take`). Montaje que pasó al administrador (5.7): hasta el plazo del video final. Entregar lo tomado **+3**; tomarlo y no entregarlo **−4**. Si el video se reprograma, el compromiso anterior ya no cuenta. Deshacer un "Tomar": 10 min y sin entregar. Al dueño le sale "Equipo que cumple: {nombre} hará el … y el rodaje sigue en pie".
@@ -103,6 +123,8 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 
 ## 5. Pantallas de la app y su boceto
 
+**1.4** (canvas 1.3, fila "Entregas al límite"): Posproducción y detalle del video con **EntregaSocioA** (línea de tiempo de plazos con marcador "ahora", cuadros Montaje / Video final, "S/ 25 en espera", Revisar entrega, Tomar el video) · Administrador → **Entregas al límite A** (`#/admin/entregas`) · aviso de choque **ChoqueB** (hoja al programar o repartir).
+
 **1.3** (canvas 1.3): Inicio **M** (Te toca con botón directo: llegada → Entrar/Abrir, Tomar → Hecho, tarea de hoy, confirmar Voy/No iré/Guillermo, no confirmaste, todo al día) · Etapas **N** (pre y rodaje) y **P** (posproducción) · reunión por dentro **F + reparto G** · rodaje por dentro **G/H** + Rodajes pasados (`#/rodajes`) · Apariencia **C** · Integrantes **C** (WhatsApp, en Equipo) · Detalle del video: la 1.2 con los botones nuevos (el rediseño B "más moderno" sigue pendiente).
 
 Tabla de la 1.2:
@@ -117,10 +139,10 @@ Tabla de la 1.2:
 | Historial | Hecho; aprobado | `HistorialA.dc.html` |
 | Cierre / liquidación | Funciona, diseño antiguo | `CierreA.dc.html` (y `CierreB` para editor externo con tope S/ 25) |
 | Reunión / rodaje por dentro | Funciona, diseño antiguo | `ProduccionC.dc.html` (elegida), `AvisoA.dc.html`, `GuillermoA.dc.html` |
-| Equipo / integrantes | Funciona, diseño antiguo | `IntegranteA.dc.html`, `AccesoA.dc.html` |
+| Equipo / integrantes | Hecho con el diseño (1.4) | **Integrantes C** (canvas 1.3) |
 | Entrar / invitación | Funciona | `AccesoA.dc.html` |
 | Notificaciones | **No hay aún** | `NotifSocioE.dc.html` (elegida), `NotifReunion`, `NotifColabA` |
-| Colaborador externo | **No hay aún** | `EncargoA`, `AccesoB`, `NotifColabA`, `ColaboradorA` |
+| Colaborador externo | Hecho (1.4) | `EncargoA`, `AccesoB`, `ColaboradorA` (`NotifColabA` pendiente) |
 
 Decisiones de diseño que hay que respetar:
 - La app debe verse **igual que los bocetos** (colores, tarjetas, íconos, animaciones), no solo tener su estructura.
@@ -140,10 +162,10 @@ El canvas está en la cuenta de Williams (enlace arriba). Para leerlo o editarlo
 
 ## 7. Pendiente
 
-0. **1.3**: detalle del video más moderno (boceto B pendiente de rediseño); actualizar el acuerdo firmado con las reglas de la 1.3; manual de la app.
+0. **1.3 / 1.4**: detalle del video más moderno (boceto B pendiente de rediseño); actualizar el acuerdo firmado con las reglas de la 1.3 y la 1.4 (entregas al límite cambian el reparto de dinero); manual de la app. Textos de doble confirmación: se usaron Aprobar A (con "puedes deshacerlo en 10 minutos") y Pedir cambios B.
 1. **Notificaciones al celular** (la pantalla de Recordatorios ya guarda la configuración en `teams.settings.reminders`): Web Push con claves VAPID + Supabase Edge Function + tarea programada; en iPhone requiere la app instalada en la pantalla de inicio. Diseño elegido: `NotifSocioE`.
 2. **Rediseñar con el estilo de los bocetos**: reunión/rodaje por dentro (`ProduccionC`, `AvisoA`), Cierre (`CierreA`), Equipo/integrantes, Entrar.
-3. **Flujo del colaborador externo** (encargo, revisiones en checklist, Drive, "servicio finalizado", tope S/ 25): bocetos `EncargoA`, `AccesoB`, `NotifColabA`.
+3. Colaborador externo: hecho en la 1.4. Falta el aviso al celular (`NotifColabA`) y que el editor suba archivos desde la app (hoy marca y sube a Drive por fuera).
 4. **Acuerdo**: agregar la regla de la 1.2 (preproducción vencida pasa al compañero; el dueño ya no la puede marcar).
 5. **Pregunta abierta para Williams**: si la preproducción vence y nadie la toma antes del rodaje, el video no se puede grabar. ¿Se deja así o la app debe avisar?
 6. Mejoras menores: el ícono de "Equipo" (personas) abre la pantalla antigua; textos del modo práctica.
@@ -155,3 +177,6 @@ El canvas está en la cuenta de Williams (enlace arriba). Para leerlo o editarlo
 - **1.2**: diseño de los bocetos en Inicio (K), Etapas (F) y detalle del video; Administrador (apariencia, reglas y porcentajes con propuesta, recordatorios, modo práctica); botón día/noche; tema de cada video; la preproducción vencida pasa al compañero.
 - **1.3**: Tomar = comprometerse (+3/−4, también el montaje 5.7), confirmar asistencia (12 h / 18:00, −2, WhatsApp), sin guion se reprograma y sin storyboard se reparte 50/50, Inicio M, Etapas N/P, reunión con reparto y entregables, rodaje por dentro nuevo, tarjeta de racha, Apariencia C con noche y día, WhatsApp de cada integrante, botones sin texto negro.
 - **1.3.1**: arreglo del parpadeo: la pantalla ya no se vuelve a dibujar si nada cambió (cada toque la redibujaba 4 veces y al volver a la app 1 vez), y las animaciones de entrada de las tarjetas solo corren la primera vez que se abre una pantalla (`#app[data-settled]` en `render()`).
+- **1.4** (además): Integrantes C completo (arreglo de la invitación y del desborde en el celular), colaborador editor con revisiones en checklist y Drive, entrega vencida nunca bloqueada con "Reprogramar entrega" (solo administrador, −3 si ya estaba vencida).
+- **1.5**: Williams como Socio (líder solo en Integrantes), socio con o sin apoyo con interruptor y aceptación, horario pareja (12:00 / 18:00 / 19:00 / 21:00 / 23:59, tomar directo), Guillermo 80/20 solo con apoyo, storyboard entre todos sin apoyo, llegada del socio vale sola si el líder no está, invitación en un paso, Inicio P (Tus actividades), Edición B minimizable, Integrantes D, opacidades, reloj de práctica, sin zoom ni desborde.
+- **1.4**: entregas al límite (apoyo hasta 2 días antes 21:00, entrega por su cuenta con revisión, pedir cambios hasta 17:00, en riesgo 08:00–12:00 con Tomar el video, pasa solo a las 12:00, −3/+3/−4), "S/ … en espera" en la billetera, Administrador → Entregas al límite (con propuesta y plazo por cliente), aviso de choque al programar o repartir, deshacer en 10 min en todas las decisiones, final a las 23:59. Bocetos: `EntregaSocioA`, `EntregasLimiteA`, `ChoqueB` (canvas 1.3, fila "Entregas al límite").

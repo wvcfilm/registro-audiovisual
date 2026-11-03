@@ -3,11 +3,13 @@ import { S } from './store.js';
 import * as R from './rules.js';
 import { seedDemo } from './demo.js';
 
-export const VERSION = '1.3.1';
+export const VERSION = '1.5';
 const $app = document.getElementById('app');
 const $toast = document.getElementById('toast');
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const ROLE = { admin: 'Administrador', socio: 'Socio', colaborador: 'Colaborador' };
+const ROLE = { admin: 'Socio · Líder de proyecto', socio: 'Socio', colaborador: 'Colaborador' };
+// 1.5: en lo que ve el socio, el líder aparece con su nombre (nunca "el administrador").
+const LN = () => first(st.admin() || { name: 'el líder' });
 const COLOR = { admin: ['#FFB547', '#1A1203'], socio: ['#8AB4FF', '#0B1530'], colaborador: ['#FF8A65', '#1A0E08'] };
 let sheetHtml = null;
 let ui = { scope: 'p', histF: 'all' };
@@ -57,7 +59,9 @@ const backTo = (href, label) => `<a href="${href}" class="row muted" style="text
 // Lo que gana quien marca la tarea (el apoyo en el acabado se le paga al dueño, 5.5).
 function gain(v, k, cm, viaHire) {
   const r = R.rates(projOf(v.project_id))[k];
-  if (cm && cm.apoyo) return 0;
+  if (cm && (cm.apoyo || cm.self || cm.fix)) return 0;
+  // 1.4: el montaje de quien recibe apoyo queda en espera hasta que el video esté entregado.
+  if (k === 'montaje' && v.owner === S.me.id && st.member(v.owner).apoyo) return 0;
   return viaHire ? r * 0.8 : r;
 }
 function myTotal(p) { const x = R.payouts(p, st.ctx(p.id)).porMiembro[S.me.id]; return x ? x.total : 0; }
@@ -89,7 +93,7 @@ function taskItems(now) {
       for (const k of ['guion', 'storyboard']) {
         if (vs[KEY[k]]) continue;
         const t = `${R.KIND_LABEL[k]} · ${vname}`;
-        if (byG) { if (hire.present === me.id) push(k, vs.d.preDue, t, `De ${first(owner)} · con Guillermo (80 %)`, { viaHire: true }); continue; }
+        if (byG) { if (hire.present === me.id) push(k, vs.d.preDue, t, `De ${first(owner)} · con Guillermo (${gTxt(hire)})`, { viaHire: true }); continue; }
         if (v.owner === me.id) push(k, vs.d.preDue, t, v.title ? esc(v.title) : 'Tu preproducción');
         else if (vs.d.preDue && now > vs.d.preDue && me.role !== 'colaborador') {
           const cm = R.canMark(v, k, me, c, now);
@@ -102,12 +106,48 @@ function taskItems(now) {
         const cm = R.canMark(v, 'rodaje', me, c, now);
         if (cm.ok) push('rodaje', new Date(rod.starts_at), `Rodaje · ${vname}`, v.owner === me.id ? (v.title ? esc(v.title) : 'Tu video') : `De ${first(owner)} · lo grabas tú`, { take: v.owner !== me.id });
       }
-    } else if (!vs.mo) {
-      if (v.owner === me.id && !vs.montajeMissed) push('montaje', vs.d.montajeDue || vs.d.finalDue, `Montaje · ${vname}`, owner.apoyo ? 'Tu final lo hace el administrador como apoyo (5.5)' : (v.title ? esc(v.title) : 'Tu video'));
-      else if (v.owner !== me.id && me.role === 'admin' && vs.montajeMissed) push('montaje', vs.d.finalDue, `Montaje y final · ${vname}`, `De ${first(owner)} · su montaje no llegó (5.7)`, { take: true });
-    } else if (!vs.ac) {
-      if (v.owner === me.id && !owner.apoyo) push('acabado', vs.d.finalDue, `Video final · ${vname}`, v.title ? esc(v.title) : 'Tu video');
-      else if (v.owner !== me.id && me.role === 'admin' && (owner.apoyo || vs.reassigned)) push('acabado', vs.d.finalDue, `Video final · ${vname}`, vs.reassigned ? `De ${first(owner)} · lo tomaste (5.7)` : `De ${first(owner)} · apoyo: el pago es de él (5.5)`);
+    } else if (vs.post && vs.post.phase === 'colab') {
+      continue; // 1.4: lo edita un colaborador; la revisión aparece como "Revisar" del encargo
+    } else if (!vs.delivered) {
+      const P = vs.post;
+      const A = first(st.admin() || { name: 'el líder' });
+      if (P.pair) {
+        // 1.5 · Edición pareja: montaje 12:00, final 18:00; desde las 18:00 se toma directo.
+        const ph = P.phase;
+        if (P.handoff) {
+          if (P.handoffTo === me.id) { if (!vs.mo) push('montaje', vs.d.finalDue, `Montaje y final · ${vname}`, `De ${first(owner)} · lo tomaste`, { take: true, urgent: true }); else if (!vs.ac) push('acabado', vs.d.finalDue, `Video final · ${vname}`, `De ${first(owner)} · lo tomaste`, { take: true, urgent: true }); }
+        } else if (v.owner === me.id) {
+          if (ph === 'cambios') out.push({ type: 'fix', video: v, kind: 'acabado', due: vs.d.fixDue, title: `Corregir · ${vname}`, sub: `${A} pidió cambios: ${esc(vs.ac.review_note || '')}`, urgent: true });
+          else if (ph === 'p_mon' || ph === 'p_fin' || ph === 'p_tomar') {
+            const late = ph === 'p_tomar';
+            if (!vs.mo) push('montaje', late ? vs.d.finalDue : ph === 'p_mon' ? vs.d.montajeDue : vs.d.ownDue, `Montaje · ${vname}`, late ? 'No entregaste a las ' + R.limaTime(vs.d.ownDue) + ' · aún puedes, cuenta tarde' : ph === 'p_fin' ? 'Venció tu montaje · entrega el video completo hasta las ' + R.limaTime(vs.d.ownDue) : (v.title ? esc(v.title) : 'Tu video'), { urgent: ph !== 'p_mon' });
+            else push('acabado', late ? vs.d.finalDue : vs.d.ownDue, `Video final · ${vname}`, late ? 'Cuenta tarde · mientras nadie lo tome' : owner.role === 'admin' ? (v.title ? esc(v.title) : 'Tu video') : `${A} lo revisa`, { urgent: late });
+          }
+        } else {
+          if (ph === 'revision' && me.role === 'admin') out.push({ type: 'review', video: v, kind: 'acabado', due: vs.ac && vs.ac.review_round ? vs.d.finalDue : vs.d.revDue, title: `Revisar entrega · ${vname}`, sub: `${first(owner)} entregó ${vs.ac && vs.ac.redelivered_at ? 'la corrección' : 'el video'}`, urgent: true });
+          else if (ph === 'p_tomar' && R.canTakeEdit(me, v)) push('montaje', vs.d.finalDue, `Tomar el video · ${vname}`, `${first(owner)} no entregó a las ${R.limaTime(vs.d.ownDue)} · tómalo directo`, { take: true, urgent: true });
+        }
+      } else if (vs.post.mode === 'apoyo' && vs.d.apoyoDue) {
+        // 1.4 · Entregas al límite
+        if (v.owner === me.id) {
+          const left = (vs.d.apoyoDue - now) / 60000;
+          if (P.phase === 'abierto' && !vs.mo) push('montaje', vs.d.apoyoDue, `Montaje · ${vname}`, left <= 60 ? 'Falta 1 h para enviar tu montaje y recibir apoyo en el video final.' : `Envíalo a tiempo y ${A} hace tu video final`);
+          else if (P.phase === 'solo' || P.phase === 'riesgo') {
+            const due = P.phase === 'solo' ? vs.d.selfDue : vs.d.autoDue;
+            if (!vs.mo) push('montaje', due, `Montaje · ${vname}`, 'Venció el apoyo · entrega el video completo', { urgent: true });
+            else push('acabado', due, `Video completo · ${vname}`, P.phase === 'solo' ? 'Venció el apoyo · entrégalo por tu cuenta' : `Al mediodía pasa a ${A}`, { urgent: true });
+          } else if (P.phase === 'cambios') out.push({ type: 'fix', video: v, kind: 'acabado', due: vs.d.fixDue, title: `Corregir · ${vname}`, sub: `${A} pidió cambios: ${esc(vs.ac.review_note || '')}`, urgent: true });
+        } else if (me.role === 'admin') {
+          if (P.phase === 'apoyo' && !vs.ac) push('acabado', vs.d.finalDue, `Video final · ${vname}`, `De ${first(owner)} · apoyo: el pago es de él`);
+          else if (P.phase === 'revision') out.push({ type: 'review', video: v, kind: 'acabado', due: vs.d.finalDue, title: `Revisar entrega · ${vname}`, sub: `${first(owner)} entregó el video completo`, urgent: true });
+          else if (P.phase === 'riesgo') push('montaje', vs.d.autoDue, `Tomar el video · ${vname}`, `${first(owner)} no entregó · a las ${R.limaTime(vs.d.autoDue)} pasa a ti`, { take: true });
+          else if (P.phase === 'pasado') { if (!vs.mo) push('montaje', vs.d.finalDue, `Montaje y final · ${vname}`, `De ${first(owner)} · pasó a ti`, { take: true }); else if (!vs.ac) push('acabado', vs.d.finalDue, `Video final · ${vname}`, `De ${first(owner)} · pasó a ti`, { take: true }); }
+        }
+      } else if (!vs.mo) {
+        if (v.owner === me.id) push('montaje', vs.d.finalDue, `Montaje · ${vname}`, v.title ? esc(v.title) : 'Tu video');
+      } else if (!vs.ac) {
+        if (v.owner === me.id) push('acabado', vs.d.finalDue, `Video final · ${vname}`, v.title ? esc(v.title) : 'Tu video');
+      }
     }
   }
   return out;
@@ -143,12 +183,23 @@ function pending(now = new Date()) {
       const ev = S.data.events.find((e) => e.id === h.event_id);
       if (ev) out.push({ type: 'hire', event: ev, due: new Date(ev.starts_at), title: `${first(st.member(h.hired_by))} quiere contratar a Guillermo`, sub: 'Reunión · ' + R.fmtWhen(ev.starts_at), urgent: true, kind: 'reunion' });
     }
+    // 1.4 · Colaborador externo: aprobar el encargo, revisar entregas y confirmar el servicio.
+    if (isPartner(me)) for (const j of (S.data.jobs || []).filter((x) => x.project_id === p.id)) {
+      const E = first(st.member(j.member_id));
+      if (j.status === 'propuesto' && j.proposed_by !== me.id) out.push({ type: 'job', job: j, due: new Date(j.created_at), title: `${first(st.member(j.proposed_by))} propone contratar a ${E}`, sub: `Edición · ${j.video_ids.length} ${j.video_ids.length === 1 ? 'video' : 'videos'} · apruébalo o recházalo`, urgent: true });
+      if (j.status === 'activo') for (const it of st.jobItems(j.id).filter((i) => i.stage === 'rev1' || i.stage === 'rev2')) {
+        const v = S.data.videos.find((x) => x.id === it.video_id);
+        if (v) out.push({ type: 'job', job: j, kind: 'montaje', btn: 'Revisar', due: new Date(it.stage === 'rev1' ? it.montaje_at : it.final_at), title: `Revisar ${it.stage === 'rev1' ? 'montaje' : 'video final'} · video ${v.num}`, sub: `Lo entregó ${E} · envíale tus observaciones`, urgent: true });
+      }
+      if (j.status === 'finalizado') out.push({ type: 'job', job: j, due: new Date(j.finished_at || j.created_at), title: `${E} terminó el servicio`, sub: 'Revisa Drive, confirma y registra su pago', urgent: true });
+    }
     const se = p.settlement;
     if (se && se.sent_at && !se.confirmed_at && me.role !== 'admin') out.push({ type: 'settle', due: now, title: 'Revisa y confirma la liquidación', sub: esc(p.client) + ' · ' + esc(p.name), urgent: true });
     if (se && se.confirmed_at && !se.paid_at && me.role === 'admin') out.push({ type: 'settle', due: now, title: 'Registra el pago de la liquidación', sub: esc(p.client) + ' · ' + esc(p.name), urgent: true });
     if (se && se.observation && !se.sent_at && me.role === 'admin') out.push({ type: 'settle', due: now, title: 'Hay una observación en la liquidación', sub: esc(se.observation.text), urgent: true });
   }
-  for (const pr of st.proposals().filter((x) => x.status === 'pendiente' && x.proposed_by !== me.id)) out.push({ type: 'proposal', prop: pr, due: new Date(pr.created_at), title: `${first(st.member(pr.proposed_by))} propone cambiar ${pr.kind === 'pct' ? 'los porcentajes' : 'las reglas'}`, sub: 'Revísalo y apruébalo o recházalo', urgent: true });
+  for (const pr of st.proposals().filter((x) => x.status === 'pendiente' && x.kind === 'apoyo' && x.data.member === me.id)) out.push({ type: 'proposal', prop: pr, due: new Date(pr.created_at), title: `${first(st.member(pr.proposed_by))} propone ${pr.data.apoyo ? 'darte apoyo' : 'quitarte el apoyo'} en la edición`, sub: 'Revísalo y acéptalo o recházalo', urgent: true });
+  for (const pr of st.proposals().filter((x) => x.status === 'pendiente' && x.kind !== 'apoyo' && x.proposed_by !== me.id)) out.push({ type: 'proposal', prop: pr, due: new Date(pr.created_at), title: `${first(st.member(pr.proposed_by))} propone cambiar ${pr.kind === 'pct' ? 'los porcentajes' : 'las reglas'}`, sub: 'Revísalo y apruébalo o recházalo', urgent: true });
   for (const cr of S.data.corrections.filter((x) => x.status === 'pendiente' && x.requested_by !== me.id)) out.push({ type: 'corr', corr: cr, due: new Date(cr.created_at), title: `${first(st.member(cr.requested_by))} pidió una corrección`, sub: esc(cr.text), urgent: true });
   for (const x of out) {
     x.band = x.urgent ? 0 : R.band(x.due, now);
@@ -159,6 +210,8 @@ function pending(now = new Date()) {
 
 // Ícono de etapa: lápiz (preproducción), cámara (rodaje), tijera (posproducción), estrella (final).
 function stageOf(x) {
+  if (x.type === 'review' || x.type === 'fix') return 'post';
+  if (x.type === 'job') return x.kind ? 'post' : 'info';
   if (x.type === 'task') return { guion: 'pre', storyboard: 'pre', rodaje: 'prod', montaje: 'post', acabado: 'post' }[x.kind];
   if (x.kind === 'rodaje') return 'prod';
   if (x.kind === 'reunion') return 'pre';
@@ -186,16 +239,20 @@ function rowBtn(x, now) {
     if (R.canCheckIn(ev, now)) return `<button class="tbtn t-arr" data-act="checkin" data-e="${ev.id}">Llegué</button>`;
     return `<span class="tbtn t-lock">${icon.lock}${R.limaDate(now) === R.limaDate(ev.starts_at) ? R.limaTime(new Date(new Date(ev.starts_at).getTime() - R.RULES.open * 60000)) : dowShort(ev.starts_at)}</span>`;
   }
+  if (x.type === 'review') return `<button class="tbtn t-take" data-act="review" data-v="${x.video.id}" data-k="ask">Revisar</button>`;
+  if (x.type === 'job') return `<a class="tbtn t-take" href="#/encargo/${x.job.id}">${x.btn || 'Ver'}</a>`;
+  if (x.type === 'fix') return `<button class="tbtn t-done" data-act="redeliver" data-v="${x.video.id}">Entregar</button>`;
   if (x.type === 'claim') return `<button class="tbtn t-arr" data-act="confirmArr" data-a="${x.att.id}" data-m="claimed">Sí, ${R.limaTime(x.att.claimed_at)}</button>`;
   if (x.type === 'endreq') return `<button class="tbtn t-done" data-act="confirmEnd" data-e="${ev.id}">Confirmar</button>`;
   return `<a class="tbtn t-ghost" href="${rowHref(x)}">Ver</a>`;
 }
 function rowHref(x) {
-  if (x.type === 'task' || x.type === 'norod') return '#/v/' + x.video.id;
+  if (x.type === 'task' || x.type === 'norod' || x.type === 'review' || x.type === 'fix') return '#/v/' + x.video.id;
   if (x.type === 'reparto') return '#/semana/' + x.event.id;
   if (x.type === 'settle') return '#/cierre';
   if (x.type === 'corr') return '#/historial';
   if (x.type === 'proposal') return '#/propuesta/' + x.prop.id;
+  if (x.type === 'job') return '#/encargo/' + x.job.id;
   return x.event ? '#/e/' + x.event.id : '#/';
 }
 function dueLine(x, now) {
@@ -248,20 +305,24 @@ function demoBar() {
   const btns = users.map((u) => {
     const m = S.data.members.find((x) => x.user_id === u.id);
     const on = S.session && S.session.user.id === u.id;
-    return `<button class="btn sm ${on ? 'b-amber' : 'b-ghost'}" data-act="demoAs" data-id="${u.id}">${esc(m ? m.name : u.email)}</button>`;
+    const nm = m ? m.name : String(u.email).split('@')[0]; return `<button class="btn sm ${on ? 'b-amber' : 'b-ghost'}" data-act="demoAs" data-id="${u.id}">${esc(nm.charAt(0).toUpperCase() + nm.slice(1))}</button>`;
   }).join('');
   const pr = st.practice();
-  return `<div class="demo${pr ? ' demo-pr' : ''}"><div class="between" style="align-items:center"><span class="muted">${pr ? '<b style="color:#C9B2FF">Modo práctica</b> · nada llega a la base real' : '<b style="color:#FFC978">Modo demo</b> · solo en este navegador'}</span><span class="row" style="gap:6px"><button class="btn sm b-ghost" data-act="demoReset">${pr ? 'Reiniciar' : 'Borrar demo'}</button>${pr ? '<button class="btn sm b-purple" data-act="practiceOff">Salir</button>' : ''}</span></div>${users.length > 1 ? `<div class="row" style="flex-wrap:wrap;gap:6px"><span class="muted">Ver como:</span>${btns}</div>` : ''}</div>`;
+  // 1.5 · Reloj de práctica: adelanta la hora para ver cómo cambian los plazos.
+  const clk = window.__clk || 0;
+  const nowTxt = R.fmtWhen(new Date()) ;
+  const clock = pr ? `<div class="clockrow"><span class="clk${clk ? ' on' : ''}">${icon.clock.replace('width="12" height="12"', 'width="14" height="14"')}${esc(nowTxt)}${clk ? ' · adelantado' : ''}</span><span class="row" style="gap:6px;flex-wrap:wrap">${[[-60, '−1 h'], [60, '+1 h'], [360, '+6 h'], [1440, '+1 día']].map(([m, t]) => `<button class="btn sm b-ghost" data-act="clock" data-m="${m}">${t}</button>`).join('')}${clk ? '<button class="btn sm b-ghost" data-act="clock" data-m="0">Ahora</button>' : ''}</span></div>` : '';
+  return `<div class="demo${pr ? ' demo-pr' : ''}"><div class="between" style="align-items:center"><span class="muted">${pr ? '<b style="color:#C9B2FF">Modo práctica</b> · nada llega a la base real' : '<b style="color:#FFC978">Modo demo</b> · solo en este navegador'}</span><span class="row" style="gap:6px"><button class="btn sm b-ghost" data-act="demoReset">${pr ? 'Reiniciar' : 'Borrar demo'}</button>${pr ? '<button class="btn sm b-purple" data-act="practiceOff">Salir</button>' : ''}</span></div>${users.length > 1 ? `<div class="row" style="flex-wrap:wrap;gap:6px"><span class="muted">Ver como:</span>${btns}</div>` : ''}${clock}</div>`;
 }
 
 function vLogin(inviteCode) {
   const demo = st.isDemo();
+  if (inviteCode) return `<div class="wrap"><main style="padding-bottom:32px">${logoRow()}${vAccept(inviteCode)}</main></div>`;
   return `<div class="wrap"><main style="padding-bottom:40px;justify-content:center;min-height:100vh">
   <div style="display:flex;gap:6px">${['#12271E:#6EE7B7', '#2A2416:#FFB547', '#2A1810:#FF8A65'].map((c) => `<span style="width:46px;height:46px;border-radius:14px;background:${c.split(':')[0]}"></span>`).join('')}</div>
   <h1 style="font-size:30px;line-height:1.1">Registra el trabajo de tu equipo audiovisual</h1>
   <p class="sub" style="font-size:15px">Quién hizo cada tarea, a tiempo o no, y cuánto le corresponde a cada uno.</p>
-  ${inviteCode ? `<div id="invbox">${banner('wait', 'Tienes una invitación', 'Entra con tu correo para aceptarla.')}</div>` : ''}
-  ${demo ? `<div class="demo">${st.practice() ? banner('fm', 'Modo práctica', 'Prueba todo con un proyecto de ejemplo. Se guarda solo en este celular y no toca los datos reales.') : banner('warn', 'Modo demo', 'Todavía no está conectada la base de datos. Puedes probar todo: se guarda solo en este navegador.')}<button class="btn b-amber" data-act="seed">Cargar proyecto de ejemplo</button>${st.practice() ? '<button class="btn b-ghost" data-act="practiceOff">Salir del modo práctica</button>' : ''}</div>` : ''}
+  ${demo ? `<div class="demo">${st.practice() ? banner('fm', 'Modo práctica', 'Prueba todo con un proyecto de ejemplo. Se guarda solo en este celular y no toca los datos reales.') : banner('warn', 'Modo demo', 'Todavía no está conectada la base de datos. Puedes probar todo: se guarda solo en este navegador.')}<button class="btn b-amber" data-act="seed" data-k="con">Ejemplo: socio con apoyo</button><button class="btn b-blue" data-act="seed" data-k="sin">Ejemplo: socio sin apoyo</button>${st.practice() ? '<button class="btn b-ghost" data-act="practiceOff">Salir del modo práctica</button>' : ''}</div>` : ''}
   ${demo ? '' : `<button class="btn" data-act="google" style="background:#F4F4F5;color:#0B0C10"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.8h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.3z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.5l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22z"/><path fill="#FBBC05" d="M6.4 13.9a6 6 0 0 1 0-3.8V7.5H3.1a10 10 0 0 0 0 9z"/><path fill="#EA4335" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.9-2.9A10 10 0 0 0 3.1 7.5l3.3 2.6C7.2 7.8 9.4 6 12 6z"/></svg>Continuar con Google</button>
   <p class="muted" style="text-align:center;margin:0">o con un código a tu correo</p>`}
   <form data-form="sendCode" class="card">
@@ -277,13 +338,18 @@ function vLogin(inviteCode) {
   </main></div>`;
 }
 
+// Guillermo: % que recibe quien hace la preproducción con él (80 % o 100 % según quién contrata).
+const gp = (hire) => R.hirePct(hire, S.data.members);
+const gTxt = (hire) => Math.round(gp(hire) * 100) + ' %';
+const logoRow = () => `<div style="display:flex;gap:6px" aria-hidden="true">${['#12271E', '#2A2416', '#2A1810'].map((c) => `<span style="width:34px;height:34px;border-radius:11px;background:${c}"></span>`).join('')}</div>`;
 function vNoTeam(code) {
+  code = code || (st.pendingInvite() || {}).code;
+  if (code) return `<div class="wrap"><main style="padding-bottom:32px">${logoRow()}${vAccept(code)}</main></div>`;
   return `<div class="wrap"><main style="padding-bottom:40px">
   <h1>Bienvenido</h1><p class="sub">Entraste como ${esc(S.session.user.email)}.</p>
-  ${code ? vAccept(code) : ''}
   <form data-form="createTeam" class="card">
     <h3>Crear tu equipo</h3>
-    <p class="sub" style="margin:0">Quedas como administrador: invitas a tu socio, propones las reglas y cierras cada proyecto.</p>
+    <p class="sub" style="margin:0">Quedas como líder de proyecto: invitas a tus socios, propones las reglas y cierras cada proyecto.</p>
     <label class="field"><span>Tu nombre</span><input class="in" name="me" required placeholder="Williams José Velasquez Chambi"></label>
     <label class="field"><span>Nombre del equipo</span><input class="in" name="team" required placeholder="Williams Velasquez · Audiovisual"></label>
     <button class="btn b-amber">Crear equipo</button>
@@ -293,27 +359,94 @@ function vNoTeam(code) {
   </main></div>`;
 }
 
+// 1.5 · Invitación en un paso (InvitacionA): tarjeta pública, casilla de reglas y Aceptar con Google o con mi correo.
+function inviteTexts(info) {
+  const r = Object.assign({}, R.DEFAULT_RULES, info.rules || {});
+  const pct = Object.assign({}, R.DEFAULT_PCT, info.pct || {});
+  const by = first({ name: info.by || 'El líder' });
+  const colab = info.role === 'colaborador';
+  const apoyo = info.role === 'socio' && info.apoyo;
+  const perks = colab ? [
+    [1, 'Ves solo los videos de tu encargo y marcas cada entrega.'],
+    [1, 'Recibes las observaciones como checklist y subes el video final a Drive.'],
+    [0, 'Tu pago solo lo ves tú.']
+  ] : [
+    [1, 'Ver las etapas de todos los videos y marcar los tuyos.'],
+    [1, apoyo ? `${by} te apoya en el video final de tus videos si envías tu montaje a tiempo.` : 'Editas tus videos completos: montaje y video final.'],
+    [1, 'Aprobar la liquidación de cada proyecto.'],
+    [0, 'Tu racha y tu aporte real solo los ves tú.']
+  ];
+  const short = colab ? 'Al entrar ves las condiciones del encargo (videos, monto por video y plazos) y las aceptas antes de empezar.'
+    : `Pago por etapa del valor de cada video: preproducción ${pct.pre} % (guion y storyboard mitad y mitad), rodaje ${pct.rod} %, montaje ${pct.mon} % y video final ${pct.aca} %. Se paga a quien hace la tarea. La racha nunca cambia lo que cobras.`;
+  const more = colab ? ['Marca cada entrega en la app aunque envíes el archivo por WhatsApp o Drive: así queda la hora.', 'Cuando el video esté aprobado, lo subes a la carpeta de Drive del proyecto.'] : [
+    `Guion y storyboard: hasta el día antes del rodaje a las ${R.hm(r.pre)}.`,
+    `Confirmar el rodaje hasta las ${R.hm(r.avr)} del día anterior y la reunión ${Math.round(r.conf / 60) || r.conf} h antes.`,
+    apoyo ? `Montaje con apoyo: hasta ${r.mon} días antes de publicar a las ${R.hm(r.monh)}. Por tu cuenta: hasta las ${R.hm(r.self)} del día antes.`
+      : `Montaje hasta las ${R.hm(r.pmon)} y video final hasta las ${R.hm(r.pfin)} del día antes de publicar. Desde las ${R.hm(r.pfin)}, otro socio puede tomarlo.`,
+    `Llegada puntual hasta ${r.punt} min; tardanza hasta ${r.tol} min (se paga igual).`
+  ];
+  return { by, colab, perks, short, more, role: colab ? 'Colaborador' : apoyo ? 'Socio con apoyo' : 'Socio' };
+}
+const gIcon = '<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.8h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.3z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.5l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22z"/><path fill="#FBBC05" d="M6.4 13.9a6 6 0 0 1 0-3.8V7.5H3.1a10 10 0 0 0 0 9z"/><path fill="#EA4335" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.9-2.9A10 10 0 0 0 3.1 7.5l3.3 2.6C7.2 7.8 9.4 6 12 6z"/></svg>';
+const mailIcon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>';
+const okIc = (c = '#6EE7B7') => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;margin-top:2px"><path d="m5 12 5 5 9-10"/></svg>`;
+const lockIc = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FFC978" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;margin-top:2px"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
 function vAccept(code) {
+  code = String(code || '').toUpperCase();
   const info = ui.inviteInfo;
-  if (!info || info.code !== code) { st.inviteInfo(code).then((r) => { ui.inviteInfo = Object.assign({ code }, r || { missing: true }); render(); }).catch(() => { ui.inviteInfo = { code, missing: true }; render(); }); return `<div class="card"><p class="muted">Buscando la invitación…</p></div>`; }
-  if (info.missing) return banner('bad', 'Invitación no encontrada', 'Revisa el código o pide uno nuevo.');
-  if (info.used) return banner('bad', 'Esta invitación ya se usó', '');
-  if (info.expired) return banner('bad', 'La invitación venció', 'Pide a quien te invitó que te envíe una nueva.');
-  const isSocio = info.role === 'socio';
-  return `<form data-form="accept" class="card" style="border-color:#24345A">
-    <input type="hidden" name="code" value="${esc(code)}">
-    <p class="lbl" style="color:#A9C7FF">Invitación</p>
-    <h2>${esc(info.team)}</h2>
-    <span class="chip c-info" style="align-self:flex-start">${ROLE[info.role]}</span>
-    ${isSocio ? `<div class="list small" style="color:#D4D4D8;line-height:1.5">
-      <div>✓ Ver las etapas de todos los videos y marcar los tuyos.</div>
-      <div>✓ Aprobar la liquidación de cada proyecto.</div>
-      <div>🔒 Tu racha y tu aporte real solo los ves tú.</div></div>
-      <div class="banner bn-warn"><div><b>Antes de entrar</b><p>La app sigue el acuerdo que firmaron: pago por etapa (guion y storyboard S/ 7.81, rodaje S/ 21.88, montaje S/ 10, acabado S/ 15 por video de S/ 62.50), plazos a las 21:00, tolerancia de 10 y 45 min, confirmar el rodaje hasta las 18:00 del día anterior y la reunión con 12 h. La racha nunca cambia lo que cobras.</p></div></div>
-      <label class="row small" style="gap:10px"><input type="checkbox" name="ok" required style="width:20px;height:20px"> Leí las reglas y son las mismas del acuerdo que firmé</label>` : ''}
-    <label class="field"><span>Tu nombre (así aparecerás)</span><input class="in" name="name" value="${esc(info.name)}" required></label>
-    <button class="btn b-blue">Entrar al equipo</button>
-  </form>`;
+  if (!info || info.code !== code) { st.inviteInfo(code).then((r) => { ui.inviteInfo = Object.assign({ code }, r || { missing: true }); render(); }).catch(() => { ui.inviteInfo = { code, missing: true }; render(); }); return `<div class="invload"><span class="spin"></span><p>Buscando la invitación…</p></div>`; }
+  const wa = (t) => `<a class="hb x-green" href="https://wa.me/?text=${encodeURIComponent(t)}" target="_blank" rel="noopener">${waIc}Escribir ${info.by ? 'a ' + esc(first({ name: info.by })) : 'por WhatsApp'}</a>`;
+  if (info.missing) return `<div class="inv"><p class="lbl" style="color:#FFB09C">Invitación</p><h1 class="h">No encontramos la invitación</h1><p class="sub">Revisa que el enlace esté completo o pide uno nuevo.</p>${S.session ? '' : `<button class="btn b-ghost" data-act="invForget">Entrar sin invitación</button>`}</div>`;
+  if (info.used) return `<div class="inv"><p class="lbl" style="color:#FFB09C">Invitación</p><h1 class="h">Esta invitación ya se usó</h1><p class="sub">Si es tuya, entra con la cuenta con la que la aceptaste.</p>${S.session ? '' : `<button class="btn b-ghost" data-act="invForget">Entrar</button>`}</div>`;
+  if (info.expired) return `<div class="inv"><p class="lbl" style="color:#FFB09C">Invitación</p><h1 class="h">Esta invitación venció</h1><p class="sub">Las invitaciones duran 7 días. Pídele a ${esc(first({ name: info.by || 'quien te invitó' }))} un enlace nuevo: lo genera en un toque.</p>${wa('Hola, mi invitación a la app de registro venció. ¿Me envías un enlace nuevo?')}</div>`;
+  const T = inviteTexts(info);
+  const ok = !!(ui.invOk || (st.pendingInvite() || {}).ok && (st.pendingInvite() || {}).code === code) || T.colab;
+  const nudge = ui.invNudge && !ok;
+  const nm = ui.invName != null ? ui.invName : info.name;
+  const avc = T.colab ? ['#FF8A65', '#1A0E08', '#21163A', '#D6C2FF'] : ['#8AB4FF', '#0B1530', '#18233A', '#A9C7FF'];
+  let html = `<div class="inv">
+  <div><p class="lbl" style="color:#A9C7FF">Invitación</p><h1 class="h">${esc(T.by)} te invita a ${T.colab ? 'editar con su equipo' : 'su equipo'}</h1><p class="sub" style="margin-top:6px">${esc(info.team || '')}</p></div>
+  <section class="invcard">
+    <div class="row" style="gap:12px"><span class="invav" style="background:${avc[0]};color:${avc[1]}">${esc((nm || '?').trim().charAt(0).toUpperCase())}</span>
+      <label style="flex:1;min-width:0"><input class="invname" name="invname" value="${esc(nm)}" aria-label="Tu nombre" maxlength="60"><small>Así aparecerás en el equipo</small></label>
+      <span class="invrole" style="background:${avc[2]};color:${avc[3]}">${T.role}</span></div>
+    <div class="invperks">${T.perks.map(([y, t]) => `<div>${y ? okIc() : lockIc}<span>${esc(t)}</span></div>`).join('')}</div>
+  </section>
+  <section class="invrules"><b>${T.colab ? 'Condiciones del encargo' : 'Antes de entrar'}</b><p>${esc(T.short)}</p>
+    ${ui.invMore ? `<div class="invmore">${T.more.map((t) => `<div><span></span><span>${esc(t)}</span></div>`).join('')}</div>` : ''}
+    <button type="button" class="invtgl" data-act="invMore">${ui.invMore ? 'Ver menos' : 'Ver todas las reglas'}</button></section>
+  ${T.colab ? '' : `<label class="invck${ok ? ' on' : nudge ? ' nudge' : ''}"><input type="checkbox" data-act="invOk"${ok ? ' checked' : ''}><span>Leí las reglas y son las mismas del acuerdo que firmé</span></label>`}`;
+  if (S.session) {
+    html += `<button class="hb x-blue${ok ? '' : ' dim'}" data-act="invAccept" data-code="${esc(code)}">Entrar al equipo</button>
+    <p class="muted" style="text-align:center;margin:0">Entraste como ${esc(S.session.user.email || '')} · <button class="linkbtn" style="display:inline;min-height:0" data-act="switchAccount">¿No eres tú? Cambiar de cuenta</button></p>`;
+  } else if (ui.invMail === 'sent') {
+    html += `<section class="invsent"><b class="h">Revisa tu correo</b><p>Te enviamos un enlace a <b>${esc(ui.email || '')}</b>. <b style="color:#fff">Ábrelo en este mismo celular</b>: entrarás directo al equipo. Si no llega en 2 minutos, revisa Spam.</p><p class="small" style="color:#8FA3CC;margin:0">Tu invitación queda guardada en este celular mientras tanto.</p></section>
+    <form data-form="verify" class="invcode"><label class="field"><span>¿Te llegó un código de 6 dígitos? Escríbelo aquí</span><input class="in num" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required style="font-size:20px;letter-spacing:.3em"></label><button class="btn b-ghost">Entrar con el código</button></form>`;
+  } else if (ui.invMail) {
+    html += `<form data-form="invMail" class="invmail" data-code="${esc(code)}"><label class="field"><span>Tu correo</span><input class="in" name="email" type="email" required autocomplete="email" placeholder="tucorreo@gmail.com" value="${esc(ui.email || '')}"></label><button class="hb x-blue">Enviarme el enlace</button><button type="button" class="linkbtn" style="align-self:center" data-act="invMailOff">Volver</button></form>`;
+  } else {
+    html += `<div class="invbtns">${st.isDemo() ? `<button class="hb x-blue${ok ? '' : ' dim'}" data-act="invAcc" data-k="demo" data-code="${esc(code)}">Aceptar (práctica)</button>` : `<button class="hb invg${ok ? '' : ' dim'}" data-act="invAcc" data-k="google" data-code="${esc(code)}">${gIcon}Aceptar con Google</button>
+      <button class="hb invm${ok ? '' : ' dim'}" data-act="invAcc" data-k="mail" data-code="${esc(code)}">${mailIcon}Aceptar con mi correo</button>`}
+      <p class="small" style="margin:0;text-align:center;color:${nudge ? '#FFC2BA' : 'var(--tx4)'}">${ok ? 'Un toque y entras directo al equipo.' : nudge ? 'Primero marca la casilla de arriba.' : 'Marca la casilla para continuar.'}</p></div>`;
+  }
+  return html + '</div>';
+}
+function vInviteDone() {
+  const d = S.inviteDone;
+  return `<div class="wrap"><main class="inv" style="padding-top:48px">
+    <span class="invpop">${okIc().replace('width="16" height="16"', 'width="30" height="30"')}</span>
+    <h1 class="h">¡Listo, ${esc(first({ name: d.name || '' }))}!<br>Ya estás en el equipo</h1>
+    <p class="sub">Entraste como ${esc(S.session.user.email || '')}. Desde ahora ves tus videos, tus tareas y tu billetera.</p>
+    <div class="invlog">${icon.clock.replace('width="12" height="12"', 'width="16" height="16"')}<p>Queda en el historial: <b>${esc(first({ name: d.name || '' }))} aceptó las reglas del acuerdo</b> · ${R.fmtWhen(d.at)}</p></div>
+    <button class="hb x-amber" data-act="invSeen">Ir a Inicio</button></main></div>`;
+}
+function vInviteTaken() {
+  const e = S.inviteErr;
+  return `<div class="wrap"><main class="inv" style="padding-top:40px">
+    <h1 class="h">${e.keep ? 'Esta cuenta ya es del equipo' : 'No se pudo aceptar la invitación'}</h1>
+    <div class="invbad"><span></span><p>${e.keep ? `Entraste como <b>${esc(S.session.user.email || '')}</b>. ${esc(e.msg)}.` : esc(e.msg)}</p></div>
+    ${e.keep ? `<button class="hb x-blue" data-act="switchAccount">Cambiar de cuenta</button><p class="small" style="margin:0;text-align:center;color:var(--tx4)">La invitación sigue guardada: no tienes que abrir el enlace otra vez.</p><button class="btn b-ghost" data-act="invDrop">Seguir con esta cuenta</button>` : `<button class="btn b-ghost" data-act="invDrop">Continuar</button>`}
+  </main></div>`;
 }
 
 // ---------- Inicio ----------
@@ -335,7 +468,7 @@ function rachaCard(sk) {
   const embers = Array.from({ length: lv.embers }, (_, i) => `<span class="ember" style="left:${lefts[i]}%;background:${i % 2 ? '#FFF1C2' : lv.color};animation-duration:${(1.4 + (i % 3) * 0.4).toFixed(1)}s;animation-delay:${(i * 0.23).toFixed(2)}s"></span>`).join('');
   const burst = ui.burst && Date.now() - ui.burst < 2200;
   const left = sk.next ? sk.next.min - sk.pts : 0;
-  return `<section class="racha ${lv.cls}"${rc ? ` style="background:${rc[0]};border-color:${rc[1]}"` : ''}>
+  return `<section class="racha ${lv.cls}"${rc ? ` style="background:color-mix(in srgb,${rc[0]} var(--op-racha,100%),transparent);border-color:${rc[1]}"` : ''}>
     <div class="rfire"><span class="rglow" style="background:${lv.color}"></span>${burst ? `<span class="rring" style="border-color:${lv.color}"></span>` : ''}${embers}
       <div class="${burst ? 'burst' : ''}">${icon.flame(lv.color, lv.size).replace('class="flame"', `class="flame" style="transform-origin:50% 90%;animation:flick ${lv.speed} ease-in-out infinite"`)}</div></div>
     <div class="rtx"><p class="lbl" style="color:${lv.text}">Tu racha</p>
@@ -358,6 +491,12 @@ function heroItemCard(x, now) {
   } else if (x.type === 'claim') {
     when = 'Espera tu confirmación';
     btn = `<div class="grid2"><button class="hbtn h-arr" data-act="confirmArr" data-a="${x.att.id}" data-m="claimed">Sí, a las ${R.limaTime(x.att.claimed_at)}</button><button class="hbtn h-ghost" data-act="confirmArr" data-a="${x.att.id}" data-m="now">Llegó ahora</button></div>`;
+  } else if (x.type === 'review') {
+    when = 'Revisa hasta ' + whenRel(x.due, now);
+    btn = `<div class="grid2"><button class="hb x-red" data-act="review" data-v="${x.video.id}" data-k="no" style="font-size:14px">Pedir cambios</button><button class="hb x-green" data-act="review" data-v="${x.video.id}" data-k="ok" style="font-size:14px">Aprobar</button></div>`;
+  } else if (x.type === 'fix') {
+    when = 'Corrige hasta ' + R.limaTime(x.due);
+    btn = `<button class="hb x-green" data-act="redeliver" data-v="${x.video.id}">${icon.check}Entregar corrección</button>`;
   } else if (x.type === 'endreq') {
     when = 'Espera tu confirmación';
     btn = `<button class="hbtn" data-act="confirmEnd" data-e="${ev.id}">${icon.check}Confirmar fin de la reunión</button>`;
@@ -408,7 +547,7 @@ function heroOf(items, now) {
     if (live && ['puntual', 'tarde', 'por_confirmar'].indexOf(s.k) !== -1) return { kind: 'in', event: e, s };
   }
   // 2. Confirmaciones que solo puede dar el administrador
-  for (const t of ['claim', 'endreq']) { const f = items.find((x) => x.type === t); if (f) return { kind: 'item', item: f }; }
+  for (const t of ['claim', 'endreq', 'review', 'fix']) { const f = items.find((x) => x.type === t); if (f) return { kind: 'item', item: f }; }
   // 3. Tomar lo del compañero (o entregar lo que ya tomaste)
   const take = items.find((x) => x.type === 'task' && (x.cm.claim || x.cm.claimed));
   if (take) return { kind: 'take', item: take };
@@ -440,7 +579,7 @@ function heroCard(h, now) {
   if (h.kind === 'take' || h.kind === 'task') {
     const x = h.item;
     const k = stageOf(x);
-    if (x.cm.claim) return card('h-calm', `Puedes tomarlo hasta ${R.limaTime(x.cm.limit)}`, k, x.title, `De ${first(st.member(x.video.owner))} · no llegó a tiempo`,
+    if (x.cm.claim) return card('h-calm', `Puedes tomarlo hasta ${R.limaTime(x.cm.limit)}`, k, x.title, x.kind === 'montaje' ? x.sub : `De ${first(st.member(x.video.owner))} · no llegó a tiempo`,
       `<button class="hb x-blue" data-act="claim" data-v="${x.video.id}" data-k="${x.kind}">${handIc}Tomar</button>`);
     if (x.cm.claimed) return card('h-calm', `Lo tomaste · hasta ${R.fmtWhen(x.cm.limit)}`, k, x.title, `De ${first(st.member(x.video.owner))}`,
       `<div class="claimrow">${av(me, 22)}Entrégalo antes de ${R.fmtWhen(x.cm.limit)}</div><button class="hb x-green" data-act="quick" data-v="${x.video.id}" data-k="${x.kind}">${icon.check}Hecho</button>`);
@@ -459,7 +598,7 @@ function heroCard(h, now) {
   }
   if (h.kind === 'in') {
     const a = st.attOf(e.id, me.id);
-    const t = a && a.arrived_at ? `Llegaste ${R.limaTime(a.arrived_at)} · ${h.s.k === 'puntual' ? 'puntual' : 'con tardanza'}` : `Marcaste ${R.limaTime(a.claimed_at)} · ${first(st.admin() || { name: 'el administrador' })} la confirma`;
+    const t = a && a.arrived_at ? `Llegaste ${R.limaTime(a.arrived_at)} · ${h.s.k === 'puntual' ? 'puntual' : 'con tardanza'}` : `Marcaste ${R.limaTime(a.claimed_at)} · ${first(st.admin() || { name: 'el líder' })} la confirma`;
     return card('h-ok', e.kind === 'rodaje' ? 'Rodaje en curso' : 'Reunión en curso', ic, T.t, '', `<div class="okrow">${icon.check}${t}</div>${go(true)}`);
   }
   if (h.kind === 'conf') {
@@ -493,12 +632,18 @@ function teamMsgs(now) {
   const me = S.me, c = st.ctx();
   return (c.claims || []).filter((cl) => cl.member_id !== me.id && (cl.status || 'activa') === 'activa').map((cl) => {
     const v = c.videos.find((x) => x.id === cl.video_id);
-    if (!v || v.owner !== me.id) return null;
+    if (!v || v.owner !== me.id || cl.kind === 'montaje') return null;
     if (R.claimOf(v, cl.kind, c) !== cl) return null;
     if (S.data.tasks.find((t) => t.video_id === v.id && t.kind === cl.kind)) return null;
     const what = cl.kind === 'montaje' ? 'el montaje' : 'el ' + cl.kind;
     return `Equipo que cumple: ${first(st.member(cl.member_id))} hará ${what} del video ${v.num} y ${cl.kind === 'montaje' ? 'la entrega' : 'el rodaje'} sigue en pie.`;
   }).filter(Boolean);
+}
+// 1.4: el video que pasó al administrador (tomado o automático), mientras no se entregue.
+function handoffMsgs(now) {
+  const me = S.me, c = st.ctx();
+  const A = first(st.admin() || { name: 'el líder' });
+  return c.videos.filter((v) => v.owner === me.id).map((v) => { const s = R.videoState(v, c, now); return s.post.handoff && !s.ac ? `Equipo que cumple: ${A} editará el video ${v.num} y el cliente lo recibe a tiempo.` : null; }).filter(Boolean);
 }
 const msgCard = (t) => `<section class="msgcard"><span class="tic" style="background:#1D2638">${icon.bell('#8AB4FF', 18)}</span><p>${esc(t)}</p></section>`;
 
@@ -510,11 +655,12 @@ function afterMark(v, k, cm, before) {
   const now = new Date();
   const after = R.streak(S.me.id, c, now).pts;
   let rot = 0; try { rot = Number(localStorage.getItem('ra-rot') || 0); localStorage.setItem('ra-rot', String(rot + 1)); } catch (e) { /* */ }
-  if (cm && cm.claimed && k === 'montaje') {
-    const T = ['¡Montaje rescatado!', 'Gracias a ti, la entrega sigue en pie', `Salvaste el montaje del video ${v.num}`];
+  if (k === 'acabado' && cm && cm.take && v.owner !== S.me.id) {
+    const T = ['¡Video rescatado!', 'Gracias a ti, el cliente lo recibe a tiempo', `Salvaste el video ${v.num}`];
     ui.rpop = { title: T[rot % 3], from: before, to: after, chips: ['+' + R.PTS.rescue + ' rescate'] };
     render(); return;
   }
+  if (k === 'montaje' && cm && cm.take) return;
   if (k === 'montaje' || k === 'acabado') { postDone(v, c, now, before, after, rot); return; }
   if (cm && cm.claimed && PRE[k]) {
     const T = ['¡Entregable rescatado!', 'Gracias a ti, el rodaje sigue en pie', `Salvaste el ${k} del video ${v.num}`];
@@ -543,7 +689,9 @@ function postDone(v, c, now, before, after, rot) {
     const s = R.videoState(x, c, now);
     const o = st.member(x.owner);
     const cl = R.claimOf(x, 'montaje', c);
-    const mineM = (x.owner === me.id && !s.montajeMissed) || (cl && cl.member_id === me.id);
+    // 1.4: los videos con apoyo cuentan cuando están entregados (final de apoyo hecho o entrega aprobada).
+    if (o.apoyo && x.owner === me.id) { if (s.post.handoff) continue; if (s.delivered) own++; else pend++; continue; }
+    const mineM = (x.owner === me.id && !s.montajeMissed) || (cl && cl.member_id === me.id) || (me.role === 'admin' && s.post.handoff);
     const mineF = (x.owner === me.id && !o.apoyo) || (me.role === 'admin' && x.owner !== me.id && (o.apoyo || s.reassigned));
     if (mineM) { if (s.mo) { if (x.owner === me.id) own++; } else pend++; }
     if (mineF) { if (s.ac) { if (x.owner === me.id || s.reassigned) own++; else apoyo++; } else pend++; }
@@ -596,7 +744,7 @@ function vHome() {
   const sk = R.streak(me.id, c, now);
   let html = `<div class="row"><div style="flex:1;min-width:0"><p class="sub" style="margin:0">Hola,</p><h1 style="font-size:28px">${first(me)}</h1></div>${av(me, 44)}</div>`;
   html += rachaCard(sk);
-  if (!p) return html + `<div class="card">${banner('wait', 'Todavía no hay proyectos', S.me.role === 'admin' ? 'Crea el primero tocando el nombre del proyecto arriba.' : 'Cuando el administrador cree uno, aparecerá aquí.')}${isAdminBtn('<a class="btn b-amber" href="#/proyecto/nuevo">Crear proyecto</a>')}</div>`;
+  if (!p) return html + `<div class="card">${banner('wait', 'Todavía no hay proyectos', S.me.role === 'admin' ? 'Crea el primero tocando el nombre del proyecto arriba.' : `Cuando ${LN()} cree uno, aparecerá aquí.`)}${isAdminBtn('<a class="btn b-amber" href="#/proyecto/nuevo">Crear proyecto</a>')}</div>`;
   let items = pending(now);
   // Los videos de un rodaje aún no habilitado se representan con el rodaje mismo.
   items = items.filter((x) => !(x.type === 'task' && x.kind === 'rodaje' && !x.cm.ok));
@@ -610,8 +758,8 @@ function vHome() {
   if (ui.day == null || ui.dayFor !== today) { ui.day = Math.max(0, days.findIndex((d) => d.length)); ui.dayFor = today; }
   const sel = Math.min(ui.day, nDays - 1);
   const pendCount = items.length;
-  html += `<div class="between" style="margin-top:2px;align-items:baseline"><p class="num" style="margin:0;font-size:20px;font-weight:700">Te toca</p><span class="muted">${pendCount ? pendCount + (pendCount === 1 ? ' pendiente' : ' pendientes') : 'Todo al día'}</span></div>`;
-  html += teamMsgs(now).map(msgCard).join('');
+  html += `<div class="between" style="margin-top:2px;align-items:baseline"><p class="num" style="margin:0;font-size:20px;font-weight:700">Tus actividades</p><span class="muted">${pendCount ? pendCount + (pendCount === 1 ? ' pendiente' : ' pendientes') : 'Todo al día'}</span></div>`;
+  html += teamMsgs(now).concat(handoffMsgs(now)).map(msgCard).join('');
   if (hero) html += heroCard(hero, now);
   const sq = Array.from({ length: nDays }, (_, i) => {
     const d = R.addDays(today, i);
@@ -621,16 +769,17 @@ function vHome() {
     return `<button role="tab" aria-selected="${i === sel}" class="dsq ${b === null ? 'd-none' : 'd-u' + b} ${i === sel ? 'on' : ''}" data-act="day" data-i="${i}">
       <span class="dw">${i === 0 ? 'HOY' : i === 5 ? 'LUEGO' : DOW[dt.getUTCDay()]}</span><b class="num">${i === 5 ? '+' : Number(d.slice(8, 10))}</b><span class="dn">${list.length ? list.length + (list.length === 1 ? ' tarea' : ' tareas') : '—'}</span></button>`;
   }).join('');
-  html += `<div style="display:flex;flex-direction:column;gap:8px"><div class="dsqs" role="tablist" aria-label="Día">${sq}</div>
-    <div class="legend"><span><i class="lg u0"></i>Urgente</span><span><i class="lg u1"></i>Próximo</span><span><i class="lg u2"></i>Con tiempo</span></div></div>`;
+  // 1.5 (Inicio P): los días y las actividades del día van juntos, sobre un mismo fondo.
+  html += `<section class="actbox"><div class="dsqs" role="tablist" aria-label="Día">${sq}</div>
+    <div class="legend"><span><i class="lg u0"></i>Urgente</span><span><i class="lg u1"></i>Próximo</span><span><i class="lg u2"></i>Con tiempo</span></div>`;
   const list = days[sel];
   const d0 = R.addDays(today, sel);
   const dt0 = new Date(d0 + 'T12:00:00-05:00');
   const LONG = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
   const bsel = list.length ? Math.min(...list.map((x) => x.band)) : null;
   const dayTitle = sel === 5 ? 'Más adelante' : (sel === 0 ? 'Hoy, ' : '') + LONG[dt0.getUTCDay()] + ' ' + Number(d0.slice(8, 10));
-  html += `<section class="tlist"><p class="lbl ${bsel === null ? '' : 'c-u' + bsel}" style="margin:10px 0 4px;font-size:10px">${dayTitle}${bsel === null ? '' : ' · ' + ['urgente', 'próximo', 'con tiempo'][bsel]}</p>
-    ${list.map((x, i) => pendItem(x, now, i)).join('') || '<p class="tempty">Nada para este día.</p>'}</section>`;
+  html += `<div class="tlist flat"><p class="lbl ${bsel === null ? '' : 'c-u' + bsel}" style="margin:4px 0 4px;font-size:10px">${dayTitle}${bsel === null ? '' : ' · ' + ['urgente', 'próximo', 'con tiempo'][bsel]}</p>
+    ${list.map((x, i) => pendItem(x, now, i)).join('') || '<p class="tempty">Nada para este día.</p>'}</div></section>`;
   // Meta del equipo
   const st8 = c.videos.map((v) => R.videoState(v, c, now));
   const cnt = (f) => st8.filter(f).length;
@@ -651,6 +800,7 @@ function vHome() {
   ui.walletFrom = prev; ui.wallet = total;
   html += `<section class="wallet"><div class="between" style="align-items:center"><span class="lbl" style="color:var(--w-title,var(--mint))">En la billetera</span><span class="muted" style="color:var(--w-sub)">${icon.lock} Solo tú</span></div>
     <b class="num wmoney" data-wallet="${total.toFixed(2)}" data-from="${prev.toFixed(2)}">${R.money(prev)}</b>
+    ${(() => { const w = (R.payouts(p, c, now).espera || {})[me.id] || 0; return w > 0.004 ? `<p class="wwait">${icon.clock}+ ${R.money(w)} en espera · se suma al entregarse el video</p>` : ''; })()}
     <p class="small" style="margin:0;color:var(--w-sub)">${esc(p.client)} · ${esc(p.name)} · se cobra al cerrar el proyecto</p></section>`;
   return html;
 }
@@ -691,7 +841,7 @@ function vrow(v, c, now, stage) {
     const mDue = s.d.montajeDue || s.d.finalDue;
     steps = [['M', 'Montaje', s.mo ? (s.montajeLate ? 'late' : 'ok') : s.montajeMissed ? 'urg' : s.r ? 'p' : 'lock'], ['F', 'Video final', s.ac ? (s.finalLate ? 'late' : 'ok') : s.mo ? 'p' : 'lock']];
     if (s.ac) { due = 'Entregado ' + R.fmtWhen(s.ac.done_at) + (s.finalLate ? ' · tarde' : ' · a tiempo'); dueC = s.finalLate ? 'u1' : 'okc'; }
-    else if (s.montajeMissed && !s.mo) { due = 'Montaje no llegó · pasó a ' + first(st.admin() || { name: 'el administrador' }) + ' (5.7)'; dueC = 'u0'; }
+    else if (s.montajeMissed && !s.mo) { due = 'Montaje no llegó · pasó a ' + first(st.admin() || { name: 'el líder' }) + ' (5.7)'; dueC = 'u0'; }
     else if (!s.r) { due = 'Final ' + R.fmtWhen(s.d.finalDue) + ' · después del rodaje'; dueC = ''; }
     else if (!s.mo) { due = 'Montaje: ' + R.fmtWhen(mDue) + ' · ' + countdown(mDue, now); dueC = urg(mDue); }
     else { due = 'Final: ' + R.fmtWhen(s.d.finalDue) + ' · ' + countdown(s.d.finalDue, now) + (s.apoyo || o.apoyo ? ' · apoyo' : ''); dueC = urg(s.d.finalDue); }
@@ -798,7 +948,7 @@ function vEtapas() {
   const open = p.status === 'abierto';
   const left = p.videos_total - c.videos.length;
   const items = pending(now);
-  const nOf = (k) => items.filter((x) => (x.type === 'task' && stageOf(x) === (k === 'rod' ? 'prod' : k) && (x.cm.ok || x.cm.claim)) || (x.event && x.event.kind === (k === 'pre' ? 'reunion' : k === 'rod' ? 'rodaje' : '-'))).length;
+  const nOf = (k) => items.filter((x) => (x.type === 'task' && stageOf(x) === (k === 'rod' ? 'prod' : k) && (x.cm.ok || x.cm.claim)) || (k === 'post' && (x.type === 'review' || x.type === 'fix')) || (x.event && x.event.kind === (k === 'pre' ? 'reunion' : k === 'rod' ? 'rodaje' : '-'))).length;
   const vOf = (ids) => ids.map((id) => c.videos.find((v) => v.id === id)).filter(Boolean).sort((a, b) => a.num - b.num);
   let html = `<div class="between" style="align-items:center"><h1 style="font-size:28px">Etapas</h1>${open && left > 0 && isPartner(S.me) ? `<a class="btn sm x-amber" href="#/semana" style="border-radius:13px">${icon.plus}Programar semana</a>` : ''}</div>`;
   html += `<div class="stiles" role="tablist" aria-label="Etapa">${['pre', 'rod', 'post'].map((k) => {
@@ -849,42 +999,26 @@ function vEtapas() {
 // Posproducción (O): montaje y video final por video, con el apoyo y el "Tomar" del 5.7.
 function vPost(c, now) {
   const me = S.me;
-  const shot = c.videos.filter((v) => R.videoState(v, c, now).r);
+  // 1.5: cada uno ve sus videos, más los que le toca atender (apoyo, revisar, tomar o los que pasaron a él).
+  const mineOrAct = (v) => {
+    const s0 = R.videoState(v, c, now);
+    if (v.owner === me.id || s0.inCharge === me.id) return true;
+    if (me.role === 'admin' && (s0.post.mode === 'apoyo' || s0.post.mode === 'colab' || s0.overdue)) return true;
+    const a = R.canMark(v, 'montaje', me, c, now), b = R.canMark(v, 'acabado', me, c, now);
+    return !!(a.ok || a.claim || b.ok || b.toReview);
+  };
+  const shot = c.videos.filter((v) => R.videoState(v, c, now).r && mineOrAct(v));
   const last = c.events.filter((e) => e.kind === 'rodaje' && active(e) && new Date(e.starts_at) <= now).sort(byStart).pop();
   const weekIds = last ? last.video_ids : [];
-  const weekV = c.videos.filter((v) => weekIds.indexOf(v.id) !== -1).sort((a, b) => a.num - b.num);
-  const older = shot.filter((v) => weekIds.indexOf(v.id) === -1 && !R.videoState(v, c, now).ac).sort((a, b) => a.num - b.num);
-  const delivered = shot.filter((v) => weekIds.indexOf(v.id) === -1 && R.videoState(v, c, now).ac).sort((a, b) => b.num - a.num);
-  const ent = weekV.filter((v) => R.videoState(v, c, now).ac).length;
+  const weekV = c.videos.filter((v) => weekIds.indexOf(v.id) !== -1 && mineOrAct(v)).sort((a, b) => a.num - b.num);
+  const older = shot.filter((v) => weekIds.indexOf(v.id) === -1 && !R.videoState(v, c, now).delivered).sort((a, b) => a.num - b.num);
+  const delivered = shot.filter((v) => weekIds.indexOf(v.id) === -1 && R.videoState(v, c, now).delivered).sort((a, b) => b.num - a.num);
+  const ent = weekV.filter((v) => R.videoState(v, c, now).delivered).length;
   let html = '';
   if (weekV.length) html += `<section class="card postweek" style="gap:10px"><div class="between"><b class="num" style="font-size:18px">Esta semana</b><b class="num" style="font-size:15px">${ent}<span class="muted" style="font-size:15px"> / ${weekV.length} entregados</span></b></div>
     <div class="ebar" style="background:color-mix(in srgb,var(--st-post) 18%,transparent)"><i style="width:${Math.round(ent / weekV.length * 100)}%;background:#FF8A65"></i></div><span class="muted">Rodaje del ${R.fmtDay(R.limaDate(last.starts_at))} · ${evTitle(last, c).vt}</span></section>`;
   else html += `<div class="card"><p class="empty">Todavía no hay videos grabados.</p></div>`;
-  html += teamMsgs(now).filter((t) => /montaje/.test(t)).map(msgCard).join('');
-  const card = (v) => {
-    const s = R.videoState(v, c, now);
-    const o = st.member(v.owner);
-    const col = COLOR[o.role] || ['#22242C', '#C9C9D1'];
-    const tile = (k) => {
-      const t = s[KEY[k]];
-      const name = k === 'montaje' ? 'Montaje' : 'Video final';
-      const ic = k === 'montaje' ? icon.cut('currentColor', 18) : icon.star('currentColor', 18);
-      if (t) { const mine = t.done_by === me.id; return `<div class="tile ${mine ? 'mine' : 'other'}"><span class="tt">${ic}<b>${name}</b><span class="ck">${icon.tick}</span></span><small>Hecho ${R.fmtWhen(t.done_at)}</small></div>`; }
-      if (!s.r) return `<div class="tile lock"><span class="tt">${ic}<b>${name}</b>${icon.lock}</span><small>Después del rodaje</small></div>`;
-      if (k === 'acabado' && !s.mo) return `<div class="tile lock"><span class="tt">${ic}<b>${name}</b>${icon.lock}</span><small>Después del montaje</small></div>`;
-      const cm = R.canMark(v, k, me, c, now);
-      const due = k === 'montaje' ? (s.d.montajeDue || s.d.finalDue) : s.d.finalDue;
-      if (cm.claim) return `<button class="tile take" data-act="claim" data-v="${v.id}" data-k="${k}"><span class="tt">${ic}<b>${name}</b></span><small>Tomar</small></button>`;
-      if (cm.ok) return `<button class="tile todo post" data-act="quick" data-v="${v.id}" data-k="${k}"><span class="tt">${ic}<b>${name}</b></span><small>${cm.claimed ? 'Tomado · hasta ' + R.fmtWhen(cm.limit) : 'Hasta ' + R.fmtWhen(due)}</small></button>`;
-      if (k === 'montaje' && s.montajeMissed) { const cl = R.claimOf(v, 'montaje', c); return `<div class="tile ${cl ? 'by' : 'late'}"><span class="tt">${ic}<b>${name}</b></span><small>${cl ? 'Lo hará ' + first(st.member(cl.member_id)) : 'Venció ' + R.fmtWhen(due)}</small></div>`; }
-      const who = k === 'acabado' && o.apoyo ? st.admin() : o;
-      return `<div class="tile wait"><span class="tt">${ic}<b>${name}</b></span><small>${first(who || o)} · hasta ${R.fmtWhen(due)}</small></div>`;
-    };
-    const passed = s.montajeMissed || s.reassigned;
-    const apoyo = o.apoyo ? `<p class="muted" style="margin:-4px 0 0;font-weight:600;${passed ? 'color:var(--b-fg)' : ''}">${passed ? 'Pasó a ' + first(st.admin() || { name: 'el administrador' }) + ' · montaje y final' : me.id === v.owner ? 'Apoyo · ' + first(st.admin() || { name: 'el administrador' }) + ' hace tu final; el pago es tuyo' : 'Apoyo · el pago del final es de ' + first(o)}</p>` : '';
-    return `<section class="vcard13${s.ac ? ' good' : s.montajeMissed && !s.mo ? ' miss' : ''}"><div class="vhead"><a class="vnum" href="#/v/${v.id}" style="text-decoration:none;color:inherit"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span class="vins" style="background:${col[0]};color:${col[1]}">${esc(ini(o.name)).charAt(0)}</span></a><span class="ttl"><p>${v.title ? esc(v.title) : 'Video ' + v.num}</p><span style="color:${s.ac ? 'var(--mint)' : '#B79C8F'}">Publica ${R.fmtDay(v.publish_date)}</span></span>${s.ac ? `<span class="chip13 ok">${icon.star('currentColor', 12)}Entregado</span>` : ''}</div>
-      <div class="tiles">${tile('montaje')}${tile('acabado')}</div>${apoyo}</section>`;
-  };
+  const card = (v) => postCard(v, c, now);
   html += weekV.map(card).join('') + older.map(card).join('');
   if (delivered.length) {
     html += `<button class="pastbtn" data-act="pastToggle" data-k="post">${icon.star('#FF8A65', 18)}Entregados al cliente<span class="cnt">${delivered.length}</span>${icon.chev}</button>`;
@@ -952,7 +1086,7 @@ function vReparto(rodId) {
   }).join('');
   return `${backTo('#/videos', 'Etapas')}
   <h1>Repartir videos</h1><p class="sub">Rodaje del ${R.fmtWhen(rod.starts_at)}${mt ? ' · reunión del ' + R.fmtWhen(mt.starts_at) : ''}. Quedan ${left} videos por repartir (por defecto 2 y 2).</p>
-  ${h ? `<div class="banner bn-fm"><div><b>Guillermo trabaja por ${esc(st.member(h.hired_by).name)} en esta reunión</b><p>Asigna sus videos y luego marca sus guiones y storyboards "con Guillermo". Recibes el 80 % de esa preproducción.</p></div></div>` : ''}
+  ${h ? `<div class="banner bn-fm"><div><b>Guillermo trabaja por ${esc(st.member(h.hired_by).name)} en esta reunión</b><p>Asigna sus videos y luego marca sus guiones y storyboards "con Guillermo". Recibes ${gp(h) < 1 ? 'el ' + gTxt(h) : 'el total'} de esa preproducción.</p></div></div>` : ''}
   <form data-form="reparto" class="card"><input type="hidden" name="r" value="${rod.id}"><input type="hidden" name="n" value="${n}">
     <p class="lbl">Videos · fecha de publicación y dueño</p>
     ${rows || '<p class="empty">Ya se repartieron todos los videos.</p>'}
@@ -984,7 +1118,8 @@ function vVideo(id) {
     const cls = t ? 'tk-ok' : missed ? 'tk-urg' : 'tk-p';
     return `<div class="tk${i === R.KINDS.length - 1 ? ' last' : ''}"><span class="tkc ${cls}">${stageIc(STAGE[k], 16).replace(/var\(--c-[a-z]+\)/, t ? 'var(--mint)' : missed ? 'var(--u0)' : 'var(--tx4)')}</span>${i < R.KINDS.length - 1 ? `<i class="${t ? 'on' : ''}"></i>` : ''}</div>`;
   }).join('');
-  const rows = R.KINDS.map((k) => {
+  const helped = !!(o.apoyo && vs.d.apoyoDue && vs.r) || !!(vs.post && vs.post.phase === 'colab') || (vs.overdue && !!vs.r);
+  const rows = R.KINDS.filter((k) => !(helped && (k === 'montaje' || k === 'acabado'))).map((k) => {
     const t = vs[KEY[k]];
     const due = PRE[k] ? vs.d.preDue : k === 'montaje' ? (vs.d.montajeDue || vs.d.finalDue) : k === 'acabado' ? vs.d.finalDue : (ev ? new Date(ev.starts_at) : null);
     let right = '', sub = '', subC = '', dim = false;
@@ -1019,11 +1154,463 @@ function vVideo(id) {
     <div style="flex:1;min-width:0"><b class="num" style="font-size:21px;line-height:1.2;display:block">${v.title ? esc(v.title) : 'Video ' + v.num}</b><p class="sub" style="margin:4px 0 0">De ${esc(o.name)} · publica ${R.fmtDay(v.publish_date)}</p>
     ${canTitle ? `<button class="linkbtn" data-act="title" data-v="${v.id}" style="margin-top:4px">${v.title ? 'Cambiar tema' : 'Ponerle tema'}</button>` : ''}</div></div>
     <div class="track" aria-label="Avance del video">${track}</div></section>
-  ${vs.montajeMissed && !vs.mo ? banner('bad', 'El montaje no llegó a tiempo', 'Pasa al administrador (5.7): lo toma y hace el montaje y el final.') : ''}
+  ${helped ? `<p class="lbl" style="margin:4px 4px -4px">Posproducción · ${R.money(postValue(v))}</p>${postCard(v, c, now, true)}` : ''}
   <section class="tlist" style="padding:4px 14px">${rows}</section>
   <p class="muted" style="margin:-6px 4px 0;line-height:1.45">Se marca en orden: guion y storyboard, luego el rodaje (el día del rodaje, con tu llegada confirmada), el montaje y el video final.</p>
   ${ev ? `<a class="btn b-ghost" href="#/e/${ev.id}">${icon.cam('var(--c-prod)', 16)}Ver rodaje · ${R.fmtWhen(ev.starts_at)}</a>` : ''}
+  ${open && me.role === 'admin' && !vs.delivered && !vs.overdue ? `<button class="btn b-ghost" data-act="reprog" data-v="${v.id}">${icon.clock.replace('width="12" height="12"', 'width="16" height="16"')}Reprogramar entrega</button>` : ''}
+  ${(v.reprog || []).length ? `<section class="card" style="padding:12px 16px"><p class="lbl">Entregas reprogramadas</p><div class="list">${reprogLines(v)}</div></section>` : ''}
   ${changeOwner}`;
+}
+
+// ==================================================================
+// 1.4 · Entregas al límite: el video de quien recibe apoyo, sus plazos y la revisión
+// ==================================================================
+const DOWN = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
+const dowOf = (iso) => DOWN[new Date(R.limaDate(iso) + 'T12:00:00-05:00').getUTCDay()];
+// "hoy 08:00", "mañana 08:00" o "vie 6, 08:00"
+function whenRel(d, now = new Date()) {
+  const k = dayDiff(R.limaDate(now), R.limaDate(d));
+  const t = R.limaTime(d);
+  if (k === 0) return 'hoy ' + t;
+  if (k === 1) return 'mañana ' + t;
+  return dowOf(d) + ' ' + Number(R.limaDate(d).slice(8, 10)) + ', ' + t;
+}
+const helpedOf = (v, s) => !!(s.d.apoyoDue && s.post.mode === 'apoyo');
+const postValue = (v) => { const r = R.rates(projOf(v.project_id)); return r.montaje + r.acabado; };
+// Barra de plazos: verde apoyo · ámbar por su cuenta · rojo en riesgo · azul pasa al administrador · estrella publica.
+function postTimeline(v, s, now) {
+  if (s.post.pair) return pairTimeline(v, s, now);
+  const d = s.d;
+  const T0 = d.apoyoDue.getTime() - 4 * 3600000;
+  const T1 = d.finalDue.getTime() + 3 * 3600000;
+  const pos = (t) => Math.max(0, Math.min(100, (new Date(t).getTime() - T0) / (T1 - T0) * 100));
+  const ph = s.post.phase;
+  const seg = [[T0, d.apoyoDue, '#2F9E6E', 'abierto'], [d.apoyoDue, d.selfDue, '#D98A00', 'solo'], [d.selfDue, d.autoDue, '#E5484D', 'riesgo'], [d.autoDue, d.finalDue, '#3D6BB8', 'pasado'], [d.finalDue, T1, '#FFB547', 'pub']];
+  const curSeg = ph === 'revision' || ph === 'cambios' ? (now <= d.selfDue ? 'solo' : now <= d.autoDue ? 'riesgo' : 'pasado') : ph;
+  const marks = [[d.apoyoDue, dowOf(d.apoyoDue) + ' ' + R.limaTime(d.apoyoDue), '#9FD9BF'], [d.selfDue, R.limaTime(d.selfDue), '#FFC978'], [d.autoDue, R.limaTime(d.autoDue), '#FF9B8F']]
+    .concat(ph === 'cambios' ? [[d.fixDue, R.limaTime(d.fixDue), '#FFC2BA']] : []).concat([[d.finalDue, '23:59', '#A9C7FF']]);
+  const nx = pos(now);
+  const nowC = { abierto: '#6EE7B7', solo: '#FFC978', riesgo: '#FF9B8F' }[curSeg] || '#A9C7FF';
+  return `<div class="ptl" aria-hidden="true"><div class="ptl-bar">${seg.map(([a, b, c, k]) => `<i style="width:${(pos(b) - pos(a)).toFixed(2)}%;background:${c};opacity:${k === curSeg ? 1 : 0.35}"></i>`).join('')}</div>
+    ${marks.map(([t, l, c], i) => { const x = pos(t); const close = i > 0 && x - pos(marks[i - 1][0]) < 13; marks[i].low = close && !marks[i - 1].low; return `<span class="ptl-m${marks[i].low ? ' low' : ''}" style="left:${x.toFixed(2)}%"></span><span class="ptl-l${marks[i].low ? ' low' : ''}" style="left:${x.toFixed(2)}%;color:${c}">${l}</span>`; }).join('')}
+    <span class="ptl-star" style="left:${(pos(d.finalDue) + 100) / 2}%">${icon.star('#FFD08A', 13)}</span>
+    <span class="ptl-now" style="left:${nx.toFixed(2)}%"><i style="box-shadow:0 0 0 2px ${nowC}"></i></span></div>`;
+}
+// 1.5 · Barra de plazos pareja: verde montaje · ámbar video final · rojo se puede tomar · estrella publica.
+function pairTimeline(v, s, now) {
+  const d = s.d;
+  const T0 = d.montajeDue.getTime() - 6 * 3600000;
+  const T1 = d.finalDue.getTime() + 3 * 3600000;
+  const pos = (t) => Math.max(0, Math.min(100, (new Date(t).getTime() - T0) / (T1 - T0) * 100));
+  const ph = s.post.phase;
+  const seg = [[T0, d.montajeDue, '#2F9E6E', 'p_mon'], [d.montajeDue, d.ownDue, '#D98A00', 'p_fin'], [d.ownDue, d.finalDue, '#E5484D', 'p_tomar'], [d.finalDue, T1, '#FFB547', 'pub']];
+  const cur = ph === 'p_mon' || ph === 'p_fin' || ph === 'p_tomar' ? ph : now <= d.montajeDue ? 'p_mon' : now <= d.ownDue ? 'p_fin' : now <= d.finalDue ? 'p_tomar' : 'pub';
+  const marks = [[d.montajeDue, dowOf(d.montajeDue) + ' ' + R.limaTime(d.montajeDue), '#9FD9BF'], [d.ownDue, R.limaTime(d.ownDue), '#FFC978']]
+    .concat(ph === 'revision' && s.ac && !s.ac.review_round ? [[d.revDue, R.limaTime(d.revDue), '#A9C7FF']] : []).concat(ph === 'cambios' ? [[d.fixDue, R.limaTime(d.fixDue), '#FFC2BA']] : []).concat([[d.finalDue, '23:59', '#FF9B8F']]);
+  const nowC = { p_mon: '#6EE7B7', p_fin: '#FFC978', p_tomar: '#FF9B8F' }[cur] || '#A9C7FF';
+  return `<div class="ptl" aria-hidden="true"><div class="ptl-bar">${seg.map(([a, b, c2, k]) => `<i style="width:${(pos(b) - pos(a)).toFixed(2)}%;background:${c2};opacity:${k === cur ? 1 : 0.35}"></i>`).join('')}</div>
+    ${marks.map(([tt, l, c2], i) => { const x = pos(tt); const close = i > 0 && x - pos(marks[i - 1][0]) < 13; marks[i].low = close && !marks[i - 1].low; return `<span class="ptl-m${marks[i].low ? ' low' : ''}" style="left:${x.toFixed(2)}%"></span><span class="ptl-l${marks[i].low ? ' low' : ''}" style="left:${x.toFixed(2)}%;color:${c2}">${l}</span>`; }).join('')}
+    <span class="ptl-star" style="left:${(pos(d.finalDue) + 100) / 2}%">${icon.star('#FFD08A', 13)}</span>
+    <span class="ptl-now" style="left:${pos(now).toFixed(2)}%"><i style="box-shadow:0 0 0 2px ${nowC}"></i></span></div>`;
+}
+const pmsg = (tone, text, extra = '') => `<div class="pmsg pm-${tone}"><span class="pdot"></span><p>${text}</p>${extra}</div>`;
+const undoLink = (act, attrs, label = 'Deshacer') => `<button class="linkbtn undo13" data-act="${act}" ${attrs}>${label}</button>`;
+function ptile(k, cls, sub, attrs = '', extra = '') {
+  const ic = k === 'montaje' ? icon.cut('currentColor', 18) : icon.star('currentColor', 18);
+  const name = k === 'montaje' ? 'Montaje' : 'Video final';
+  const ck = cls === 'mine' || cls === 'other' || cls === 'pend' || extra === 'ck' ? `<span class="ck">${icon.tick}</span>` : '';
+  const lk = cls === 'lock' || extra === 'lock' ? icon.lock : '';
+  const tag = attrs ? 'button' : 'div';
+  return `<${tag} class="tile ${cls}"${attrs ? ' ' + attrs : ''}><span class="tt">${ic}<b>${name}</b>${ck}${lk}</span><small>${sub}</small></${tag}>`;
+}
+// Tarjeta de posproducción de un video (Etapas → Posproducción y detalle del video).
+function postCard(v, c, now, inDetail) {
+  const me = S.me;
+  const s = R.videoState(v, c, now);
+  const o = st.member(v.owner);
+  const col = COLOR[o.role] || ['#22242C', '#C9C9D1'];
+  const A = first(st.admin() || { name: 'el líder' });
+  const O = first(o);
+  const isOwner = v.owner === me.id;
+  const isAdm = me.role === 'admin';
+  const P = s.post;
+  const val = postValue(v);
+  const t = (x) => R.limaDate(x) === R.limaDate(now) ? R.limaTime(x) : R.fmtWhen(x);
+  let tiles = '', msg = '', extra = '', tone = '', wait = false, timeline = false, after = '';
+  const myUndo = (task) => task && task.done_by === me.id && R.canUndo(task, me, c, now) && (!isAdm || R.within(task.done_at, now)) ? undoLink('undo', `data-id="${task.id}"`) : '';
+  if (P && P.phase === 'colab') {
+    // 1.4: lo edita un colaborador externo; los socios revisan desde el encargo.
+    const j = P.job; const it = (S.data.job_items || []).find((i) => i.job_id === j.id && i.video_id === v.id) || { stage: 'montaje' };
+    const E = first(st.member(j.member_id));
+    const ch = JOB_CH[it.stage] || JOB_CH.montaje;
+    const past = (k) => ['montaje', 'rev1', 'aj1', 'final', 'rev2', 'aj2', 'upload', 'done'].indexOf(it.stage) > ['montaje', 'rev1', 'aj1', 'final', 'rev2', 'aj2', 'upload', 'done'].indexOf(k);
+    tiles = (s.mo ? ptile('montaje', 'other', E + ' · ' + t(s.mo.done_at)) : ptile('montaje', 'wait', s.r ? 'Lo edita ' + E : 'Después del rodaje'))
+      + (s.ac ? ptile('acabado', 'other', E + ' · ' + t(s.ac.done_at)) : ptile('acabado', past('rev1') ? 'pend' : 'wait', ch[1]));
+    if (j.status === 'invitado') { tone = 'amber'; msg = `Encargado a ${E} · esperando que acepte las condiciones.`; }
+    else if (it.stage === 'rev1' || it.stage === 'rev2') { tone = 'amber'; msg = `${E} entregó ${it.stage === 'rev1' ? 'el montaje' : 'el video final'} · revísalo y envía tus observaciones.`; }
+    else if (it.stage !== 'done') { tone = 'blue'; msg = `Lo edita ${E} (colaborador) · ${ch[1].toLowerCase()}.`; }
+    after = isPartner(me) ? `<a class="hb ${it.stage === 'rev1' || it.stage === 'rev2' ? 'x-amber' : 'x-ghost'}" href="#/encargo/${j.id}" style="font-size:14px">${it.stage === 'rev1' || it.stage === 'rev2' ? 'Revisar' : 'Ver encargo'}${arrow}</a>` : '';
+  } else if (!s.r) {
+    tiles = ptile('montaje', 'lock', 'Después del rodaje') + ptile('acabado', 'lock', 'Después del rodaje');
+  } else if (P && P.pair) {
+    // 1.5 · Edición entre socios sin apoyo (y los videos del líder cuando hay alguno).
+    timeline = true;
+    const k = s.ac;
+    const X = P.handoffTo ? first(st.member(P.handoffTo)) : A;
+    const canTake = R.canTakeEdit(me, v);
+    if (P.phase === 'pasado') {
+      if (P.handoffTo === me.id) {
+        const cmM = R.canMark(v, 'montaje', me, c, now), cmA = R.canMark(v, 'acabado', me, c, now);
+        tiles = (s.mo ? ptile('montaje', 'mine', 'Hecho ' + t(s.mo.done_at)) : cmM.ok ? ptile('montaje', 'todo post', 'Tomado · hasta ' + whenRel(s.d.finalDue, now), `data-act="quick" data-v="${v.id}" data-k="montaje"`) : ptile('montaje', 'lock', 'Lo tomaste'))
+          + (s.ac ? ptile('acabado', 'mine', 'Hecho ' + t(s.ac.done_at)) : s.mo && cmA.ok ? ptile('acabado', 'todo post', 'Tocar al entregar · hasta ' + whenRel(s.d.finalDue, now), `data-act="quick" data-v="${v.id}" data-k="acabado"`) : ptile('acabado', 'lock', 'Después del montaje'));
+        if (!s.ac) { tone = 'blue'; msg = `Tomaste el video de ${O}: al entregar el video final cobras la edición completa (montaje y final).`; }
+        const cl = R.claimOf(v, 'montaje', c);
+        extra = myUndo(s.ac) || myUndo(s.mo) || (cl && cl.member_id === me.id && !s.mo && R.within(cl.created_at, now) ? undoLink('unclaim', `data-id="${cl.id}"`, 'Soltar') : '');
+      } else {
+        tiles = ptile('montaje', isOwner ? 'lock' : s.mo ? 'other' : 'by', s.mo ? X + ' · ' + t(s.mo.done_at) : 'Lo hará ' + X, '', isOwner && s.ownMo ? 'ck' : '') + ptile('acabado', isOwner ? 'lock' : s.ac ? 'other' : 'by', s.ac ? X + ' lo entregó' : 'Lo hará ' + X);
+        if (!s.ac || R.within(s.ac.done_at, now)) { tone = 'blue'; msg = `Equipo que cumple: ${X} editará este video y el cliente lo recibe a tiempo.`; }
+      }
+    } else if (P.phase === 'revision' || P.phase === 'cambios' || P.phase === 'aprobado') {
+      const rLim = k && k.review_round ? s.d.finalDue : s.d.revDue;
+      if (P.phase === 'revision') {
+        if (isOwner) {
+          tiles = ptile('montaje', 'mine', 'Listo') + ptile('acabado', 'pend', 'Por revisar');
+          wait = true; tone = 'blue'; msg = `Entregado · ${A} revisa tu video hasta las ${R.limaTime(rLim)}.`;
+          extra = R.canUndoRedeliver(k, me, c, now) ? undoLink('redeliverUndo', `data-v="${v.id}"`) : myUndo(k);
+        } else {
+          tiles = ptile('montaje', 'other', 'Listo') + ptile('acabado', 'pend', 'Por revisar');
+          const at = k.redelivered_at || k.done_at;
+          if (isAdm) extra = `<div class="revbox"><b class="num">Revisar entrega</b><span>${O} entregó ${k.redelivered_at ? 'la corrección' : 'el video'} a las ${R.limaTime(at)} · revisa hasta las ${R.limaTime(rLim)}. Si no revisas, se aprueba solo.</span>
+            <div class="grid2"><button class="hb x-red" data-act="review" data-v="${v.id}" data-k="no" style="font-size:14px">Pedir cambios</button><button class="hb x-green" data-act="review" data-v="${v.id}" data-k="ok" style="font-size:14px">Aprobar</button></div></div>`;
+        }
+      } else if (P.phase === 'cambios') {
+        if (isOwner) {
+          tiles = ptile('montaje', 'mine', 'Listo') + ptile('acabado', 'todo post', 'Entregar corrección · hasta ' + R.limaTime(s.d.fixDue), `data-act="redeliver" data-v="${v.id}"`);
+          wait = true; tone = 'red'; msg = `${A} pidió cambios: ${esc(k.review_note || '')} · corrige hasta las ${R.limaTime(s.d.fixDue)}.`;
+        } else {
+          tiles = ptile('montaje', 'other', 'Listo') + ptile('acabado', 'wait', 'Corrigiendo · hasta ' + R.limaTime(s.d.fixDue));
+          tone = 'amber'; msg = `Pediste cambios: ${esc(k.review_note || '')} · ${O} corrige hasta las ${R.limaTime(s.d.fixDue)}. Si no corrige, el video pasa a ti.`;
+          extra = R.canUndoReview(k, me, c, now) ? undoLink('reviewUndo', `data-v="${v.id}"`) : '';
+        }
+      } else {
+        tiles = ptile('montaje', isOwner ? 'mine' : 'other', 'Listo') + ptile('acabado', isOwner ? 'mine' : 'other', 'Aprobado');
+        if (!k.review_at || R.within(k.review_at, now)) { tone = 'green'; msg = !k.review_at ? `Se aprobó sola · ${isOwner ? 'recibiste ' + R.money(val) : 'a ' + O + ' le llegan ' + R.money(val)}.` : isOwner ? `${A} aprobó tu entrega · recibiste ${R.money(val)}.` : `Aprobaste la entrega · a ${O} le llegan ${R.money(val)}.`; }
+        extra = R.canUndoReview(k, me, c, now) ? undoLink('reviewUndo', `data-v="${v.id}"`) : '';
+      }
+    } else if (P.phase === 'entregado') {
+      tiles = ptile('montaje', isOwner ? 'mine' : 'other', 'Listo') + ptile('acabado', isOwner ? 'mine' : 'other', 'Entregado ' + t(k.done_at));
+      extra = myUndo(k);
+    } else {
+      // p_mon · p_fin · p_tomar: aún no entrega
+      const late = P.phase === 'p_tomar';
+      if (isOwner) {
+        tiles = (s.mo ? ptile('montaje', 'mine', 'Listo ' + t(s.mo.done_at)) : ptile('montaje', P.phase === 'p_mon' ? 'todo post' : 'todo post urg', P.phase === 'p_mon' ? 'Tocar al terminar · hasta ' + whenRel(s.d.montajeDue, now) : late ? 'Entregar igual · cuenta tarde' : 'Venció a las 12:00 · tocar al terminar', `data-act="quick" data-v="${v.id}" data-k="montaje"`))
+          + (s.mo ? ptile('acabado', late ? 'todo post urg' : 'todo post', late ? 'Entregar igual · cuenta tarde' : 'Tocar al entregar · hasta ' + whenRel(s.d.ownDue, now), `data-act="quick" data-v="${v.id}" data-k="acabado"`) : ptile('acabado', 'lock', 'Después del montaje'));
+        if (late) { tone = 'red'; msg = `No entregaste a las ${R.limaTime(s.d.ownDue)}. Mientras nadie lo tome, puedes entregar: cuenta como tarde (−3).`; }
+        else if (P.phase === 'p_fin' && !s.mo) { tone = 'red'; msg = `Venció tu montaje (${R.limaTime(s.d.montajeDue)}). Aún puedes entregar el video completo hasta las ${R.limaTime(s.d.ownDue)}.`; }
+        extra = myUndo(s.mo);
+      } else {
+        tiles = ptile('montaje', s.mo ? 'other' : late ? 'miss' : 'wait', s.mo ? O + ' · ' + t(s.mo.done_at) : late ? O + ' no entregó' : O + ' · hasta ' + R.limaTime(s.d.montajeDue))
+          + ptile('acabado', late ? 'miss' : 'wait', late ? O + ' no entregó' : O + ' · hasta ' + R.limaTime(s.d.ownDue));
+        if (late && canTake) { tone = 'red'; msg = `${O} no entregó a las ${R.limaTime(s.d.ownDue)}. Puedes tomar el video directo, sin pedir permiso; tienes hasta las 23:59.`; after = `<button class="hb x-blue" data-act="claim" data-v="${v.id}" data-k="montaje">${handIc}Tomar el video</button>`; }
+        else if (P.phase === 'p_fin' && !s.mo && canTake) { tone = 'amber'; msg = `${O} no marcó su montaje. Si a las ${R.limaTime(s.d.ownDue)} no entrega, podrás tomar el video.`; }
+      }
+    }
+  } else if (!helpedOf(v, s)) {
+    // Video sin apoyo (los tuyos): montaje y final del dueño, hasta el día antes a las 23:59.
+    const tl = (k) => {
+      const x = s[KEY[k]];
+      if (x) return ptile(k, x.done_by === me.id ? 'mine' : 'other', 'Hecho ' + t(x.done_at));
+      if (k === 'acabado' && !s.mo) return ptile(k, 'lock', 'Después del montaje');
+      const cm = R.canMark(v, k, me, c, now);
+      if (cm.ok) return ptile(k, 'todo post', 'Hasta ' + whenRel(s.d.finalDue, now), `data-act="quick" data-v="${v.id}" data-k="${k}"`);
+      return ptile(k, 'wait', O + ' · hasta ' + whenRel(s.d.finalDue, now));
+    };
+    tiles = tl('montaje') + tl('acabado');
+    extra = myUndo(s.ac) || myUndo(s.mo);
+  } else if (P.phase === 'abierto' || P.phase === 'apoyo') {
+    timeline = P.phase === 'abierto';
+    if (isOwner) {
+      tiles = (s.mo ? ptile('montaje', 'mine', 'Enviado ' + t(s.mo.done_at)) : ptile('montaje', 'todo post', 'Tocar al enviar · hasta ' + whenRel(s.d.apoyoDue, now), `data-act="quick" data-v="${v.id}" data-k="montaje"`))
+        + (s.ac ? ptile('acabado', 'other', A + ' lo terminó') : ptile('acabado', 'wait', 'Lo hace ' + A + ' · apoyo'));
+      wait = !!s.mo && !s.ac;
+      const left = Math.round((s.d.apoyoDue - now) / 60000);
+      if (!s.mo && left <= 60) { tone = 'red'; msg = `Falta${left > 1 ? 'n ' + left + ' min' : ' 1 min'} para enviar tu montaje y recibir apoyo en el video final.`; if (left >= 55) msg = 'Falta 1 h para enviar tu montaje y recibir apoyo en el video final.'; }
+      else if (s.mo && !s.ac) { tone = 'green'; msg = `Montaje enviado a tiempo · ${A} hace tu video final.`; }
+      else if (s.ac && R.within(s.ac.done_at, now)) { tone = 'green'; msg = `${A} terminó tu video final · recibiste ${R.money(val)}.`; }
+      extra = myUndo(s.mo);
+    } else {
+      tiles = (s.mo ? ptile('montaje', 'other', 'Recibido ' + t(s.mo.done_at)) : ptile('montaje', 'wait', O + ' · hasta ' + whenRel(s.d.apoyoDue, now)))
+        + (s.ac ? ptile('acabado', s.ac.done_by === me.id ? 'mine' : 'other', 'Hecho ' + t(s.ac.done_at)) : s.mo && isAdm ? ptile('acabado', 'todo post', 'Tocar al terminar · hasta ' + whenRel(s.d.finalDue, now), `data-act="quick" data-v="${v.id}" data-k="acabado"`) : ptile('acabado', 'lock', 'Después del montaje'));
+      if (!s.mo && s.d.apoyoDue - now <= 2 * 3600000) { tone = 'amber'; msg = `${O} aún no envía su montaje · tiene hasta las ${R.limaTime(s.d.apoyoDue)} para recibir tu apoyo.`; }
+      else if (s.mo && !s.ac && isAdm) { tone = 'green'; msg = `Te toca el video final de apoyo · el pago es de ${O}.`; }
+      else if (s.ac && R.within(s.ac.done_at, now)) { tone = 'green'; msg = `Entregado · a ${O} le llegan ${R.money(val)} (montaje + final de apoyo).`; }
+      extra = myUndo(s.ac);
+    }
+  } else if (P.phase === 'solo' || P.phase === 'riesgo') {
+    timeline = true;
+    if (isOwner) {
+      const cmA = R.canMark(v, 'acabado', me, c, now);
+      tiles = (s.mo ? ptile('montaje', 'mine', 'Listo ' + t(s.mo.done_at)) : ptile('montaje', 'todo post', 'Tocar al terminar', `data-act="quick" data-v="${v.id}" data-k="montaje"`))
+        + (s.mo && cmA.ok ? ptile('acabado', 'todo post', 'Tocar al entregar', `data-act="quick" data-v="${v.id}" data-k="acabado"`) : ptile('acabado', 'lock', 'Después del montaje'));
+      wait = !!s.mo;
+      tone = 'red';
+      msg = P.phase === 'solo' ? `Venció el plazo para recibir apoyo. Puedes entregar el video completo hasta ${whenRel(s.d.selfDue, now)}.` : `Para asegurar la entrega, el video se asignará automáticamente a ${A} al mediodía.`;
+      extra = myUndo(s.mo);
+    } else {
+      tiles = ptile('montaje', s.mo ? 'other' : 'wait', s.mo ? O + ' lo terminó' : O + ' · hasta ' + R.limaTime(s.d.selfDue)) + ptile('acabado', 'wait', O + ' · hasta ' + R.limaTime(s.d.selfDue));
+      if (P.phase === 'riesgo') { tone = 'red'; msg = `${O} no entregó · puedes tomar el video. A las ${R.limaTime(s.d.autoDue)} pasa a ti solo.`; }
+      else { tone = 'amber'; msg = `Venció el apoyo · ${O} puede entregar el video completo hasta ${whenRel(s.d.selfDue, now)}.`; }
+      if (P.phase === 'riesgo' && isAdm) after = `<button class="hb x-blue" data-act="claim" data-v="${v.id}" data-k="montaje">${handIc}Tomar el video</button>`;
+    }
+  } else if (P.phase === 'revision') {
+    timeline = true;
+    const k = s.ac;
+    if (isOwner) {
+      tiles = ptile('montaje', 'pend', 'Por confirmar') + ptile('acabado', 'pend', 'Por confirmar');
+      wait = true; tone = 'blue'; msg = `Entregado · ${A} revisa tu video.`;
+      extra = R.canUndoRedeliver(k, me, c, now) ? undoLink('redeliverUndo', `data-v="${v.id}"`) : myUndo(k);
+    } else {
+      tiles = ptile('montaje', 'pend', 'Por revisar') + ptile('acabado', 'pend', 'Por revisar');
+      if (isAdm) msg = '';
+      tone = '';
+      const at = k.redelivered_at || k.done_at;
+      extra = isAdm ? `<div class="revbox"><b class="num">Revisar entrega</b><span>${O} entregó ${k.redelivered_at ? 'la corrección' : 'el video completo'} a las ${R.limaTime(at)} · revisa hasta ${whenRel(s.d.finalDue, now)}</span>
+        <div class="grid2"><button class="hb x-red" data-act="review" data-v="${v.id}" data-k="no" style="font-size:14px">Pedir cambios</button><button class="hb x-green" data-act="review" data-v="${v.id}" data-k="ok" style="font-size:14px">Aprobar</button></div></div>` : '';
+    }
+  } else if (P.phase === 'cambios') {
+    timeline = true;
+    const k = s.ac;
+    if (isOwner) {
+      tiles = ptile('montaje', 'mine', 'Listo') + ptile('acabado', 'todo post', 'Entregar corrección', `data-act="redeliver" data-v="${v.id}"`);
+      wait = true; tone = 'red'; msg = `${A} pidió cambios: ${esc(k.review_note || '')} · corrige hasta las ${R.limaTime(s.d.fixDue)}.`;
+    } else {
+      tiles = ptile('montaje', 'wait', 'Corrigiendo · hasta ' + R.limaTime(s.d.fixDue)) + ptile('acabado', 'wait', 'Corrigiendo · hasta ' + R.limaTime(s.d.fixDue));
+      tone = 'amber'; msg = `Pediste cambios: ${esc(k.review_note || '')} · ${O} corrige hasta las ${R.limaTime(s.d.fixDue)}. Si no, el video pasa a ti.`;
+      extra = R.canUndoReview(k, me, c, now) ? undoLink('reviewUndo', `data-v="${v.id}"`) : '';
+    }
+  } else if (P.phase === 'aprobado') {
+    const k = s.ac;
+    tiles = ptile('montaje', isOwner ? 'mine' : 'other', 'Aprobado') + ptile('acabado', isOwner ? 'mine' : 'other', 'Aprobado');
+    const fresh = k.review_at && R.within(k.review_at, now);
+    if (fresh || !k.review_at) { tone = 'green'; msg = !k.review_at ? `Se aprobó sola · ${isOwner ? 'recibiste ' + R.money(val) : 'a ' + O + ' le llegan ' + R.money(val)}.` : isOwner ? `${A} aprobó tu entrega · recibiste ${R.money(val)}.` : `Aprobaste la entrega · a ${O} le llegan ${R.money(val)}.`; }
+    extra = R.canUndoReview(k, me, c, now) ? undoLink('reviewUndo', `data-v="${v.id}"`) : '';
+  } else if (P.phase === 'pasado') {
+    if (isOwner) {
+      tiles = ptile('montaje', 'lock', s.ownMo ? 'Lo marcaste · ya no cuenta' : s.mo ? A + ' lo hizo' : 'Lo hará ' + A, '', s.ownMo ? 'ck' : '') + ptile('acabado', 'lock', s.ac ? A + ' lo entregó' : 'Lo hará ' + A);
+    } else {
+      const cmM = R.canMark(v, 'montaje', me, c, now);
+      const cmA = R.canMark(v, 'acabado', me, c, now);
+      tiles = (s.mo ? ptile('montaje', s.mo.done_by === me.id ? 'mine' : 'other', 'Hecho ' + t(s.mo.done_at)) : cmM.ok ? ptile('montaje', 'todo post', 'Tomado · hasta ' + whenRel(s.d.finalDue, now), `data-act="quick" data-v="${v.id}" data-k="montaje"`) : ptile('montaje', 'by', 'Lo hará ' + A))
+        + (s.ac ? ptile('acabado', s.ac.done_by === me.id ? 'mine' : 'other', 'Hecho ' + t(s.ac.done_at)) : s.mo && cmA.ok ? ptile('acabado', 'todo post', 'Hasta ' + whenRel(s.d.finalDue, now), `data-act="quick" data-v="${v.id}" data-k="acabado"`) : ptile('acabado', 'lock', 'Después del montaje'));
+      const cl = R.claimOf(v, 'montaje', c);
+      extra = myUndo(s.ac) || myUndo(s.mo) || (cl && cl.member_id === me.id && !s.mo && R.within(cl.created_at, now) ? undoLink('unclaim', `data-id="${cl.id}"`, 'Soltar') : '');
+    }
+    if (!s.ac || R.within(s.ac.done_at, now)) { tone = 'blue'; msg = `Equipo que cumple: ${A} editará este video y el cliente lo recibe a tiempo.`; }
+  }
+  // 1.4: una entrega vencida nunca se bloquea: "Entregar igual" o "Reprogramar entrega" (solo el administrador).
+  if (s.overdue && P && P.phase === 'colab') {
+    tone = 'red'; msg = `La entrega venció ${whenRel(s.d.finalDue, now)} y el editor aún no termina.${isAdm ? ' Puedes reprogramar la entrega con el cliente.' : ''}`;
+    if (isAdm) after += `<button class="hb x-red" data-act="reprog" data-v="${v.id}" style="font-size:14px">${icon.clock.replace('width="12" height="12"', 'width="16" height="16"')}Reprogramar entrega</button>`;
+  } else if (s.overdue) {
+    tiles = tiles.replace(/(class="tile todo post"[^>]*>[\s\S]*?<small>)[^<]*(<\/small>)/g, '$1Vencido · entregar igual$2');
+    const who = s.inCharge === me.id ? 'tú' : first(st.member(s.inCharge));
+    tone = 'red';
+    msg = s.inCharge === me.id ? `La entrega venció ${whenRel(s.d.finalDue, now)}. ${isAdm ? 'Entrégalo igual o reprograma la entrega con el cliente.' : 'Entrégalo igual: todavía cuenta, con tardanza.'}` : `La entrega venció ${whenRel(s.d.finalDue, now)} · la tiene ${who}. ${isAdm ? 'Puedes reprogramar la entrega con el cliente.' : A + ' puede reprogramarla con el cliente.'}`;
+    if (isAdm) after += `<button class="hb x-red" data-act="reprog" data-v="${v.id}" style="font-size:14px">${icon.clock.replace('width="12" height="12"', 'width="16" height="16"')}Reprogramar entrega</button>`;
+  }
+  const done = s.delivered;
+  const cls = done ? ' good' : tone === 'red' ? ' miss' : '';
+  const chip = done ? `<span class="chip13 ok">${icon.star('currentColor', 12)}Entregado</span>` : wait && isOwner ? `<span class="chip13 wait13">${icon.clock}${R.money(val)} en espera</span>` : '';
+  // 1.5: en la lista cada video va minimizado y se despliega al tocarlo.
+  const isOpen = inDetail || !!(ui.postOpen || {})[v.id];
+  const sm = postSummary(v, s, now, tone, msg);
+  const head = inDetail ? '' : `<button type="button" class="vhead vtoggle" data-act="postToggle" data-v="${v.id}" aria-expanded="${isOpen}"><span class="vnum"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span class="vins" style="background:${col[0]};color:${col[1]}">${esc(ini(o.name)).charAt(0)}</span></span><span class="ttl"><p>${v.title ? esc(v.title) : 'Video ' + v.num}</p><span class="vsum" style="color:${sm.c}"><i style="background:${sm.c}"></i>${esc(sm.t)}</span></span>${chip}<span class="vchev${isOpen ? ' on' : ''}">${icon.down}</span></button>`;
+  if (!isOpen) return `<section class="vcard13 mini${cls}">${head}</section>`;
+  return `<section class="vcard13${cls}"${inDetail ? ' style="gap:12px"' : ''}>${head}${inDetail && chip ? `<div class="row" style="justify-content:flex-end">${chip}</div>` : ''}
+    ${timeline && !done ? postTimeline(v, s, now) : ''}
+    <div class="tiles">${tiles}</div>${msg ? pmsg(tone || 'blue', msg) : ''}${after}${extra ? `<div class="pextra">${extra}</div>` : ''}${inDetail ? '' : `<a class="linkbtn vdetail" href="#/v/${v.id}">Ver detalle del video${icon.chev}</a>`}</section>`;
+}
+// 1.5 · Una línea de estado para el video minimizado (color por urgencia).
+function postSummary(v, s, now, tone, msg) {
+  const G = { gray: 'var(--tx4)', amber: '#FFC978', red: '#FF8A7A', blue: '#A9C7FF', green: 'var(--mint)' };
+  const me = S.me, P = s.post, A = first(st.admin() || { name: 'el líder' });
+  const due = (d) => whenRel(d, now);
+  const soon = (d) => d && d - now < 3 * 3600000 ? G.red : d && R.limaDate(d) === R.limaDate(now) ? G.amber : G.gray;
+  if (s.delivered) return { t: 'Entregado', c: G.green };
+  if (P.phase === 'colab') return { t: 'Lo edita ' + first(st.member(P.job.member_id)), c: G.blue };
+  if (!s.r) return { t: s.rodaje ? 'Se graba ' + R.fmtWhen(s.rodaje.starts_at) : 'Sin rodaje', c: G.gray };
+  if (s.overdue) return { t: 'Venció la entrega', c: G.red };
+  const mine = v.owner === me.id;
+  if (P.handoff) return P.handoffTo === me.id ? { t: 'Te toca · hasta ' + due(s.d.finalDue), c: G.red } : { t: 'Lo hará ' + first(st.member(P.handoffTo || (st.admin() || {}).id)), c: G.blue };
+  const ph = P.phase;
+  if (ph === 'revision') return { t: mine ? 'En revisión' : 'Por revisar', c: G.blue };
+  if (ph === 'cambios') return { t: 'Corrección hasta las ' + R.limaTime(s.d.fixDue), c: mine ? G.red : G.amber };
+  if (ph === 'aprobado' || ph === 'entregado') return { t: 'Entregado', c: G.green };
+  if (P.pair) {
+    if (ph === 'p_mon') return s.mo ? { t: 'Video final hasta ' + due(s.d.ownDue), c: soon(s.d.ownDue) } : { t: 'Montaje hasta ' + due(s.d.montajeDue), c: soon(s.d.montajeDue) };
+    if (ph === 'p_fin') return s.mo ? { t: 'Video final hasta ' + due(s.d.ownDue), c: soon(s.d.ownDue) } : { t: 'Montaje vencido · final hasta las ' + R.limaTime(s.d.ownDue), c: G.red };
+    return mine ? { t: 'No entregaste · puedes entregar igual', c: G.red } : { t: first(s.owner) + ' no entregó · puedes tomarlo', c: G.red };
+  }
+  if (ph === 'apoyo') return mine ? { t: 'Montaje enviado · ' + A + ' hace tu final', c: G.blue } : { t: 'Te toca el video final · hasta ' + due(s.d.finalDue), c: soon(s.d.finalDue) };
+  if (ph === 'abierto') return mine ? (s.mo ? { t: 'Montaje enviado', c: G.blue } : { t: 'Montaje con apoyo hasta ' + due(s.d.apoyoDue), c: soon(s.d.apoyoDue) }) : { t: first(s.owner) + ' · montaje hasta ' + due(s.d.apoyoDue), c: G.gray };
+  if (ph === 'solo') return { t: (mine ? 'Por tu cuenta' : 'Por su cuenta') + ' hasta ' + due(s.d.selfDue), c: G.red };
+  if (ph === 'riesgo') return mine ? { t: 'En riesgo · a las ' + R.limaTime(s.d.autoDue) + ' pasa a ' + A, c: G.red } : { t: 'En riesgo · puedes tomarlo', c: G.red };
+  // líder sin socios sin apoyo
+  return s.mo ? { t: 'Video final hasta ' + due(s.d.finalDue), c: soon(s.d.finalDue) } : { t: 'Montaje y final hasta ' + due(s.d.finalDue), c: soon(s.d.finalDue) };
+}
+// Revisar la entrega: Aprobar o Pedir cambios, con doble confirmación.
+function sheetReview(v, step) {
+  const c = st.ctx(v.project_id);
+  const s = R.videoState(v, c, new Date());
+  const O = first(st.member(v.owner));
+  const val = R.money(postValue(v));
+  if (step === 'ok') return `<h2>¿Aprobar la entrega del video ${v.num}?</h2><p class="sub" style="margin:0">${O} recibirá ${val}. Puedes deshacerlo durante 10 minutos.</p>
+    <button class="hb x-green" data-act="reviewGo" data-v="${v.id}" data-ok="1">${icon.check}Sí, aprobar</button><button class="btn b-ghost" data-act="close">Volver</button>`;
+  if (step === 'no1') return `<form data-form="reviewNote" style="display:contents"><input type="hidden" name="v" value="${v.id}"><h2>Pedir cambios</h2>
+    <p class="sub" style="margin:0">Escribe qué debe corregir. ${O} tiene hasta las ${R.limaTime(s.d.fixDue)}.</p>
+    <label class="field"><span>¿Qué debe corregir?</span><textarea class="in" name="note" rows="3" required maxlength="300" placeholder="Ej.: el audio se corta en 0:42" style="min-height:96px;padding-top:12px">${esc(ui.revNote || '')}</textarea></label>
+    <button class="hb x-red">Continuar</button><button type="button" class="btn b-ghost" data-act="close">Volver</button></form>`;
+  const first2 = !(s.ac && s.ac.review_round) && new Date() <= s.d.fixDue;
+  return `<h2>¿Seguro que el video ${v.num} no está listo?</h2><p class="sub" style="margin:0">${first2 ? `${O} no cobra hasta corregirlo. Si a las ${R.limaTime(s.d.fixDue)} no lo corrige, el video pasa a ti.` : `Ya ${s.ac && s.ac.review_round ? 'pediste cambios una vez' : 'pasó el plazo para corregir'}: el video pasa a ti y tú lo editas.`}</p>
+    <div class="pmsg pm-amber"><span class="pdot"></span><p>${esc(ui.revNote || '')}</p></div>
+    <button class="hb x-red" data-act="reviewGo" data-v="${v.id}" data-ok="0">${first2 ? 'Sí, pedir cambios' : 'Sí, el video pasa a mí'}</button><button class="btn b-ghost" data-act="close">Volver</button>`;
+}
+// Aviso con "Deshacer" en la barra de abajo (8 s); la tarjeta mantiene el botón los 10 minutos.
+function offerUndo(text, fn) {
+  const id = Date.now();
+  ui.undo = { id: 'x' + id, fn, text, until: Date.now() + 8000 };
+  render();
+  setTimeout(() => { if (ui.undo && ui.undo.id === 'x' + id) { ui.undo = null; render(); } }, 8000);
+}
+
+// ---------- Administrador → Entregas al límite ----------
+const ENT_KEYS = ['mon', 'monh', 'self', 'auto', 'fix', 'pmon', 'pfin', 'prev', 'pfix'];
+function entBase() { const r = Object.assign({}, R.DEFAULT_RULES, st.settings().rules || {}); return { mon: r.mon, monh: r.monh, self: r.self, auto: r.auto, fix: r.fix, pmon: r.pmon, pfin: r.pfin, prev: r.prev, pfix: r.pfix, cli: Object.assign({}, r.cli || {}) }; }
+function vAdminEntregas() {
+  const base = entBase();
+  const cur = Object.assign({}, base, ui.ent || {}, { cli: Object.assign({}, base.cli, (ui.ent || {}).cli || {}) });
+  const pend = st.pendingProposal('rules');
+  const soc = otherPartner();
+  const SN = soc ? first(soc) : 'tu socio';
+  // Línea de tiempo de ejemplo: publica el sábado.
+  const days = cur.mon;
+  const span = days * 1440 + 9 * 60;
+  const pos = (dayFromStart, m) => ((dayFromStart * 1440 + m) / span * 100);
+  const last = days - 1; // índice del día anterior a la publicación
+  const pA = pos(0, cur.monh), pT = pos(last, cur.self), pU = pos(last, cur.auto), pE = pos(last, 1440);
+  const segs = [[pA, '#2F9E6E'], [pT - pA, '#D98A00'], [pU - pT, '#E5484D'], [pE - pU, '#3D6BB8'], [100 - pE, '#FFB547']];
+  const DN = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
+  const dayLbl = Array.from({ length: days }, (_, i) => DN[(6 - days + i + 7) % 7]);
+  const leg = [['Con tu apoyo', 'hasta ' + dayLbl[0] + ' ' + R.hm(cur.monh), '#2F9E6E', '#9FD9BF'], ['Lo entrega él solo', 'hasta ' + dayLbl[last] + ' ' + R.hm(cur.self), '#D98A00', '#FFC978'], ['En riesgo · se puede tomar', 'hasta ' + R.hm(cur.auto), '#E5484D', '#FF9B8F'], ['Pasa a ti', 'hasta ' + dayLbl[last] + ' 23:59', '#3D6BB8', '#A9C7FF']];
+  const row = (k, name, sub, step, min, max, fmt, c, line = true) => {
+    const ch = cur[k] !== base[k];
+    return `<div class="srow ent"${line ? '' : ' style="border-top:none"'}><span class="sq" style="background:${c}"></span><span class="ttx"><b>${name}</b><span>${ch ? 'Antes: ' + fmt(base[k]) + ' · ' : ''}${sub}</span></span><button class="sb" data-act="entStep" data-k="${k}" data-d="${-step}" data-min="${min}" data-max="${max}" aria-label="Menos" ${cur[k] - step < min ? 'disabled' : ''}>−</button><b class="num sval${ch ? ' ch' : ''}">${fmt(cur[k])}</b><button class="sb" data-act="entStep" data-k="${k}" data-d="${step}" data-min="${min}" data-max="${max}" aria-label="Más" ${cur[k] + step > max ? 'disabled' : ''}>+</button></div>`;
+  };
+  const dd = (x) => x + ' días';
+  let html = `${backTo('#/admin', 'Administrador')}<div><h1 style="font-size:28px">Entregas al límite</h1><p class="sub">Qué pasa con un video de ${SN} cuando el montaje se atrasa.</p></div>`;
+  if (pend) html += `<section class="pendbox row" style="flex-direction:row;align-items:center"><span style="flex:1;min-width:0"><b class="small" style="color:#C9D8FF">Propuesta esperando a ${SN}</b><br><span class="muted">${propSummary(pend)}</span></span><button class="btn sm b-ghost" data-act="propWithdraw" data-id="${pend.id}">Retirar</button></section>`;
+  html += `<section class="card" style="gap:10px"><div class="between" style="align-items:baseline"><p class="lbl" style="margin:0">Así queda</p><span class="small" style="font-weight:700;color:#FFD08A">Ejemplo: publica sáb</span></div>
+    <div class="row" style="gap:0;font-size:11px;font-weight:700;color:var(--tx4)">${dayLbl.map((dl) => `<span style="width:${(1440 / span * 100).toFixed(2)}%;text-align:center">${dl.toUpperCase()}</span>`).join('')}<span style="width:${(540 / span * 100).toFixed(2)}%;text-align:center;color:#FFD08A">★</span></div>
+    <div class="ptl-bar" style="height:14px">${segs.map(([w, c]) => `<i style="width:${w.toFixed(2)}%;background:${c}"></i>`).join('')}</div>
+    <div style="display:flex;flex-direction:column;gap:7px">${leg.map(([tt, vv, c, fc]) => `<div class="row" style="gap:10px;font-size:13px"><span class="sq" style="background:${c}"></span><span style="flex:1;font-weight:600">${tt}</span><b class="num" style="color:${fc}">${vv}</b></div>`).join('')}</div></section>`;
+  html += `<div class="agrp">
+    ${row('mon', 'Días de apoyo', 'antes de publicar', 1, 2, 5, dd, '#2F9E6E', false)}
+    ${row('monh', 'Hora del apoyo', 'último envío del montaje', 60, 720, 1380, R.hm, '#2F9E6E')}
+    ${row('self', 'Entrega por su cuenta', 'hasta esta hora · luego se puede tomar', 60, 300, cur.auto - 60, R.hm, '#D98A00')}
+    ${row('auto', 'Pasa solo a ti', 'si nadie lo tomó', 60, cur.self + 60, cur.fix - 60, R.hm, '#E5484D')}
+    ${row('fix', 'Corregir cambios', 'si pediste cambios', 60, cur.auto + 60, 1320, R.hm, '#8A4A30')}
+    <div class="srow ent"><span class="sq" style="background:#3D6BB8"></span><span class="ttx"><b>Entrega y revisión</b><span>Videos de apoyo y los que tomaste${R.pairTeam({ members: S.data.members }) ? '' : ' · también los tuyos'}</span></span><b class="num sval" style="color:var(--tx4)">23:59</b></div></div>`;
+  // 1.5 · Socios sin apoyo: plazos iguales para el socio y para ti (día antes de publicar).
+  html += `<div><p class="lbl alb">Socios sin apoyo · también tus videos</p><div class="agrp">
+    ${row('pmon', 'Montaje', 'solo aviso, no bloquea', 60, 480, cur.pfin - 60, R.hm, '#2F9E6E', false)}
+    ${row('pfin', 'Video final', 'luego el otro lo puede tomar', 60, cur.pmon + 60, cur.prev - 60, R.hm, '#D98A00')}
+    ${row('prev', 'Revisión de ' + LN(), 'si no revisa, se aprueba sola', 60, cur.pfin + 60, cur.pfix - 60, R.hm, '#3D6BB8')}
+    ${row('pfix', 'Corregir cambios', 'si no corrige, pasa a ' + LN(), 60, cur.prev + 60, 1380, R.hm, '#8A4A30')}
+    <div class="srow ent"><span class="sq" style="background:#FFB547"></span><span class="ttx"><b>Último plazo</b><span>Luego aparece "Reprogramar entrega"</span></span><b class="num sval" style="color:var(--tx4)">23:59</b></div></div></div>`;
+  html += `<section class="msgcard" style="align-items:center">${icon.cam('#8AB4FF', 20)}<p>Entre rodaje y publicación deben pasar al menos <b>${cur.mon + 1} días</b>. Si no, te avisa al programar.</p></section>`;
+  const clients = Array.from(new Set(S.data.projects.map((p) => p.client).filter(Boolean)));
+  if (clients.length) {
+    html += `<div><p class="lbl alb">Por cliente</p><div style="display:flex;flex-direction:column;gap:8px">${clients.map((cl, i) => {
+      const own = cur.cli[cl] != null;
+      const d = own ? cur.cli[cl] : cur.mon;
+      return `<div class="entcli${own ? ' on' : ''}"><div class="row" style="gap:12px"><span class="entav">${esc(cl.charAt(0).toUpperCase())}</span><span style="flex:1;min-width:0"><b style="display:block;font-size:14px">${esc(cl)}</b><span class="muted">${own ? `Plazo propio · ${d} días de apoyo` : `Usa el del equipo · ${cur.mon} días`}</span></span>
+        <button class="sw13${own ? ' on' : ''}" role="switch" aria-checked="${own}" aria-label="Plazo propio para ${esc(cl)}" data-act="entCli" data-i="${i}"><i></i></button></div>
+        ${own ? `<div class="row" style="gap:12px;padding-top:10px;border-top:1px solid var(--line)"><span style="flex:1;font-size:13px;font-weight:600">Días de apoyo para este cliente</span><button class="sb" data-act="entCliStep" data-i="${i}" data-d="-1" ${d <= 2 ? 'disabled' : ''} aria-label="Menos">−</button><b class="num sval">${d} días</b><button class="sb" data-act="entCliStep" data-i="${i}" data-d="1" ${d >= 6 ? 'disabled' : ''} aria-label="Más">+</button></div>` : ''}</div>`;
+    }).join('')}</div></div>`;
+  }
+  const diffs = ENT_KEYS.filter((k) => cur[k] !== base[k]).map((k) => k === 'mon' ? `apoyo ${base.mon} → ${cur.mon} días` : `${R.hm(base[k])} → ${R.hm(cur[k])}`);
+  const cliCh = JSON.stringify(cur.cli) !== JSON.stringify(base.cli);
+  if (cliCh) diffs.push('por cliente: ' + (Object.entries(cur.cli).map(([k, x]) => `${k} ${x} días`).join(', ') || 'ninguno'));
+  if (diffs.length) html += `<div class="propbar"><span style="flex:1;min-width:0"><b>${diffs.length} ${diffs.length === 1 ? 'cambio' : 'cambios'} por proponer</b><br><span class="muted">Se aplican cuando ${SN} los aprueba.</span></span><button class="btn sm b-ghost" data-act="entDiscard">Descartar</button><button class="btn sm b-blue" data-act="entPropose" ${pend ? 'disabled' : ''}>Proponer a ${SN}</button></div><div style="height:70px"></div>`;
+  else html += `<p class="muted" style="margin:0 4px;text-align:center">Los cambios se aplican cuando ${SN} los aprueba.</p>`;
+  return html;
+}
+
+// ---------- Aviso de choque al programar o repartir (Opción B) ----------
+// Para cada video de quien recibe apoyo: ¿el último día del apoyo cae en un rodaje o reunión? ¿hay días suficientes?
+function choquesDe(items, extraBusy = []) {
+  const p = st.project();
+  const busy = {};
+  for (const e of S.data.events.filter((x) => active(x))) { const d = R.limaDate(e.starts_at); busy[d] = busy[d] || (e.kind === 'rodaje' ? 'rodaje' : 'reunión'); }
+  for (const [d, k] of extraBusy) busy[d] = busy[d] || k;
+  const out = [];
+  items.forEach((it, i) => {
+    const o = st.member(it.owner);
+    if (!o.apoyo) return;
+    const mon = R.monDays(p ? p.client : null);
+    if (it.rodajeDate && dayDiff(it.rodajeDate, it.publish_date) < mon + 1) { out.push({ i, it, kind: 'gap', mon, need: R.addDays(it.rodajeDate, mon + 1) }); return; }
+    const apoyoDay = it.apoyo_due ? R.limaDate(it.apoyo_due) : R.addDays(it.publish_date, -mon);
+    if (busy[apoyoDay] && !(it.rodajeDate && apoyoDay <= it.rodajeDate)) out.push({ i, it, kind: 'clash', mon, apoyoDay, what: busy[apoyoDay], canAdvance: !it.rodajeDate || R.addDays(apoyoDay, -1) > it.rodajeDate });
+  });
+  return out;
+}
+const dShort = (d) => dowOf(d + 'T12:00:00-05:00') + ' ' + Number(d.slice(8, 10));
+function sheetChoque() {
+  const ch = ui.choque;
+  const blocks = ch.list.map((x, n) => {
+    const it = x.it;
+    const O = first(st.member(it.owner));
+    const pick = ch.picks[n];
+    const num = it.num ? 'video ' + it.num : 'este video';
+    const start = it.rodajeDate || R.addDays(x.apoyoDay || it.publish_date, -2);
+    const end = R.addDays(it.publish_date, 1);
+    const days = []; for (let d = start; d <= end && days.length < 8; d = R.addDays(d, 1)) days.push(d);
+    let ap = x.kind === 'clash' ? x.apoyoDay : null, pub = it.publish_date;
+    if (pick === 'mas') ap = R.addDays(x.apoyoDay, -1);
+    if (pick === 'pub') { pub = x.kind === 'gap' ? x.need : R.addDays(it.publish_date, 1); if (x.kind === 'clash') ap = R.addDays(x.apoyoDay, 1); }
+    if (pub > end) days.push(pub);
+    const cell = (d) => {
+      const items = [];
+      if (d === it.rodajeDate) items.push(['cam', 'Rodaje', 'b']);
+      else if (x.kind === 'clash' && d === x.apoyoDay) items.push(['cam', x.what === 'rodaje' ? 'Rodaje' : 'Reunión', 'b']);
+      if (ap && d === ap) items.push(['cut', 'Montaje ' + O.charAt(0), !pick && x.kind === 'clash' ? 'r' : 'g']);
+      if (d === pub) items.push(['star', 'Publica', 'a']);
+      const bad = !pick && ((x.kind === 'clash' && d === x.apoyoDay) || (x.kind === 'gap' && d > it.rodajeDate && d < pub));
+      return `<div class="chd${bad ? ' bad' : ''}"><span>${dShort(d).toUpperCase()}</span><div>${items.map(([ic, l, cc]) => `<i class="chi c-${cc}">${ic === 'cam' ? icon.cam('currentColor', 13) : ic === 'cut' ? icon.cut('currentColor', 13) : icon.star('currentColor', 13)}<small>${l}</small></i>`).join('')}</div></div>`;
+    };
+    const alert = !pick
+      ? (x.kind === 'clash' ? `El ${dShort(x.apoyoDay)} hay ${x.what} y ese mismo día vence el montaje de ${O} (${num}).` : `Entre el rodaje y la publicación hay ${dayDiff(it.rodajeDate, it.publish_date)} ${dayDiff(it.rodajeDate, it.publish_date) === 1 ? 'día' : 'días'}. Para que ${O} reciba apoyo hacen falta ${x.mon + 1}.`)
+      : pick === 'igual' ? (x.kind === 'clash' ? `Se queda igual · el montaje de ${O} vence el ${dShort(x.apoyoDay)}, día de ${x.what}.` : 'Se queda igual · este video no tendrá apoyo en el video final.')
+      : pick === 'mas' ? `Listo · el ${dShort(x.apoyoDay)} queda libre para ${x.what === 'rodaje' ? 'el rodaje' : 'la reunión'}.` : 'Listo · ya no se cruzan.';
+    const opts = x.kind === 'clash'
+      ? [['mas', `Adelantar el montaje de ${O}`, `Lo envía hasta el ${dShort(R.addDays(x.apoyoDay, -1))}, ${R.hm(R.RULES.monh)} · el ${dShort(it.publish_date)} no cambia`, x.canAdvance], ['pub', 'Publicar un día después', `${num.charAt(0).toUpperCase() + num.slice(1)} publica el ${dShort(R.addDays(it.publish_date, 1))} · montaje hasta el ${dShort(R.addDays(x.apoyoDay, 1))}, ${R.hm(R.RULES.monh)}`, true], ['igual', 'Seguir igual', `El montaje vence el día ${x.what === 'rodaje' ? 'del rodaje' : 'de la reunión'}`, true]]
+      : [['pub', `Publicar el ${dShort(x.need)}`, `Así ${O} puede recibir apoyo en el video final`, true], ['igual', 'Seguir igual', 'Sin apoyo para este video', true]];
+    return `<section class="chq"><div class="chstrip">${days.map(cell).join('')}</div>
+      ${pmsg(!pick ? 'red' : pick === 'igual' ? 'amber' : 'green', alert)}
+      ${opts.filter((o) => o[3]).map(([k, tt, sub]) => `<button class="chopt${pick === k ? ' on' : ''}" data-act="choquePick" data-n="${n}" data-k="${k}"><span class="rdo"><i></i></span><span><b>${tt}</b><small>${sub}</small></span></button>`).join('')}</section>`;
+  }).join('');
+  const all = ch.list.every((_, n) => ch.picks[n]);
+  return `<h2>${ch.list.some((x) => x.kind === 'clash') ? 'Choque de plazos' : 'Poco tiempo para editar'}</h2>${blocks}
+    <button class="hb ${all ? 'x-blue' : 'x-off'}" data-act="choqueSave" ${all ? '' : 'disabled'}>Guardar semana</button><button class="btn b-ghost" data-act="close">Volver</button>`;
+}
+// Aplica lo elegido: a filas nuevas (reparto) o a videos que ya existen (programar semana).
+function choqueApply(x, pick) {
+  const it = x.it;
+  if (pick === 'mas') return { apoyo_due: R.at(R.addDays(x.apoyoDay, -1), R.hm(R.RULES.monh)).toISOString() };
+  if (pick === 'pub') return x.kind === 'gap' ? { publish_date: x.need } : { publish_date: R.addDays(it.publish_date, 1) };
+  return {};
 }
 
 // ---------- Reunión o rodaje ----------
@@ -1045,7 +1632,9 @@ function arrivalsRow(e, now) {
     const me = m.id === S.me.id;
     const t = a && a.arrived_at ? (me ? 'Llegaste ' : 'Llegó ') + R.limaTime(a.arrived_at) : a && a.claimed_at ? 'Marcó ' + R.limaTime(a.claimed_at) + ' · por confirmar' : a && a.notice && a.notice.sent_at ? 'Avisó que no irá' : s.k === 'ausente' ? 'No llegó' : R.rsvpOf(e, m.id, c).k === 'voy' ? 'Confirmó · por llegar' : 'Por llegar';
     const col = a && a.arrived_at ? '#6EE7B7' : a && a.claimed_at ? '#FFC978' : s.k === 'ausente' ? '#FF8A7A' : 'var(--tx4)';
-    return `<span class="row" style="gap:8px"><span class="avd">${av(m, 30)}<i style="background:${col}"></i></span><span class="small" style="font-weight:600;color:${col === 'var(--tx4)' ? 'var(--tx3)' : col}">${t}</span></span>`;
+    const un = me && a && a.claimed_at && R.within(a.claimed_at) && (!a.arrived_at || !a.confirmed_by) ? undoLink('undoArr', `data-a="${a.id}"`)
+      : !me && a && a.arrived_at && a.confirmed_by === S.me.id && R.within(a.confirmed_at) ? undoLink('undoArr', `data-a="${a.id}"`) : '';
+    return `<span class="row" style="gap:8px"><span class="avd">${av(m, 30)}<i style="background:${col}"></i></span><span class="small" style="font-weight:600;color:${col === 'var(--tx4)' ? 'var(--tx3)' : col}">${t}</span>${un}</span>`;
   }).join('')}</div>`;
 }
 function adminConfirm(e) {
@@ -1073,7 +1662,8 @@ function eventExtras(e, now) {
   const atts = S.data.attendance.filter((x) => x.event_id === e.id);
   const vids = e.video_ids.map((vid) => S.data.videos.find((v) => v.id === vid)).filter(Boolean);
   let html = '';
-  if (act && myS.k === 'por_confirmar') html += banner('wait', 'Tu llegada espera confirmación', `La marcaste a las ${R.limaTime(st.attOf(e.id, me.id).claimed_at)}. Si el administrador la confirma, vale esa hora.`);
+  if (!isRod && e.ended_at && e.ended_by === me.id && R.within(e.ended_set_at)) html += banner('ok', 'Reunión finalizada', 'Puedes deshacerlo durante 10 minutos.', undoLink('undoEnd', `data-e="${e.id}"`));
+  if (act && myS.k === 'por_confirmar') html += banner('wait', 'Tu llegada espera confirmación', `La marcaste a las ${R.limaTime(st.attOf(e.id, me.id).claimed_at)}. Si ${LN()} la confirma, vale esa hora.`);
   const rs = R.rsvpState(e, me.id, c, now);
   if (act && myS.k === 'pendiente' && !rs.open && R.rsvpOf(e, me.id, c).k !== 'no' && now < tolEnd && isPartner(me)) html += `<button class="btn b-ghost" data-act="notice" data-e="${e.id}">No podré ir</button>`;
   if (act && myS.k === 'ausente' && (!st.attOf(e.id, me.id) || !st.attOf(e.id, me.id).notice) && now - tolEnd < 24 * 3600000) html += `<button class="btn x-violet" data-act="notice" data-e="${e.id}" data-fm="1">Fue fuerza mayor</button>`;
@@ -1082,7 +1672,7 @@ function eventExtras(e, now) {
     const who = st.member(a.member_id);
     const s = st.eventStatus(e, a.member_id, now);
     const n = a.notice;
-    if (n.decision) { html += banner('ok', `Respondiste el aviso de ${esc(who.name)}`, decisionText(n.decision)); continue; }
+    if (n.decision) { html += banner('ok', `Respondiste el aviso de ${esc(who.name)}`, decisionText(n.decision), n.decided_by === me.id && R.within(n.decided_at) ? undoLink('undoDecision', `data-a="${a.id}"`) : ''); continue; }
     if (!act) continue;
     const want = n.choice === 'other' ? 'Pide que grabes sus videos.' : n.choice === 'repro' ? 'Pide reprogramar.' : '';
     if (n.reason === 'fm') html += `<div class="card" style="border-color:#3E2C63;background:#160F22"><b>${esc(who.name)} marcó fuerza mayor</b><p class="sub" style="margin:0">Motivo: ${esc(n.fm_kind || '')}. ${want}</p><div class="grid2"><button class="btn x-violet" data-act="decide" data-a="${a.id}" data-d="accept">Acepto</button><button class="btn b-ghost" data-act="decide" data-a="${a.id}" data-d="talk">Conversarlo</button></div></div>`;
@@ -1107,7 +1697,7 @@ function eventExtras(e, now) {
 }
 function statusBanners(e) {
   if (e.status === 'reprogramado') { const nu = S.data.events.find((x) => x.id === e.replaced_by); return banner('bad', 'Este rodaje se reprogramó', (nu ? 'Nueva fecha: ' + R.fmtWhen(nu.starts_at) + '. ' : '') + (e.cancel_note ? esc(e.cancel_note) : ''), nu ? `<a class="btn sm b-ghost" href="#/e/${nu.id}" style="margin-top:8px">Ver el nuevo rodaje</a>` : ''); }
-  if (e.status === 'cancelado') return banner('bad', 'Cancelado', esc(e.cancel_note || ''));
+  if (e.status === 'cancelado') return banner('bad', 'Cancelado', esc(e.cancel_note || ''), S.me.role === 'admin' && R.within(e.canceled_at) ? undoLink('undoCancel', `data-e="${e.id}"`) : '');
   return '';
 }
 // Cuadro Guion / Storyboard de un video en la reunión.
@@ -1180,7 +1770,7 @@ function vMeeting(e) {
   }).join('');
   if (active(e) && open && vids.length) {
     if (e.ended_at) html += `<button class="btn" disabled>Reunión finalizada · ${R.limaTime(e.ended_at)}</button>`;
-    else if (e.end_requested_at) html += me.role === 'admin' ? `<button class="hb x-amber" data-act="confirmEnd" data-e="${e.id}">Confirmar fin de la reunión (${R.limaTime(e.end_requested_at)})</button>` : banner('wait', 'Pediste finalizar a las ' + R.limaTime(e.end_requested_at), 'El administrador lo confirma.');
+    else if (e.end_requested_at) html += me.role === 'admin' ? `<button class="hb x-amber" data-act="confirmEnd" data-e="${e.id}">Confirmar fin de la reunión (${R.limaTime(e.end_requested_at)})</button>` : banner('wait', 'Pediste finalizar a las ' + R.limaTime(e.end_requested_at), LN() + ' lo confirma.');
     else if (live && (me.role === 'admin' || ['puntual', 'tarde'].indexOf(st.eventStatus(e, me.id, now).k) !== -1)) { const direct = me.role === 'admin' || R.adminAbsent(e, c, now); html += `<button class="hb ${done === total ? 'x-green' : 'x-ghost'}" data-act="endMeeting" data-e="${e.id}">${direct ? 'Finalizar reunión' : 'Pedir finalizar la reunión'}</button>`; }
   }
   html += eventExtras(e, now);
@@ -1261,17 +1851,17 @@ function guillermoBlock(e, myS, now) {
   const p = S.data.projects.find((x) => x.id === e.project_id);
   const preVal = R.rates(p).guion + R.rates(p).storyboard;
   if (!h) {
-    if (now < start && myS.k === 'pendiente' && st.partners().length > 1 && !R.rsvpState(e, me.id, st.ctx(e.project_id), now).open) return `<div class="card" style="border-color:#3E2C63;background:#160F22"><p class="lbl" style="color:#C9B2FF">¿No irás a esta reunión?</p><p class="sub" style="margin:0">Puedes contratar a <b style="color:#fff">Guillermo</b> para tu preproducción. Tu compañero hace tus guiones y storyboards con él y recibe el 80 % (${R.money(preVal * 0.8)} por video). Tú conservas el 20 % y tu asistencia queda como "no requerida": no es falta ni suma racha.</p><button class="btn b-purple" data-act="hire" data-e="${e.id}">Contratar a Guillermo</button></div>`;
+    if (now < start && myS.k === 'pendiente' && st.partners().length > 1 && !R.rsvpState(e, me.id, st.ctx(e.project_id), now).open) return `<div class="card" style="border-color:#3E2C63;background:#160F22"><p class="lbl" style="color:#C9B2FF">¿No irás a esta reunión?</p><p class="sub" style="margin:0">Puedes contratar a <b style="color:#fff">Guillermo</b> para tu preproducción. ${gp(me) < 1 ? `Tu compañero hace tus guiones y storyboards con él y recibe el ${gTxt(me)} (${R.money(preVal * gp(me))} por video). Tú conservas el resto` : `Tu compañero hace tus guiones y storyboards con él y recibe todo (${R.money(preVal)} por video)`} y tu asistencia queda como "no requerida": no es falta ni suma racha.</p><button class="btn b-purple" data-act="hire" data-e="${e.id}">Contratar a Guillermo</button></div>`;
     return '';
   }
   const A = st.member(h.hired_by), B = st.member(h.present);
   if (h.status === 'pendiente') {
-    if (me.id === h.present) return `<div class="card" style="border-color:#3E2C63;background:#160F22"><b>${esc(A.name)} quiere contratar a Guillermo</b><p class="sub" style="margin:0">Si aceptas, en esta reunión asignas sus videos y marcas sus guiones y storyboards "con Guillermo". Recibes el 80 % de esa preproducción (${R.money(preVal * 0.8)} por video). Él no tiene que asistir.</p><div class="grid2"><button class="btn b-purple" data-act="hireDecide" data-id="${h.id}" data-s="aceptada">Aceptar</button><button class="btn b-ghost" data-act="hireDecide" data-id="${h.id}" data-s="rechazada">Rechazar</button></div></div>`;
+    if (me.id === h.present) return `<div class="card" style="border-color:#3E2C63;background:#160F22"><b>${esc(A.name)} quiere contratar a Guillermo</b><p class="sub" style="margin:0">Si aceptas, en esta reunión asignas sus videos y marcas sus guiones y storyboards "con Guillermo". Recibes ${gp(h) < 1 ? 'el ' + gTxt(h) : 'el total'} de esa preproducción (${R.money(preVal * gp(h))} por video). ${esc(first(A))} no tiene que asistir.</p><div class="grid2"><button class="btn b-purple" data-act="hireDecide" data-id="${h.id}" data-s="aceptada">Aceptar</button><button class="btn b-ghost" data-act="hireDecide" data-id="${h.id}" data-s="rechazada">Rechazar</button></div></div>`;
     return banner('fm', `Esperando que ${esc(B.name)} acepte`, 'Si rechaza, la reunión sigue con las reglas normales.', now < start ? `<button class="btn sm b-ghost" data-act="hireDecide" data-id="${h.id}" data-s="cancelada" style="margin-top:8px">Cancelar contratación</button>` : '');
   }
   const mine = e.video_ids.map((id) => S.data.videos.find((v) => v.id === id)).filter((v) => v && v.owner === h.hired_by);
   return banner('fm', `Guillermo trabaja por ${esc(A.name)} en esta reunión`, me.id === h.present
-    ? `Tú asignas los videos de ${esc(A.name)} y marcas sus guiones y storyboards "con Guillermo". Recibes el 80 % de esa preproducción.${mine.length ? '' : ' Primero reparte la semana.'}`
+    ? `Tú asignas los videos de ${esc(A.name)} y marcas sus guiones y storyboards "con Guillermo". Recibes ${gp(h) < 1 ? 'el ' + gTxt(h) : 'el total'} de esa preproducción.${mine.length ? '' : ' Primero reparte la semana.'}`
     : me.id === h.hired_by ? `${esc(B.name)} y Guillermo preparan tus videos. Te llegarán los guiones aquí. Tu asistencia no es requerida.` : '',
     `${!e.video_ids.length && me.id === h.present ? `<a class="btn sm b-purple" href="#/semana/${e.rodaje_id || ''}" style="margin-top:8px">Repartir videos</a>` : ''}${mine.map((v) => `<a class="btn sm b-ghost" href="#/v/${v.id}" style="margin-top:8px;margin-right:6px">Video ${v.num} de ${first(A)}</a>`).join('')}`);
 }
@@ -1302,7 +1892,7 @@ function credits(p, c) {
     const when = R.fmtWhen(t.done_at) + (t.kind === 'rodaje' ? '' : late ? ' · fuera de plazo' : ' · a tiempo');
     if (t.hire_id) {
       const h = S.data.hires.find((x) => x.id === t.hire_id);
-      if (h) { out.push(Object.assign({}, base, { to: h.present, amt: rate[t.kind] * 0.8, when: when + ' · con Guillermo (80 %)' })); out.push(Object.assign({}, base, { to: h.hired_by, amt: rate[t.kind] * 0.2, when: when + ' · Guillermo (20 %)' })); }
+      if (h) { const q = gp(h); out.push(Object.assign({}, base, { to: h.present, amt: rate[t.kind] * q, when: when + ' · con Guillermo (' + gTxt(h) + ')' })); if (q < 1) out.push(Object.assign({}, base, { to: h.hired_by, amt: rate[t.kind] * (1 - q), when: when + ' · Guillermo (' + Math.round((1 - q) * 100) + ' %)' })); }
       continue;
     }
     if (t.kind === 'acabado' && vs.apoyo) { out.push(Object.assign({}, base, { to: v.owner, amt: rate[t.kind], when: when + ' · final de apoyo (5.5)' })); continue; }
@@ -1383,7 +1973,7 @@ function vSummary() {
     lines.push({ t: 'PRODUCCIÓN', amt: f(mine.prod), d: cnt('rodaje') ? `rodaje de ${cnt('rodaje')} videos` + (tard ? ` · ${tard} con tardanza (sí se pagan)` : '') : 'todavía sin rodajes' });
     lines.push({ t: 'POSPRODUCCIÓN', amt: f(mine.post), d: cnt('montaje') + cnt('acabado') ? `${cnt('montaje')} montajes y ${cnt('acabado')} finales` + (apoyoGot ? ` · ${apoyoGot} finales de apoyo de ${oName} (5.5)` : '') + (tookCount ? ` · ${tookCount} videos que tomaste (5.7)` : '') : 'todavía sin ediciones' });
     if (apoyoGiven) lines.push({ t: 'APOYO EN ACABADO', amt: f(0), d: `${apoyoGiven} finales de apoyo · el pago es de ${oName} (5.5)`, c: '#9A927F' });
-    if (lostCount) lines.push({ t: 'VIDEOS TOMADOS', amt: f(0), d: `${lostCount} ${lostCount === 1 ? 'pasó' : 'pasaron'} al administrador (5.7)`, c: '#B3261E' });
+    if (lostCount) lines.push({ t: 'VIDEOS TOMADOS', amt: f(0), d: `${lostCount} ${lostCount === 1 ? 'pasó' : 'pasaron'} a ${LN()}`, c: '#B3261E' });
     if (pendMine > 0.004 && !complete) lines.push({ t: 'POR HACER', amt: f(pendMine), d: 'lo que falta de tus videos', c: '#9A927F' });
     statusTag = complete ? `${p.videos_total} DE ${p.videos_total} VIDEOS · ${paid ? 'PAGADO' : p.status === 'cerrado' ? 'CERRADO' : 'COMPLETO'}` : `EN CURSO · ${delivered} DE ${p.videos_total} VIDEOS`;
     title = `RECIBO · ${String(p.client).toUpperCase()} ${String(p.name).toUpperCase()}`;
@@ -1446,13 +2036,13 @@ function vSummary() {
   if (apoyoGiven) cover.push({ t: `${apoyoGiven} acabados de apoyo · sin cobro`, d: `Acordado en el punto 5.5: el pago es de ${oName}`, dot: '#6EE7B7' });
   if (lostCount) cover.push({ t: `${lostCount} ${lostCount === 1 ? 'video pasó' : 'videos pasaron'} a ${oName} · ${f(lostCount * (R8.montaje + R8.acabado))}`, d: 'Incumplimiento: el montaje no llegó a tiempo (5.7)', dot: '#FF6B5B' });
   if (apoyoGot) cover.push({ t: `${apoyoGot} acabados de ${oName}`, d: 'Apoyo acordado (5.5) · no es falta y tú los cobras', dot: '#8B8B94' });
-  if (gMine) cover.push({ t: `Guillermo hizo ${gMine.tasks} tareas por ti`, d: `${oName} recibió el 80 %; tú conservas el 20 %`, dot: '#B98CFF' });
+  if (gMine) cover.push({ t: `Guillermo hizo ${gMine.tasks} tareas por ti`, d: gp(me) < 1 ? `${oName} recibió el ${gTxt(me)}; tú conservas el resto` : `${oName} recibió el total`, dot: '#B98CFF' });
   const tips = [];
   if (bad) {
     if (lateCount) tips.push([`${lateCount} ${lateCount === 1 ? 'entrega llegó' : 'entregas llegaron'} tarde`, 'Termina guiones y storyboards en la misma reunión (suma +1 de reunión) y empieza cada montaje un día antes. Tarde resta 3.', `${dlv.total} de ${dlv.total} a tiempo`]);
     if (tard) tips.push([`${tard} ${tard === 1 ? 'llegada tarde' : 'llegadas tarde'}`, 'Sal 15 minutos antes. Puntual suma +1; tarde resta 1 (igual se paga).', `${evs.length} de ${evs.length} puntual`]);
     if (aus) tips.push([`${aus} ${aus === 1 ? 'falta' : 'faltas'} sin aviso a tiempo`, 'Si no puedes ir, avisa desde la app: rodaje hasta las 18:00 del día anterior, reunión con 24 h.', 'cero faltas']);
-    if (dlv.missed) tips.push([`${dlv.missed} ${dlv.missed === 1 ? 'video pasó' : 'videos pasaron'} a otra persona`, `Si no llegas al plazo del montaje, el video y sus ${f(R8.montaje + R8.acabado)} pasan al administrador.`, `${myVids} de ${myVids} hechos por ti`]);
+    if (dlv.missed) tips.push([`${dlv.missed} ${dlv.missed === 1 ? 'video pasó' : 'videos pasaron'} a otra persona`, `Si no llegas al plazo del montaje, el video y sus ${f(R8.montaje + R8.acabado)} pasan a ${LN()}.`, `${myVids} de ${myVids} hechos por ti`]);
   } else {
     tips.push(['Tu racha sigue en el próximo proyecto', 'Cada entrega a tiempo la hace crecer; no empieza de cero.', sk.next ? `llegar a ${sk.next.name}` : `seguir en ${sk.level.name}`]);
     tips.push(['Termina la preproducción en la reunión', 'Cada video listo antes de finalizarla suma +1 punto de reunión.', 'todos los videos en la reunión']);
@@ -1496,7 +2086,7 @@ function vSummary() {
     <div class="row" style="gap:8px;align-items:flex-start;padding:10px;border-radius:12px;background:#15130E"><span style="color:#FFC978;font-weight:700">+</span><p class="small" style="margin:0;line-height:1.45;color:#E4D5C3"><b style="color:#FFC978">Tu aporte:</b> ${bad ? 'llega puntual y entrega guiones y montajes a tiempo: con eso el equipo gana las medallas que faltan.' : 'sigue entregando a tiempo y termina la preproducción en la reunión; así el equipo no pierde puntualidad al final.'}</p></div></div>`;
   html += `</section>`;
   if (me.role === 'admin') html += `<a class="btn ${p.status === 'cerrado' ? 'b-ghost' : 'b-amber'}" href="#/cierre">${p.status === 'cerrado' ? 'Ver liquidación' : 'Cierre del proyecto'}</a>${p.status === 'cerrado' ? '' : `<p class="muted" style="margin:-6px 0 0;text-align:center">Se envía cuando estén los ${p.videos_total} videos · ${oName} confirma la liquidación</p>`}`;
-  else html += p.status === 'cerrado' || (p.settlement && p.settlement.sent_at) ? `<a class="btn b-blue" href="#/cierre">Ver liquidación</a>` : `<div class="row card" style="flex-direction:row;padding:12px 14px">${icon.check}<p class="small" style="margin:0;line-height:1.45;color:#C9C9D1">Cuando ${esc((st.admin() || {}).name || 'el administrador')} cierre el proyecto, te llegará la liquidación para que la confirmes.</p></div>`;
+  else html += p.status === 'cerrado' || (p.settlement && p.settlement.sent_at) ? `<a class="btn b-blue" href="#/cierre">Ver liquidación</a>` : `<div class="row card" style="flex-direction:row;padding:12px 14px">${icon.check}<p class="small" style="margin:0;line-height:1.45;color:#C9C9D1">Cuando ${esc((st.admin() || {}).name || 'el líder')} cierre el proyecto, te llegará la liquidación para que la confirmes.</p></div>`;
   html += `</div>`;
   return html;
 }
@@ -1526,6 +2116,7 @@ function vClose() {
   <tr><td>Posproducción</td>${cols.map((m) => `<td>${amt(m, 'post')}</td>`).join('')}</tr>
   <tr class="tot"><td>Total</td>${cols.map((m) => `<td style="color:${(COLOR[m.role] || ['#fff'])[0]}">${amt(m, 'total')}</td>`).join('')}</tr></table>
   ${Object.entries(pay.guillermo || {}).map(([by, g]) => `<div class="between small" style="padding:8px 10px;border-radius:12px;background:#160F22;border:1px solid #3E2C63"><span style="color:#D9CCF5">Guillermo · contratado por ${esc(st.member(by).name)} · ${g.tasks} tareas</span><b class="num" style="color:#C9B2FF">${R.money(g.amount)} → ${first(st.member(g.to))}</b></div>`).join('')}
+  ${Object.entries(pay.excedente || {}).filter(([, x]) => x > 0.004).map(([id, x]) => `<div class="between small" style="padding:8px 10px;border-radius:12px;background:#2A1810;border:1px solid #5A3020"><span style="color:#FFD9CC">Excedente de ${esc(st.member(id).name)} · por definir quién lo paga</span><b class="num" style="color:#FFB09C">${R.money(x)}</b></div>`).join('')}
   <div class="banner ${Math.abs(sum - p.budget) < 0.01 ? 'bn-ok' : 'bn-wait'}"><div><b>${cols.map((m) => amt(m, 'total')).join(' + ')} = ${R.money(sum)}</b><p>${Math.abs(sum - p.budget) < 0.01 ? 'Igual al presupuesto del cliente. No sobra ni falta nada.' : 'Faltan ' + R.money(p.budget - sum) + ' por tareas que aún no se hacen.'}</p></div></div></section>`;
   if (step >= 1 && se.amounts) html += `<p class="muted" style="margin:-4px 0 0">Enviada ${R.fmtWhen(se.sent_at)}${se.confirmed_at ? ' · confirmada ' + R.fmtWhen(se.confirmed_at) : ''}${se.paid_at ? ' · pagada ' + R.fmtWhen(se.paid_at) : ''}</p>`;
   if (me.role === 'admin') {
@@ -1533,9 +2124,9 @@ function vClose() {
     if (step === 1) html += banner('wait', 'Esperando confirmación', 'Tu socio recibió la liquidación.');
     if (step === 2) html += `<form data-form="pay" class="card"><p class="lbl">Registrar pago (6.2)</p><p class="sub" style="margin:0">Transfiere a cada uno lo que le corresponde dentro de 3 días y adjunta la constancia.</p><label class="field"><span>Constancia (foto)</span><input class="in" type="file" name="proof" accept="image/*" style="padding-top:10px"></label><button class="btn b-amber">Registrar pago y cerrar</button></form>`;
   } else {
-    if (step === 0) html += banner('wait', 'El administrador está preparando el cierre', 'Cuando lo envíe, podrás confirmarlo aquí.');
+    if (step === 0) html += banner('wait', LN() + ' está preparando el cierre', 'Cuando lo envíe, podrás confirmarlo aquí.');
     if (step === 1) html += `<button class="btn b-blue" data-act="confirmSettle">Confirmo la liquidación</button><button class="btn b-ghost" data-act="observe">Tengo una observación</button>`;
-    if (step === 2) html += banner('ok', 'Confirmaste tu liquidación', 'El administrador tiene 3 días para transferirte.');
+    if (step === 2) html += banner('ok', 'Confirmaste tu liquidación', LN() + ' tiene 3 días para transferirte.');
   }
   if (step === 3) html += `<div style="display:flex;justify-content:center;padding:6px 0"><div class="mono" style="padding:10px 18px;border:3px solid #6EE7B7;border-radius:12px;color:#6EE7B7;font-weight:700;text-align:center;transform:rotate(-4deg)">PROYECTO CERRADO<br><span style="font-size:11px;font-weight:400">confirmado por los dos · pagado</span></div></div>${se.proof ? `<button class="btn b-ghost" data-act="photo" data-p="${esc(se.proof)}">Ver constancia</button>` : ''}`;
   html += `<a class="btn b-ghost" href="#/historial">Ver historial del proyecto</a>`;
@@ -1551,7 +2142,7 @@ function logText(l) {
   if (T === 'invite') return { k: 'team', t: `${who} invitó a ${esc(l.data.name)} como ${ROLE[l.data.role]}` };
   if (T === 'join') return { k: 'team', t: `${esc(l.data.name)} entró al equipo` };
   if (T === 'tasks.insert' && n.hire_id) { const hh = S.data.hires.find((x) => x.id === n.hire_id) || {}; return { k: 'task', t: `Guillermo hizo el ${R.KIND_LABEL[n.kind].toLowerCase()} del video ${vnum(n.video_id)}`, s: `contratado por ${esc(st.member(hh.hired_by).name)} · lo registró ${who}` }; }
-  if (T === 'hires.insert') { const ev = S.data.events.find((x) => x.id === n.event_id) || {}; return { k: 'plan', t: `${who} contrató a Guillermo para la reunión del ${R.fmtWhen(ev.starts_at)}`, s: 'cobra el 80 % de su preproducción' }; }
+  if (T === 'hires.insert') { const ev = S.data.events.find((x) => x.id === n.event_id) || {}; return { k: 'plan', t: `${who} contrató a Guillermo para la reunión del ${R.fmtWhen(ev.starts_at)}`, s: `quien asiste cobra ${gp(n) < 1 ? 'el ' + gTxt(n) : 'todo'} de su preproducción` }; }
   if (T === 'hires.update' && n.status !== o.status) return { k: 'plan', t: `${who} ${{ aceptada: 'aceptó', rechazada: 'rechazó', cancelada: 'canceló' }[n.status] || 'actualizó'} la contratación de Guillermo` };
   if (T === 'tasks.insert') return { k: 'task', t: `${who} marcó ${R.KIND_LABEL[n.kind].toLowerCase()} del video ${vnum(n.video_id)}`, s: n.link ? 'con enlace' : '' };
   if (T === 'tasks.delete') return { k: 'task', t: `${who} desmarcó ${R.KIND_LABEL[o.kind].toLowerCase()} del video ${vnum(o.video_id)}` };
@@ -1589,6 +2180,9 @@ function logText2(l) {
   const evn = (x) => (x.kind === 'rodaje' ? 'el rodaje' : 'la reunión') + ' del ' + R.fmtWhen(x.starts_at);
   if (T === 'settings.look') return { k: 'team', t: `${who} cambió la apariencia de la app`, s: 'colores principal y de urgencia' };
   if (T === 'settings.reminders') return { k: 'team', t: `${who} ajustó los recordatorios automáticos` };
+  if (T === 'proposals.insert' && n.kind === 'apoyo') return { k: 'team', t: `${who} propuso ${n.data.apoyo ? 'dar' : 'quitar'} el apoyo en la edición a ${esc(st.member(n.data.member).name)}` };
+  if (T === 'proposals.update' && n.kind === 'apoyo' && n.status !== o.status) return { k: 'team', t: `${who} ${{ aprobada: 'aceptó', rechazada: 'rechazó', retirada: 'retiró' }[n.status] || 'actualizó'} ${n.status === 'retirada' ? 'la propuesta de apoyo' : (n.data.apoyo ? 'recibir apoyo' : 'editar sin apoyo')}`, s: n.status === 'aprobada' ? 'rige para los videos que aún no se graban' : '' };
+  if (T === 'members.update' && n.apoyo !== o.apoyo) return { k: 'team', t: `${esc(n.name)} ${n.apoyo ? 'ahora recibe apoyo' : 'ahora edita sin apoyo'}` };
   if (T === 'proposals.insert') return { k: 'team', t: `${who} propuso cambiar ${n.kind === 'pct' ? 'los porcentajes del acuerdo' : 'las reglas de registro'}`, s: propSummary(n) };
   if (T === 'proposals.update' && n.status !== o.status) return { k: 'team', t: `${who} ${{ aprobada: 'aprobó', rechazada: 'rechazó', retirada: 'retiró' }[n.status] || 'actualizó'} la propuesta de ${n.kind === 'pct' ? 'porcentajes' : 'reglas'}`, s: propSummary(n) };
   if (T === 'videos.update' && n.title !== o.title) return { k: 'plan', t: `${who} puso tema al video ${n.num}`, s: esc(n.title || 'sin tema') };
@@ -1603,10 +2197,49 @@ function logText2(l) {
   if (T === 'events.delete') return { k: 'plan', t: `${who} borró ${evn(o)}`, s: 'estaba vacío' };
   if (T === 'projects.update' && n.status !== o.status && (n.status === 'archivado' || o.status === 'archivado')) return { k: 'pay', t: `${who} ${n.status === 'archivado' ? 'archivó' : 'reabrió'} el proyecto ${esc(n.client)} · ${esc(n.name)}` };
   if (T === 'projects.delete') return { k: 'pay', t: `${who} borró el proyecto ${esc(o.client)} · ${esc(o.name)}`, s: 'estaba vacío' };
+  // 1.4 · entregas al límite y deshacer
+  if (T === 'tasks.update' && n.void && !o.void) return { k: 'task', t: `El ${R.KIND_LABEL[n.kind].toLowerCase()} de ${esc(st.member(n.done_by).name)} del video ${(S.data.videos.find((v) => v.id === n.video_id) || {}).num || '?'} ya no cuenta`, s: 'el video pasó a ' + LN() };
+  if (T === 'tasks.update' && n.review !== o.review) {
+    const vn = (S.data.videos.find((v) => v.id === n.video_id) || {}).num || '?';
+    if (n.review === 'aprobada') return { k: 'task', t: `${who} aprobó la entrega del video ${vn}` };
+    if (n.review === 'cambios') return { k: 'task', t: `${who} pidió cambios al video ${vn}`, s: esc(n.review_note || '') };
+    if (n.review === 'rechazada') return { k: 'task', t: `${who} rechazó la entrega del video ${vn}`, s: 'el video pasó a ' + LN() };
+    if (n.review === 'pendiente' && o.review === 'cambios') return { k: 'task', t: `${who} entregó la corrección del video ${vn}` };
+    if (n.review === 'pendiente') return { k: 'task', t: `${who} deshizo su decisión sobre el video ${vn}` };
+    if (n.review === 'cambios' && o.review === 'pendiente') return { k: 'task', t: `${who} deshizo la entrega de la corrección del video ${vn}` };
+  }
+  if (T === 'tasks.insert' && n.review === 'pendiente') return { k: 'task', t: `${who} entregó el video ${(S.data.videos.find((v) => v.id === n.video_id) || {}).num || '?'} por su cuenta`, s: 'por revisar' };
+  // 1.4 · entrega reprogramada, integrantes y colaborador externo
+  if (T === 'videos.update' && (n.reprog || []).length > (o.reprog || []).length) { const r = n.reprog[n.reprog.length - 1]; return { k: 'plan', t: `${who} reprogramó la entrega del video ${n.num}`, s: R.fmtDay(r.from) + ' → ' + R.fmtDay(r.to) + (r.late ? ' · ya estaba vencida' : '') + (r.note ? ' · ' + esc(r.note) : '') }; }
+  if (T === 'settings.guillermo') return { k: 'team', t: `${who} cambió el WhatsApp de Guillermo` };
+  if (T === 'members.update' && n.phone !== o.phone) return { k: 'team', t: `${who} ${n.phone ? 'actualizó' : 'quitó'} el WhatsApp de ${esc(n.name)}` };
+  if (T === 'members.update' && n.active === false && o.active !== false) return { k: 'team', t: `${who} canceló la invitación de ${esc(n.name)}` };
+  if (T === 'members.update' && n.invite_code !== o.invite_code) return { k: 'team', t: `${who} generó un enlace nuevo para ${esc(n.name)}` };
+  if (T === 'jobs.insert') return { k: 'team', t: `${who} propuso contratar a ${esc(st.member(n.member_id).name)} como editor`, s: `${n.video_ids.length} ${n.video_ids.length === 1 ? 'video' : 'videos'} · ${R.money(n.price)} c/u` };
+  if (T === 'jobs.update' && n.status !== o.status) {
+    const E = esc(st.member(n.member_id).name);
+    const t = { invitado: `${who} aprobó contratar a ${E}`, rechazado: `${who} rechazó contratar a ${E}`, cancelado: `${who} canceló el encargo de ${E}`, activo: `${E} aceptó el encargo`, finalizado: `${E} marcó el servicio como finalizado`, cerrado: `${who} confirmó el servicio de ${E} y registró su pago` }[n.status];
+    if (t) return { k: n.status === 'cerrado' ? 'pay' : 'team', t };
+  }
+  if (T === 'job_items.update' && n.stage !== o.stage) {
+    const vn = (S.data.videos.find((v) => v.id === n.video_id) || {}).num || '?';
+    const ORD = ['montaje', 'rev1', 'aj1', 'final', 'rev2', 'aj2', 'upload', 'done'];
+    if (ORD.indexOf(n.stage) < ORD.indexOf(o.stage)) return { k: 'task', t: `${who} deshizo un paso del video ${vn} (editor)` };
+    const t = { rev1: `${who} entregó el montaje del video ${vn}`, aj1: `${who} envió observaciones del montaje del video ${vn}`, final: `${who} aprobó el montaje del video ${vn}`, rev2: `${who} entregó el video final ${vn}`, aj2: `${who} envió observaciones finales del video ${vn}`, upload: `${who} aprobó el video ${vn}`, done: `${who} subió el video ${vn} a Drive` }[n.stage];
+    if (t) return { k: 'task', t, s: n.stage === 'aj1' ? (n.obs1 || []).map((x) => esc(x.t)).join(' · ') : n.stage === 'aj2' ? (n.obs2 || []).map((x) => esc(x.t)).join(' · ') : '' };
+  }
+  if (T === 'videos.update' && n.apoyo_due !== o.apoyo_due) return { k: 'plan', t: `${who} adelantó el montaje del video ${n.num}`, s: n.apoyo_due ? 'con apoyo hasta ' + R.fmtWhen(n.apoyo_due) : '' };
+  if (T === 'videos.update' && n.publish_date !== o.publish_date) return { k: 'plan', t: `${who} cambió la publicación del video ${n.num}`, s: R.fmtDay(o.publish_date) + ' → ' + R.fmtDay(n.publish_date) };
+  if (T === 'events.update' && o.ended_at && !n.ended_at) return { k: 'plan', t: `${who} deshizo el fin de ${evn(n)}` };
+  if (T === 'events.update' && o.status === 'cancelado' && n.status === 'activo') return { k: 'plan', t: `${who} deshizo la cancelación de ${evn(n)}` };
+  if (T === 'claims.insert' && n.kind === 'montaje') return { k: 'task', t: `${who} tomó el video ${(S.data.videos.find((v) => v.id === n.video_id) || {}).num || '?'}`, s: 'no llegó entregado a las 08:00' };
   if (T === 'attendance.insert' || T === 'attendance.update') {
     const m = st.member(n.member_id);
+    if (o.arrived_at && !n.arrived_at) return { k: 'att', t: `${who} deshizo ${n.member_id === l.actor ? 'su llegada' : 'la confirmación de la llegada de ' + esc(m.name)}` };
+    if (o.claimed_at && !n.claimed_at) return { k: 'att', t: `${esc(m.name)} deshizo su llegada` };
+    if (o.notice && o.notice.decision && n.notice && !n.notice.decision) return { k: 'att', t: `${who} deshizo su respuesta al aviso de ${esc(m.name)}` };
     if (n.arrived_at && !o.arrived_at && n.confirmed_by) return { k: 'att', t: `${who} confirmó la llegada de ${esc(m.name)} · ${R.limaTime(n.arrived_at)}`, s: n.claimed_at ? 'la marcó a las ' + R.limaTime(n.claimed_at) : '' };
-    if (n.claimed_at && !o.claimed_at && !n.arrived_at) return { k: 'att', t: `${esc(m.name)} marcó su llegada · ${R.limaTime(n.claimed_at)}`, s: 'espera confirmación del administrador' };
+    if (n.claimed_at && !o.claimed_at && !n.arrived_at) return { k: 'att', t: `${esc(m.name)} marcó su llegada · ${R.limaTime(n.claimed_at)}`, s: 'espera que ' + LN() + ' la confirme' };
   }
   return logText(l);
 }
@@ -1616,7 +2249,7 @@ function vHistory() {
   const rows = S.data.log.slice().reverse().map((l) => Object.assign({ l }, logText2(l) || {})).filter((x) => x.t && (ui.histF === 'all' || x.k === ui.histF));
   const pendC = S.data.corrections.filter((x) => x.status === 'pendiente');
   let html = `<div><h1>Historial</h1><p class="sub">Todo queda registrado con fecha y hora. Nadie puede borrarlo ni editarlo. Si algo está mal, se pide una corrección; lo vacío (una reunión o un proyecto sin datos) sí se puede borrar, y queda anotado aquí.</p></div>`;
-  if (pendC.length) html += `<section class="card" style="border-color:#4A3414;background:#1C130A"><p class="lbl" style="color:#FFC978">Correcciones pendientes</p>${pendC.map((c) => `<div><b class="small">${esc(st.member(c.requested_by).name)}:</b> <span class="small">${esc(c.text)}</span>${c.requested_by !== S.me.id ? `<div class="grid2" style="margin-top:8px"><button class="btn sm b-amber" data-act="corr" data-id="${c.id}" data-s="aprobada">Aprobar</button><button class="btn sm b-ghost" data-act="corr" data-id="${c.id}" data-s="rechazada">Rechazar</button></div>` : '<p class="muted" style="margin:4px 0 0">Esperando respuesta</p>'}</div>`).join('')}${st.isAdmin() ? '<p class="muted" style="margin:0">Al aprobar, el administrador aplica el cambio (por ejemplo, desmarcar y volver a marcar la tarea). El original queda en el historial.</p>' : ''}</section>`;
+  if (pendC.length) html += `<section class="card" style="border-color:#4A3414;background:#1C130A"><p class="lbl" style="color:#FFC978">Correcciones pendientes</p>${pendC.map((c) => `<div><b class="small">${esc(st.member(c.requested_by).name)}:</b> <span class="small">${esc(c.text)}</span>${c.requested_by !== S.me.id ? `<div class="grid2" style="margin-top:8px"><button class="btn sm b-amber" data-act="corr" data-id="${c.id}" data-s="aprobada">Aprobar</button><button class="btn sm b-ghost" data-act="corr" data-id="${c.id}" data-s="rechazada">Rechazar</button></div>` : '<p class="muted" style="margin:4px 0 0">Esperando respuesta</p>'}</div>`).join('')}${st.isAdmin() ? '<p class="muted" style="margin:0">Al aprobar, se aplica el cambio (por ejemplo, desmarcar y volver a marcar la tarea). El original queda en el historial.</p>' : ''}</section>`;
   html += `<div class="row" style="flex-wrap:wrap;gap:6px">${F.map(([k, t]) => `<button class="btn sm ${ui.histF === k ? 'b-amber' : 'b-ghost'}" data-act="histF" data-k="${k}">${t}</button>`).join('')}</div>`;
   let lastDay = '';
   html += `<section class="card" style="padding:6px 16px"><div class="list">${rows.map((x) => {
@@ -1635,19 +2268,10 @@ function vTeam() {
   const ms = S.data.members.filter((m) => m.active);
   const base = location.origin + location.pathname;
   let html = `${backTo('#/', 'Inicio')}<h1>Equipo</h1><p class="sub">${esc((S.teams.find((t) => t.team_id === S.teamId) || {}).team || '')} · entraste como ${esc(S.session.user.email)}</p>`;
-  html += `<section class="card" style="padding:12px 16px"><p class="lbl">Integrantes</p><div class="list">${ms.map((m) => {
-    const pendingInv = !m.user_id;
-    const link = base + '#/i/' + m.invite_code;
-    const msg = encodeURIComponent(`Hola, te invito a nuestro equipo en la app de registro. Entra aquí: ${link}`);
-    return `<div class="li">${av(m)}<span class="t"><b>${esc(m.name)}${m.id === me.id ? ' (tú)' : ''}</b><span>${ROLE[m.role]}${m.apoyo ? ' · recibe apoyo en el acabado' : ''}${pendingInv ? ' · invitación pendiente' : ''}</span>
-      ${pendingInv && m.invite_code ? `<span class="row" style="gap:6px;margin-top:8px"><a class="btn sm b-mint" href="https://wa.me/?text=${msg}" target="_blank" rel="noopener">Enviar por WhatsApp</a><button class="btn sm b-ghost" data-act="copy" data-t="${esc(link)}">Copiar enlace</button></span>` : ''}</span>
-      ${(me.role === 'admin' || m.id === me.id) && !pendingInv ? `<button class="btn sm b-ghost" data-act="rename" data-id="${m.id}">Editar</button>` : ''}</div>
-      ${(m.role === 'admin' || m.role === 'socio' || m.role === 'colaborador') ? waField(m, me.role === 'admin' || m.id === me.id) : ''}`;
-  }).join('')}</div></section>`;
-  if (me.role === 'admin') html += `<form data-form="invite" class="card"><p class="lbl">Invitar a tu socio</p>
-    <label class="field"><span>Nombre</span><input class="in" name="name" required placeholder="Nombre de tu socio"></label>
-    <label class="row small" style="gap:10px"><input type="checkbox" name="apoyo" checked style="width:20px;height:20px"> Recibe apoyo en el acabado (5.5): su montaje vence 2 días antes</label>
-    <button class="btn b-amber">Crear invitación</button><p class="muted" style="margin:0">Te dará un enlace para enviarle por WhatsApp. Vence en 7 días.</p></form>`;
+  // 1.4: los integrantes se gestionan en Administrador → Integrantes (Opción C). Aquí, solo tu ficha.
+  if (me.role === 'admin') html += `<a class="ait" href="#/admin/integrantes" style="border:1px solid var(--line);border-radius:18px;background:var(--card)"><span class="tic tint-blue">${icon.users}</span><span class="ttx"><b>Integrantes e invitaciones</b><span>${ms.filter((m) => m.role !== 'colaborador').map((m) => esc(m.name.split(' ')[0])).join(' · ')}${ms.some((m) => m.role === 'colaborador') ? ' · ' + ms.filter((m) => m.role === 'colaborador').length + ' colaborador(es)' : ''}</span></span>${icon.chev}</a>`;
+  else html += `<p class="lbl alb">Tu ficha</p>${memberCard(me, { canEdit: true })}<button class="hb x-amber" data-act="memSave">Guardar</button>
+    <section class="card" style="padding:12px 16px"><p class="lbl">Equipo</p><div class="list">${ms.filter((m) => m.id !== me.id && m.user_id).map((m) => `<div class="li">${av(m)}<span class="t"><b>${esc(m.name)}</b><span>${ROLE[m.role]}${m.phone ? ' · +51 ' + fmtPhone(m.phone) : ''}</span></span>${m.phone ? `<a class="btn sm b-ghost" href="${st.waLink(m, 'Hola')}" target="_blank" rel="noopener">WhatsApp</a>` : ''}</div>`).join('')}</div></section>`;
   const isEmpty = (p) => !S.data.videos.some((v) => v.project_id === p.id) && !S.data.events.some((e) => e.project_id === p.id);
   const prow = (p) => `<div class="li"><button data-act="openProject" data-id="${p.id}" class="t" style="background:none;border:none;text-align:left;color:inherit;cursor:pointer;padding:0;font:inherit"><b>${esc(p.client)} · ${esc(p.name)}</b><span>${R.money(p.budget)} · ${p.videos_total} videos · desde ${R.fmtDay(p.start_date)}</span></button>
     ${me.role === 'admin' ? (isEmpty(p) ? `<button class="btn sm b-red" data-act="delProject" data-id="${p.id}">Borrar</button>` : p.status === 'abierto' ? `<button class="btn sm b-ghost" data-act="archProject" data-id="${p.id}" data-on="1">Archivar</button>` : p.status === 'archivado' ? `<button class="btn sm b-ghost" data-act="archProject" data-id="${p.id}">Reabrir</button>` : '') : ''}
@@ -1658,7 +2282,7 @@ function vTeam() {
   ${arch.length ? `<p class="lbl" style="margin-top:6px">Archivados</p><div class="list" style="opacity:.75">${arch.map(prow).join('')}</div>` : ''}
   ${me.role === 'admin' ? '<p class="muted" style="margin:0">Un proyecto vacío se puede borrar. Uno con registros se archiva: deja de aparecer en el selector y su historial se conserva.</p>' : ''}</section>`;
   if (S.teams.length > 1) html += `<section class="card"><p class="lbl">Tus equipos</p>${S.teams.map((t) => `<button class="btn ${t.team_id === S.teamId ? 'b-amber' : 'b-ghost'}" data-act="team" data-id="${t.team_id}">${esc(t.team)}</button>`).join('')}</section>`;
-  if (st.canPractice()) html += `<section class="card"><p class="lbl">Modo práctica</p><p class="sub" style="margin:0">Prueba la app con un proyecto de ejemplo sin tocar los datos reales: nada llega a la base ni al historial. Puedes cambiar entre las dos vistas (administrador y socio).</p>${st.practice() ? '<button class="btn b-amber" data-act="practiceOff">Salir del modo práctica</button>' : '<button class="btn b-ghost" data-act="practiceOn">Entrar al modo práctica</button>'}</section>`;
+  if (st.canPractice()) html += `<section class="card"><p class="lbl">Modo práctica</p><p class="sub" style="margin:0">Prueba la app con un proyecto de ejemplo sin tocar los datos reales: nada llega a la base ni al historial. Puedes cambiar entre la vista de cada uno.</p>${st.practice() ? '<button class="btn b-amber" data-act="practiceOff">Salir del modo práctica</button>' : '<button class="btn b-ghost" data-act="practiceOn">Entrar al modo práctica</button>'}</section>`;
   html += `<section class="card"><p class="lbl">Instalar en el celular</p><p class="sub" style="margin:0"><b>iPhone:</b> en Safari, botón Compartir → "Agregar a pantalla de inicio". <b>Android:</b> en Chrome, menú ⋮ → "Instalar app".</p></section>`;
   html += `<button class="btn b-ghost" data-act="signOut">Cerrar sesión</button>`;
   html += `<p class="muted" style="text-align:center;margin:4px 0 0">Registro audiovisual · versión ${VERSION}</p>`;
@@ -1676,6 +2300,319 @@ function waField(m, canEdit) {
     <span class="in" style="flex:1;display:flex;align-items:center;gap:6px;min-height:44px;border-color:${digits && !ok ? 'var(--u0)' : ok ? 'var(--g-bd)' : 'var(--line2)'}"><b class="muted" style="font-size:14px">+51</b><input name="p" inputmode="numeric" maxlength="11" value="${esc(shown)}" placeholder="9XX XXX XXX" aria-label="WhatsApp de ${esc(m.name)}" style="flex:1;min-width:0;background:transparent;border:none;color:var(--tx);outline:none;font-size:15px">${ok ? `<span style="color:var(--mint)">${icon.tick}</span>` : ''}</span>
     <button class="btn sm x-green" style="min-height:44px">Guardar</button>${m.phone ? `<a class="btn sm b-ghost" style="min-height:44px" href="${st.waLink(m, 'Hola')}" target="_blank" rel="noopener">Probar</a>` : ''}</form>`;
 }
+// ==================================================================
+// 1.4 · Integrantes (Opción C)
+// ==================================================================
+const fmtPhone = (d) => String(d || '').replace(/\D/g, '').slice(0, 9).replace(/^(\d{3})(\d{0,3})(\d{0,3}).*/, (x, a, b, c) => [a, b, c].filter(Boolean).join(' '));
+const inviteLink = (m) => location.origin + location.pathname + '#/i/' + m.invite_code;
+function memberCard(m, o = {}) {
+  const me = S.me;
+  const canEdit = o.canEdit != null ? o.canEdit : (me.role === 'admin' || m.id === me.id);
+  const ch = (ui.memCh || {})[m.id] || {};
+  const name = ch.name != null ? ch.name : m.name;
+  const ph = String(ch.phone != null ? ch.phone : (m.phone || '')).replace(/\D/g, '');
+  const ok = st.PHONE_RE.test(ph);
+  const bad = ph.length > 0 && !ok;
+  const col = o.color || COLOR[m.role] || ['#22242C', '#C9C9D1'];
+  // 1.5: el líder lleva la etiqueta "Socio" (y debajo "Líder de proyecto"); el socio con apoyo, "Socio con apoyo".
+  const roleCh = { admin: ['Socio', '#18233A', '#A9C7FF'], socio: [m.apoyo ? 'Socio con apoyo' : 'Socio', '#18233A', '#A9C7FF'], colaborador: ['Colaborador', '#21163A', '#D6C2FF'] }[m.role] || ['', '#22242C', '#C9C9D1'];
+  const pending = !m.user_id && m.invite_code && !o.static;
+  const expired = pending && m.invite_expires && new Date(m.invite_expires) < new Date();
+  const editing = (ui.memEdit || {})[m.id];
+  const sub = o.sub != null ? o.sub : pending ? (expired ? 'La invitación venció' : 'Invitación pendiente · vence ' + R.fmtDay(R.limaDate(m.invite_expires))) : m.role === 'socio' ? (m.apoyo ? 'Williams hace su video final si envía el montaje a tiempo'.replace('Williams', LN()) : 'Edita sus videos completos') : m.role === 'admin' ? 'Confirma las llegadas y revisa las entregas' : 'Colaborador';
+  const msg = m.role === 'colaborador' ? `Hola ${m.name.split(' ')[0]}, te invito a trabajar con nosotros en la app de registro. Entra aquí para ver las condiciones del encargo: ${pending ? inviteLink(m) : ''}` : `Hola, te invito como Socio a nuestro equipo en la app de registro. Ahí marcamos nuestras tareas y vemos cuánto le toca a cada uno: ${pending ? inviteLink(m) : ''}`;
+  return `<section class="mcard">
+    <div class="row" style="gap:12px">
+      <span class="av" style="width:46px;height:46px;background:${col[0]};color:${col[1]};font-size:17px">${esc(String(name || '?').charAt(0).toUpperCase())}</span>
+      <div style="flex:1;min-width:0">${editing && canEdit && !o.static ? `<input class="in" data-mf="name" data-id="${m.id}" value="${esc(name)}" aria-label="Nombre de ${esc(m.name)}" style="min-height:40px">` : `<b class="num" style="display:block;font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}${m.id === me.id ? ' (tú)' : ''}</b>`}
+        ${m.role === 'admin' && !o.static ? `<span class="leadtag">${icon.star('currentColor', 12)}Líder de proyecto</span>` : ''}
+        <span class="muted" style="display:block;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${expired ? 'color:var(--u0)' : ''}">${esc(sub)}</span></div>
+      <span class="rolechip" style="background:${roleCh[1]};color:${roleCh[2]}">${roleCh[0]}</span>
+      ${canEdit && !o.static ? `<button class="ibtn" data-act="memEdit" data-id="${m.id}" aria-label="Editar nombre">${icon.pen('currentColor', 15)}</button>` : ''}
+    </div>
+    ${pending ? `<div class="row" style="gap:8px;flex-wrap:wrap">${expired ? `<button class="btn sm x-amber" data-act="memRenew" data-id="${m.id}">Enlace nuevo</button>` : `<a class="btn sm x-green" href="https://wa.me/${ph && ok ? '51' + ph : ''}?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">${waIc}Enviar por WhatsApp</a><button class="btn sm b-ghost" data-act="copy" data-t="${esc(inviteLink(m))}">Copiar enlace</button>`}<button class="btn sm b-ghost" data-act="memCancel" data-id="${m.id}" style="color:var(--r-fg2)">Cancelar</button></div>` : ''}
+    ${canEdit || ph ? `<div class="wafield"><span class="small" style="display:flex;align-items:center;gap:6px;font-weight:700;color:var(--tx2)">${waIc.replace('stroke="currentColor"', 'stroke="#6EE7B7"')}WhatsApp</span>
+      <div class="row" style="gap:8px"><span class="pfx">+51</span>${canEdit ? `<input class="in" type="tel" inputmode="numeric" maxlength="11" data-mf="phone" data-id="${m.id}" value="${esc(fmtPhone(ph))}" placeholder="9XX XXX XXX" aria-label="WhatsApp de ${esc(m.name)}" style="flex:1;min-width:0;${bad ? 'border-color:var(--u0)' : ''}">` : `<span class="in" style="flex:1;display:flex;align-items:center">${esc(fmtPhone(ph))}</span>`}<span class="okdot"${ok ? '' : ' hidden'}>${icon.tick}</span></div>
+      <span class="small wabad" style="color:#FFC978;font-weight:600"${bad ? '' : ' hidden'}>Debe tener 9 dígitos y empezar con 9</span>
+      <a class="linkbtn watry" href="https://wa.me/51${ph}?text=${encodeURIComponent('Hola')}" target="_blank" rel="noopener" style="color:#A7F3D0;text-decoration:none;align-self:flex-start"${ok ? '' : ' hidden'}>Probar chat ↗</a></div>` : ''}
+    ${apoyoSwitch(m, o)}${o.extra || ''}</section>`;
+}
+// 1.5 · Integrantes D: interruptor "Recibe apoyo en la edición" (lo propone el líder y lo acepta el socio).
+function apoyoSwitch(m, o) {
+  if (!st.isAdmin() || m.role !== 'socio' || o.static) return '';
+  const prop = st.proposals().find((x) => x.kind === 'apoyo' && x.status === 'pendiente' && x.data.member === m.id);
+  if (prop) return `<div class="pendrow"><span class="hdot blue"></span><p>Esperando que ${first(m)} acepte ${prop.data.apoyo ? 'recibir apoyo' : 'editar sin apoyo'}</p><button class="linkbtn" data-act="propWithdraw" data-id="${prop.id}">Retirar</button></div>`;
+  const on = !!m.apoyo;
+  const asking = (ui.apoyoAsk || null) === m.id;
+  const sw = `<div class="swrow"><span style="flex:1;min-width:0"><b>Recibe apoyo en la edición</b><small>${on ? 'Tiene su plazo de apoyo y ' + LN() + ' revisa lo que entrega por su cuenta' : 'Mismos plazos que ' + LN() + ': 12:00 montaje y 18:00 video final'}</small></span>
+    <button type="button" class="sw${on ? ' on' : ''}" role="switch" aria-checked="${on}" aria-label="Recibe apoyo en la edición" data-act="apoyoAsk" data-id="${m.id}"><i></i></button></div>`;
+  if (!m.user_id) return sw.replace('data-act="apoyoAsk"', 'data-act="apoyoPend"');
+  if (!asking) return sw;
+  return sw + `<div class="askbox"><b>${on ? '¿Quitar el apoyo a ' + first(m) + '?' : '¿Dar apoyo a ' + first(m) + '?'}</b>${apoyoFacts(!on, first(m), false).map((f) => `<p>${f}</p>`).join('')}
+    <div class="row" style="gap:8px"><button class="btn b-ghost" style="flex:1" data-act="apoyoAsk" data-id="${m.id}">Cancelar</button><button class="btn x-amber" style="flex:1.4" data-act="apoyoGo" data-id="${m.id}">Proponer a ${first(m)}</button></div></div>`;
+}
+function vIntegrantes() {
+  if (!st.isAdmin()) return adminOnly('');
+  const ms = S.data.members.filter((m) => m.active);
+  const socios = ms.filter((m) => m.role === 'admin' || m.role === 'socio').sort((a, b) => (a.role === 'admin' ? -1 : 1) - (b.role === 'admin' ? -1 : 1));
+  const cols = ms.filter((m) => m.role === 'colaborador');
+  const gph = (ui.gPhone != null ? ui.gPhone : ((st.settings().guillermo || {}).phone || ''));
+  const jobsOf = (m) => (S.data.jobs || []).filter((j) => j.member_id === m.id && ['propuesto'].concat(R.JOB_LIVE).indexOf(j.status) !== -1);
+  let html = `<div class="between" style="align-items:center">${backTo('#/admin', 'Administrador')}<span class="pill-amber">${icon.shield}Solo tú</span></div>
+    <div><h1 style="font-size:28px">Integrantes</h1><p class="sub">${esc((S.teams.find((t) => t.team_id === S.teamId) || {}).team || '')}</p></div>`;
+  html += `<p class="lbl alb">Socios</p>` + socios.map((m) => memberCard(m)).join('');
+  html += `<p class="lbl alb">Colaboradores</p>` + cols.map((m) => {
+    const js = jobsOf(m);
+    const sub = js.length ? js.map((j) => `Edición · ${j.video_ids.length} ${j.video_ids.length === 1 ? 'video' : 'videos'} · ${{ propuesto: 'por aprobar', invitado: 'invitado', activo: 'trabajando', finalizado: 'por confirmar', cerrado: 'cerrado' }[j.status]}`).join(' · ') : null;
+    return memberCard(m, { sub: !m.user_id && m.invite_code ? null : sub || 'Sin encargo activo', extra: js.length ? `<div class="row" style="gap:8px;flex-wrap:wrap">${js.map((j) => `<a class="btn sm b-ghost" href="#/encargo/${j.id}">Ver encargo · ${j.video_ids.length} ${j.video_ids.length === 1 ? 'video' : 'videos'}</a>`).join('')}</div>` : `<button class="btn sm b-ghost" data-act="jobNewFor" data-id="${m.id}">Armar un encargo</button>` });
+  }).join('');
+  html += memberCard({ id: 'G', name: 'Guillermo', role: 'colaborador', phone: String(gph).replace(/\D/g, ''), user_id: 'x', active: true }, { static: true, canEdit: true, sub: 'Preproducción · 80 % si lo envía un socio con apoyo; si no, 100 %', color: ['#C9B2FF', '#160F22'] })
+    .replace('data-mf="phone" data-id="G"', 'data-mf="gphone" data-id="G"');
+  html += `<button class="dashbtn" data-act="memInvite">${icon.plus}Invitar integrante</button>
+    <button class="hb x-amber" data-act="memSave">Guardar</button>
+    <p class="muted" style="margin:-6px 4px 0;text-align:center">El número solo se usa para el botón de WhatsApp.</p>`;
+  return html;
+}
+function sheetInvite() {
+  const d = ui.inv || { role: 'socio', apoyo: true, name: '', phone: '' };
+  const isC = d.role === 'colaborador';
+  const roles = [['socio', 'Socio', 'Todas las etapas, reparto 2 y 2, aprueba cambios'], ['colaborador', 'Colaborador', 'Un servicio puntual, solo sus videos']];
+  return `<h2>Invita a alguien</h2><p class="sub" style="margin:0">Le llega un enlace por WhatsApp.</p>
+    <label class="field"><span>Nombre</span><input class="in" data-inv="name" value="${esc(d.name)}" placeholder="${isC ? 'Nombre del editor' : 'Nombre de tu socio'}"></label>
+    <label class="field"><span>WhatsApp</span><span class="row" style="gap:8px"><span class="pfx">+51</span><input class="in" type="tel" inputmode="numeric" maxlength="11" data-inv="phone" value="${esc(fmtPhone(d.phone))}" placeholder="9XX XXX XXX" style="flex:1;min-width:0"></span></label>
+    <div class="field"><span>Rol</span><div class="row" style="gap:8px">${roles.map(([k, t, s]) => `<button class="rolebtn${d.role === k ? ' on' : ''}" data-act="invRole" data-k="${k}"><b>${t}</b><small>${s}</small></button>`).join('')}</div></div>
+    ${isC ? `<div class="pmsg pm-blue"><span class="pdot"></span><p>Luego armas su encargo: videos, monto por video y quién cubre el excedente. ${otherPartner() ? first(otherPartner()) + ' lo aprueba' : 'Queda listo'} y le llega la invitación.</p></div>
+      <button class="hb x-amber" data-act="invGo">Armar el encargo${arrow}</button>`
+      : `<label class="row small" style="gap:10px"><input type="checkbox" data-inv="apoyo" ${d.apoyo ? 'checked' : ''} style="width:22px;height:22px"> Recibe apoyo en el video final (entregas al límite)</label>
+      <button class="hb x-amber" data-act="invGo">Crear invitación</button>`}
+    <button class="btn b-ghost" data-act="close">Cancelar</button>`;
+}
+
+// ==================================================================
+// 1.4 · Entrega vencida: reprogramar (solo el administrador, cualquier video sin entregar)
+// ==================================================================
+function sheetReprog(v) {
+  const c = st.ctx(v.project_id);
+  const s = R.videoState(v, c, new Date());
+  const tomorrow = R.addDays(R.limaDate(new Date()), 1);
+  const def = v.publish_date >= tomorrow ? R.addDays(v.publish_date, 1) : R.addDays(tomorrow, 1);
+  const lateMine = s.overdue && s.inCharge === S.me.id;
+  return `<form data-form="reprog" style="display:contents"><input type="hidden" name="v" value="${v.id}">
+    <h2>Reprogramar entrega · video ${v.num}</h2>
+    <p class="sub" style="margin:0">Hoy publica ${R.fmtDay(v.publish_date)}. Elige la fecha que acordaste con el cliente: los plazos de montaje y video final se mueven con ella.</p>
+    <label class="field"><span>Nueva fecha de publicación</span><input class="in" type="date" name="d" min="${tomorrow}" value="${def}" required></label>
+    <label class="field"><span>Nota (opcional)</span><input class="in" name="note" maxlength="140" placeholder="Ej.: lo acordé con el cliente por WhatsApp"></label>
+    ${lateMine ? pmsg('red', 'La entrega ya venció y estaba en tus manos: resta 3 puntos de racha.') : s.overdue ? pmsg('amber', 'La entrega ya venció.') : ''}
+    <button class="hb x-amber">Reprogramar entrega</button><button type="button" class="btn b-ghost" data-act="close">Cancelar</button></form>`;
+}
+const reprogLines = (v) => (v.reprog || []).map((r) => `<div class="li"><span class="t"><b>Entrega reprogramada: ${R.fmtDay(r.from)} → ${R.fmtDay(r.to)}</b><span>${esc(first(st.member(r.by)))} · ${R.fmtWhen(r.at)}${r.late ? ' · ya estaba vencida' : ''}${r.note ? ' · ' + esc(r.note) : ''}</span></span></div>`).join('');
+
+// ==================================================================
+// 1.4 · Colaborador externo: encargo (socios) y "Mis videos" (colaborador)
+// ==================================================================
+const JOB_CH = {
+  montaje: ['Montaje', 'Esperando montaje', '#FFC978', '#2E2010'], rev1: ['En revisión', 'Revisar montaje', '#A9C7FF', '#18233A'],
+  aj1: ['Ajustes', 'Haciendo ajustes', '#FFC978', '#2E2010'], final: ['Video final', 'Esperando final', '#FFC978', '#2E2010'],
+  rev2: ['Revisión final', 'Revisión final', '#A9C7FF', '#18233A'], aj2: ['Últimos ajustes', 'Últimos ajustes', '#FFC978', '#2E2010'],
+  upload: ['Subir a Drive', 'Subiendo a Drive', '#6EE7B7', '#12221A'], done: ['Listo', 'Listo', '#6EE7B7', '#12221A']
+};
+const jobCap = (p) => { const r = R.rates(p); return r.montaje + r.acabado; };
+const jobDues = (v) => ({ m: R.at(R.addDays(v.publish_date, -3), '21:00'), f: R.at(R.addDays(v.publish_date, -1), '18:00') });
+function jobMoney(j, p) {
+  const n = j.video_ids.length, cap = jobCap(p), price = Number(j.price) || 0;
+  return { n, cap, price, total: price * n, covered: Math.min(price, cap) * n, gap: Math.max(0, price - cap) * n };
+}
+const payerName = (j, vids) => {
+  if (j.payer === 'half') return 'A medias';
+  if (j.payer === 'tbd') return 'Por definir';
+  const owners = Array.from(new Set(vids.map((v) => v.owner)));
+  return owners.map((id) => first(st.member(id))).join(' y ') + ' (dueño de los videos)';
+};
+function vJobNew(params) {
+  if (!st.isAdmin()) return adminOnly('');
+  const p = st.project();
+  if (!p) return `${backTo('#/admin/integrantes', 'Integrantes')}<div class="card"><p class="empty">Primero crea un proyecto.</p></div>`;
+  const c = st.ctx(p.id);
+  const now = new Date();
+  const d = ui.job || (ui.job = { member_id: params.m || '', name: (ui.inv || {}).name || '', phone: (ui.inv || {}).phone || '', video_ids: [], price: jobCap(p), payer: 'owner', drive_url: '' });
+  const cols = S.data.members.filter((m) => m.role === 'colaborador' && m.active);
+  const busy = new Set((S.data.jobs || []).filter((j) => ['propuesto'].concat(R.JOB_LIVE).indexOf(j.status) !== -1).flatMap((j) => j.video_ids));
+  const eligible = c.videos.filter((v) => { const s = R.videoState(v, c, now); return !s.mo && !s.ac && !busy.has(v.id); }).sort((a, b) => a.num - b.num);
+  const sel = eligible.filter((v) => d.video_ids.indexOf(v.id) !== -1);
+  const m = jobMoney({ video_ids: sel.map((v) => v.id), price: d.price }, p);
+  const soc = otherPartner();
+  const who = d.member_id ? st.member(d.member_id) : { name: d.name || 'el editor' };
+  const owners = Array.from(new Set(sel.map((v) => v.owner)));
+  const ownerTxt = owners.length ? owners.map((id) => first(st.member(id))).join(' y ') : 'Dueño de los videos';
+  const payerTxt = d.payer === 'half' ? `Cada uno pone ${R.money(m.gap / 2)}.` : d.payer === 'tbd' ? `Queda anotado: faltan ${R.money(m.gap)} y lo definen conversando.` : `${ownerTxt} pone ${R.money(m.gap)}.`;
+  const msg = `Hola ${esc(String(who.name).split(' ')[0])}, te invito a editar ${m.n || '…'} ${m.n === 1 ? 'video' : 'videos'} de ${esc(p.client)} por ${R.money(m.price)} cada uno (${R.money(m.total)} en total). Entra aquí para ver las condiciones del encargo.`;
+  let html = `${backTo('#/admin/integrantes', 'Integrantes')}<div class="row" style="gap:12px"><span class="av" style="width:40px;height:40px;background:#FFB547;color:#1A1203">${esc(ini(S.me.name)).charAt(0)}</span><div style="flex:1"><h1 style="font-size:24px;margin:0">Contratar editor</h1><p class="sub" style="margin:2px 0 0">${esc(p.client)} · ${esc(p.name)}</p></div></div>`;
+  html += `<section class="card"><p class="lbl" style="margin:0">Editor</p>
+    <div class="row" style="gap:8px;flex-wrap:wrap">${cols.map((x) => `<button class="chipbtn${d.member_id === x.id ? ' on' : ''}" data-act="jobWho" data-id="${x.id}">${esc(x.name)}</button>`).join('')}<button class="chipbtn${!d.member_id ? ' on' : ''}" data-act="jobWho" data-id="">${icon.plus}Nuevo</button></div>
+    ${!d.member_id ? `<label class="field"><span>Nombre</span><input class="in" data-job="name" value="${esc(d.name)}" placeholder="Nombre del editor"></label>
+      <label class="field"><span>WhatsApp</span><span class="row" style="gap:8px"><span class="pfx">+51</span><input class="in" type="tel" inputmode="numeric" maxlength="11" data-job="phone" value="${esc(fmtPhone(d.phone))}" placeholder="9XX XXX XXX" style="flex:1;min-width:0"></span></label>` : ''}</section>`;
+  html += `<section class="card"><p class="lbl" style="margin:0">El encargo</p>
+    <div class="krow"><span>Servicio</span><b>Edición completa (montaje y final)</b></div>
+    <div class="krow"><span>Revisiones</span><b>1 de montaje + 1 final</b></div>
+    <p class="lbl" style="margin:4px 0 0">Videos</p>
+    ${eligible.length ? `<div class="vpick">${eligible.map((v) => { const on = d.video_ids.indexOf(v.id) !== -1; const o = st.member(v.owner); const col = COLOR[o.role] || ['#22242C', '#C9C9D1']; return `<button class="vpk${on ? ' on' : ''}" data-act="jobVid" data-id="${v.id}" aria-pressed="${on}"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span class="vins" style="background:${col[0]};color:${col[1]}">${esc(ini(o.name)).charAt(0)}</span><small>${R.fmtDay(v.publish_date)}</small></button>`; }).join('')}</div>` : '<p class="empty" style="margin:0">No hay videos sin montaje para encargar.</p>'}
+    <div class="pricebox"><span>Monto acordado por video</span><div class="row" style="gap:8px"><button class="sb" data-act="jobPrice" data-d="-5" aria-label="Bajar monto" ${d.price <= 5 ? 'disabled' : ''}>−</button><b class="num" style="min-width:96px;text-align:center;font-size:18px">${R.money(d.price)}</b><button class="sb" data-act="jobPrice" data-d="5" aria-label="Subir monto">+</button></div></div>
+    <p class="lbl" style="margin:4px 0 0">Plazos del editor</p><p class="muted" style="margin:-4px 0 0;line-height:1.45">Montaje 3 días antes de la publicación a las 21:00 · final 1 día antes a las 18:00. Así ustedes revisan antes de su propio plazo.</p>
+    <label class="field"><span>Carpeta de Drive para subir los videos (opcional)</span><input class="in" type="url" data-job="drive_url" value="${esc(d.drive_url)}" placeholder="https://drive.google.com/…"></label></section>`;
+  html += `<section class="card privbox"><div class="between" style="align-items:center"><p class="lbl" style="margin:0;color:#FFB09C">Solo para ustedes</p><span class="small" style="display:flex;align-items:center;gap:5px;color:#C9A89C">${icon.lock}el editor no lo ve</span></div>
+    <div class="krow"><span>Acordado con el editor</span><b class="num">${R.money(m.price)} × ${m.n} = ${R.money(m.total)}</b></div>
+    <div class="krow"><span>Cubre el presupuesto <small>(tope ${R.money(m.cap)} por video)</small></span><b class="num" style="color:#6EE7B7">${R.money(m.covered)}</b></div>
+    <div class="gapbox${m.gap > 0 ? ' bad' : ''}"><b>${m.gap > 0 ? 'Excedente a cubrir aparte' : 'Sin excedente'}</b><b class="num">${R.money(m.gap)}</b></div>
+    ${m.gap > 0 ? `<p class="lbl" style="margin:2px 0 0">¿Quién cubre el excedente?</p><div class="row" style="gap:6px;flex-wrap:wrap">${[['owner', ownerTxt + ' (dueño)'], ['half', 'A medias'], ['tbd', 'Por definir']].map(([k, t]) => `<button class="paybtn${d.payer === k ? ' on' : ''}" data-act="jobPayer" data-k="${k}">${esc(t)}</button>`).join('')}</div><p class="small" style="margin:0;color:#E4D5CF">${payerTxt}</p>` : ''}</section>`;
+  html += `<div class="pmsg pm-green"><span class="pdot"></span><p><span class="small" style="display:block;margin-bottom:4px;color:#6EE7B7">Así le llega al editor</span>${msg}</p></div>`;
+  const ready = (d.member_id || d.name.trim()) && sel.length && d.price > 0;
+  html += `<button class="hb ${ready ? 'x-amber' : 'x-off'}" data-act="jobCreate" ${ready ? '' : 'disabled'}>${soc ? 'Pedir aprobación a ' + first(soc) : 'Crear encargo'}</button>
+    <p class="muted" style="margin:-4px 0 0;text-align:center">${soc ? 'La contratación necesita el acuerdo de los dos (14.2).' : 'Queda en el historial.'}</p>`;
+  return html;
+}
+function jobDetailCard(j, it, v, me) {
+  const isAdmOrSoc = isPartner(me);
+  const ch = JOB_CH[it.stage];
+  const due = jobDues(v);
+  const editor = first(st.member(j.member_id));
+  const undo = it.prev && it.prev.by === me.id && R.within(it.prev.at) ? undoLink('jobUndo', `data-id="${it.id}"`) : '';
+  const list = (arr, title, editable) => `<div class="obsbox"><p>${title}</p>${(arr || []).map((o, k) => `<button class="obs${o.done ? ' done' : ''}" ${editable ? `data-act="jobCheck" data-id="${it.id}" data-i="${k}"` : 'disabled'}><i>${icon.tick}</i><span>${esc(o.t)}</span></button>`).join('')}</div>`;
+  let title = '', sub = '', body = '', acts = '';
+  const n1 = (it.obs1 || []).filter((o) => o.done).length, n2 = (it.obs2 || []).filter((o) => o.done).length;
+  const late = (at, dd) => at && new Date(at) > dd ? ' · tarde' : at ? ' · a tiempo' : '';
+  if (it.stage === 'montaje') { title = 'Esperando el montaje'; sub = 'Plazo: ' + R.fmtWhen(due.m) + '. Te avisamos cuando ' + editor + ' lo entregue.'; }
+  else if (it.stage === 'rev1') {
+    title = 'Revisión de montaje · 1 de 2'; sub = `Entregado ${R.fmtWhen(it.montaje_at)}${late(it.montaje_at, due.m)}. Escribe las observaciones, una por línea: ${editor} las marcará una por una.`;
+    body = `<textarea class="in" data-obs="${it.id}" rows="4" placeholder="Subir el volumen de la voz en 0:12&#10;Cortar la pausa larga en 0:40" style="min-height:110px;padding-top:12px">${esc((ui.obs || {})[it.id] || '')}</textarea>`;
+    acts = `<button class="hb x-amber" data-act="jobObs" data-id="${it.id}">Enviar observaciones</button><button class="hb x-ghost" data-act="jobOk" data-id="${it.id}">Aprobar sin cambios</button>`;
+  } else if (it.stage === 'aj1') { title = `${editor} está haciendo ajustes`; sub = 'Luego entrega el video final antes del ' + R.fmtWhen(due.f) + '.'; body = list(it.obs1, `Revisión de montaje · ${n1} de ${(it.obs1 || []).length}`, false); }
+  else if (it.stage === 'final') { title = 'Montaje aprobado sin cambios'; sub = 'Plazo del video final: ' + R.fmtWhen(due.f) + '.'; }
+  else if (it.stage === 'rev2') {
+    title = 'Revisión final · 2 de 2'; sub = `Entregado ${R.fmtWhen(it.final_at)}${late(it.final_at, due.f)}. Es la última: si hay observaciones, ${editor} las corrige y lo sube directo a Drive.`;
+    body = `<textarea class="in" data-obs="${it.id}" rows="3" placeholder="Una observación por línea" style="min-height:90px;padding-top:12px">${esc((ui.obs || {})[it.id] || '')}</textarea>`;
+    acts = `<button class="hb x-green" data-act="jobOk" data-id="${it.id}">${icon.check}Aprobar: está perfecto</button><button class="hb x-ghost" data-act="jobObs" data-id="${it.id}">Enviar observaciones finales</button>`;
+  } else if (it.stage === 'aj2') { title = `Últimos ajustes de ${editor}`; sub = 'Cuando los marque todos, podrá subirlo a Drive.'; body = list(it.obs2, `Revisión final · ${n2} de ${(it.obs2 || []).length}`, false); }
+  else if (it.stage === 'upload') { title = `Aprobado · ${editor} lo está subiendo`; sub = 'Te avisamos cuando lo marque como subido.'; }
+  else { title = `Video ${v.num} listo`; sub = `Aprobado y subido a Drive · ${R.fmtWhen(it.uploaded_at)}.`; }
+  if (!isAdmOrSoc) acts = '';
+  return `<section class="card jobd"><div class="between" style="align-items:center"><p class="lbl" style="margin:0">Video ${v.num}${v.title ? ' · ' + esc(v.title) : ''}</p><span class="chip13" style="color:${ch[2]};background:${ch[3]}">${ch[1]}</span></div>
+    <b class="num" style="font-size:17px">${title}</b><p class="muted" style="margin:-6px 0 0;line-height:1.45">${sub}</p>${body}${acts}${undo ? `<div class="pextra">${undo}</div>` : ''}</section>`;
+}
+function vJob(id) {
+  const j = (S.data.jobs || []).find((x) => x.id === id);
+  if (!j) return `${backTo('#/', 'Inicio')}<p class="empty">Encargo no encontrado.</p>`;
+  const me = S.me;
+  const p = projOf(j.project_id);
+  const cm = st.member(j.member_id);
+  const vids = j.video_ids.map((x) => S.data.videos.find((v) => v.id === x)).filter(Boolean).sort((a, b) => a.num - b.num);
+  const items = st.jobItems(j.id);
+  const m = jobMoney(j, p);
+  const ownerTxt = Array.from(new Set(vids.map((v) => v.owner))).map((x) => first(st.member(x))).join(' y ');
+  const prop = st.member(j.proposed_by);
+  const nums = vids.map((v) => v.num).join(', ');
+  let html = `${backTo(st.isAdmin() ? '#/admin/integrantes' : '#/', st.isAdmin() ? 'Integrantes' : 'Inicio')}<div class="row" style="gap:12px"><span class="av" style="width:40px;height:40px;background:#FF8A65;color:#1A0E08">${esc(ini(cm.name)).charAt(0)}</span><div style="flex:1;min-width:0"><h1 style="font-size:22px;margin:0">Encargo · ${esc(cm.name)}</h1><p class="sub" style="margin:2px 0 0">${esc(p.client)} · ${esc(p.name)} · ${vids.length === 1 ? 'video' : 'videos'} ${nums}</p></div></div>`;
+  const ban = (tone, t, d) => `<section class="jban jb-${tone}"><b>${t}</b>${d ? `<p>${d}</p>` : ''}</section>`;
+  const summary = `<section class="card privbox"><div class="between" style="align-items:center"><p class="lbl" style="margin:0;color:#FFB09C">Solo para ustedes</p><span class="small" style="display:flex;align-items:center;gap:5px;color:#C9A89C">${icon.lock}el editor no lo ve</span></div>
+    <div class="krow"><span>Acordado con el editor</span><b class="num">${R.money(m.price)} × ${m.n} = ${R.money(m.total)}</b></div>
+    <div class="krow"><span>Cubre el presupuesto <small>(tope ${R.money(m.cap)} por video)</small></span><b class="num" style="color:#6EE7B7">${R.money(m.covered)}</b></div>
+    <div class="gapbox${m.gap > 0 ? ' bad' : ''}"><b>${m.gap > 0 ? 'Excedente a cubrir aparte' : 'Sin excedente'}</b><b class="num">${R.money(m.gap)}</b></div>
+    ${m.gap > 0 ? `<div class="krow"><span>Lo cubre</span><b>${esc(payerName(j, vids))}</b></div>` : ''}</section>`;
+  const terms = `<section class="card"><p class="lbl" style="margin:0">El encargo</p><div class="krow"><span>Servicio</span><b>Edición completa</b></div><div class="krow"><span>Videos</span><b>${nums}</b></div><div class="krow"><span>Revisiones</span><b>1 de montaje + 1 final</b></div>${j.drive_url ? `<div class="krow"><span>Drive</span><a href="${esc(j.drive_url)}" target="_blank" rel="noopener">Abrir carpeta</a></div>` : ''}</section>`;
+  if (j.status === 'propuesto') {
+    if (me.id === j.proposed_by) html += ban('wait', 'Esperando a ' + first(otherPartner() || { name: 'tu socio' }), 'Le llegó el encargo para aprobarlo.') + terms + summary + (st.isAdmin() ? `<button class="btn b-ghost" data-act="jobDecide" data-id="${j.id}" data-s="cancelado" style="color:var(--r-fg2)">Cancelar encargo</button>` : '');
+    else html += ban('warn', `${esc(first(prop))} propone contratar un editor`, `Para los videos ${nums}. Revisa el monto y quién cubre el excedente.`) + terms + summary + `<button class="hb x-blue" data-act="jobDecide" data-id="${j.id}" data-s="invitado">${icon.check}Aprobar y enviar invitación</button><button class="btn b-ghost" data-act="jobDecide" data-id="${j.id}" data-s="rechazado">Rechazar</button>`;
+    return html;
+  }
+  if (j.status === 'rechazado' || j.status === 'cancelado') return html + ban('wait', j.status === 'rechazado' ? 'Encargo rechazado' : 'Encargo cancelado', '') + terms + summary;
+  if (j.status === 'invitado') {
+    const pend = !cm.user_id && cm.invite_code;
+    const msg = `Hola ${String(cm.name).split(' ')[0]}, te invito a editar ${m.n} ${m.n === 1 ? 'video' : 'videos'} de ${p.client} por ${R.money(m.price)} cada uno (${R.money(m.total)} en total). Entra aquí para ver las condiciones del encargo: ${pend ? inviteLink(cm) : location.origin + location.pathname}`;
+    html += ban('wait', pend ? 'Invitación lista' : 'Encargo enviado', 'Esperando que el editor acepte las condiciones.');
+    html += `<div class="row" style="gap:8px"><a class="hb x-green" style="flex:2;font-size:14px" href="https://wa.me/${cm.phone ? '51' + cm.phone : ''}?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">${waIc}Enviar por WhatsApp</a>${pend ? `<button class="hb x-ghost" style="flex:1;font-size:14px" data-act="copy" data-t="${esc(inviteLink(cm))}">Copiar enlace</button>` : ''}</div>`;
+    html += terms + summary + (st.isAdmin() ? `<button class="btn b-ghost" data-act="jobDecide" data-id="${j.id}" data-s="cancelado" style="color:var(--r-fg2)">Cancelar encargo</button>` : '');
+    return html;
+  }
+  const doneN = items.filter((i) => i.stage === 'done').length;
+  const pend = items.filter((i) => i.stage === 'rev1' || i.stage === 'rev2').length;
+  if (j.status === 'finalizado') html += ban('warn', 'El editor marcó el servicio como finalizado', `Revisa que los ${vids.length} videos estén en Drive y confírmalo.`);
+  else if (j.status === 'cerrado') html += ban('ok', 'Encargo cerrado', 'Pago al editor registrado ' + R.fmtWhen(j.closed_at) + '.');
+  else if (pend) html += ban('warn', pend + (pend === 1 ? ' video por revisar' : ' videos por revisar'), 'Las observaciones le llegan al editor como checklist.');
+  const selId = (ui.jobSel || {})[j.id] || (items.find((i) => i.stage === 'rev1' || i.stage === 'rev2') || items[0] || {}).video_id;
+  html += `<section class="card" style="gap:8px"><div class="between" style="align-items:center"><p class="lbl" style="margin:0">Videos del editor</p><span class="muted">${doneN} de ${vids.length} listos</span></div>
+    ${vids.map((v) => { const it = items.find((i) => i.video_id === v.id) || { stage: 'montaje' }; const chh = JOB_CH[it.stage]; const on = v.id === selId; const need = it.stage === 'rev1' || it.stage === 'rev2'; const dd = jobDues(v); const due = it.stage === 'montaje' ? 'Montaje: ' + R.fmtWhen(dd.m) : it.stage === 'done' ? 'Subido a Drive' : it.stage === 'upload' ? 'Aprobado · falta subir' : 'Final: ' + R.fmtWhen(dd.f);
+      return `<button class="jvid${on ? ' on' : ''}" data-act="jobSel" data-j="${j.id}" data-v="${v.id}"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span style="flex:1;min-width:0"><b style="display:block;font-size:13px">Video ${v.num} · publica ${R.fmtDay(v.publish_date)}</b><span class="small" style="display:block;margin-top:1px;color:${need ? '#FFC978' : 'var(--tx4)'}">${due}</span></span><span class="chip13" style="color:${chh[2]};background:${chh[3]}">${chh[1]}</span></button>`; }).join('')}</section>`;
+  const sv = vids.find((v) => v.id === selId);
+  const sit = items.find((i) => i.video_id === selId);
+  if (sv && sit) html += jobDetailCard(j, sit, sv, me);
+  if (j.status === 'finalizado' || j.status === 'cerrado') html += summary.replace('Solo para ustedes', 'Resumen del encargo') + (j.status === 'finalizado' ? `<button class="hb x-amber" data-act="jobClose" data-id="${j.id}">Confirmar y registrar el pago al editor</button><p class="muted" style="margin:-4px 0 0;text-align:center">Estos montos pasan solos a la liquidación del cierre del proyecto.</p>` : '');
+  else html += summary;
+  return html;
+}
+// Vista del colaborador (EncargoA, vista del editor).
+function vColab() {
+  const H = S.colab || { jobs: [] };
+  const me = S.me;
+  const jobs = H.jobs || [];
+  let html = `<div class="between" style="align-items:center"><div style="min-width:0"><p class="muted" style="margin:0">Hola, ${esc(first(me))} · Colaborador</p><h1 style="font-size:24px;margin:2px 0 0">${jobs.length === 1 ? esc(jobs[0].project.client) + ' · ' + esc(jobs[0].project.name) : 'Mis videos'}</h1></div><span class="pill-amber" style="background:#2A1810;color:#FFB09C">Edición</span></div>`;
+  if (!jobs.length) return html + `<section class="jban jb-wait"><b>Todavía no hay encargo</b><p>Cuando el equipo lo apruebe, aparecerá aquí.</p></section>`;
+  const sj = jobs.find((x) => x.id === ui.colabJob) || jobs[jobs.length - 1];
+  if (jobs.length > 1) html += `<div class="row" style="gap:6px;flex-wrap:wrap">${jobs.map((x) => `<button class="chipbtn${x.id === sj.id ? ' on' : ''}" data-act="colabJob" data-id="${x.id}">${esc(x.project.client)} · ${x.videos.length} videos</button>`).join('')}</div>`;
+  const n = sj.videos.length;
+  const price = Number(sj.price);
+  if (sj.status === 'invitado') {
+    html += `<section class="card"><p class="lbl" style="margin:0;color:#FFB09C">Condiciones del encargo</p>
+      <div class="krow"><span>Servicio</span><b>Edición completa</b></div><div class="krow"><span>Videos</span><b>${n} · ${esc(sj.project.client)}</b></div>
+      <div class="krow"><span>Pago</span><b class="num">${R.money(price)} por video · ${R.money(price * n)}</b></div><div class="krow"><span>Cuándo se paga</span><b>3 días después de confirmar</b></div>
+      <div style="height:1px;background:var(--line)"></div>
+      ${[['Plazos:', 'montaje 3 días antes de la publicación a las 21:00; video final 1 día antes a las 18:00.'], ['Revisiones:', '2 en total: una del montaje y una del final. Las observaciones te llegan como checklist.'], ['Entrega:', 'márcala en la app aunque envíes el archivo por WhatsApp o Drive, así queda registrada la hora.'], ['Final:', 'cuando el video esté aprobado, lo subes a la carpeta de Drive del proyecto.']].map(([t, d]) => `<div class="row small" style="gap:10px;align-items:flex-start;line-height:1.45"><span style="width:6px;height:6px;border-radius:50%;background:#FF8A65;flex-shrink:0;margin-top:7px"></span><span><b>${t}</b> ${d}</span></div>`).join('')}</section>
+      <button class="hb x-coral" data-act="colabAccept" data-id="${sj.id}">${icon.check}Acepto el encargo</button><p class="muted" style="margin:-4px 0 0;text-align:center">Puedes volver a ver las condiciones cuando quieras.</p>`;
+    return html;
+  }
+  const doneN = sj.videos.filter((v) => v.item.stage === 'done').length;
+  html += `<section class="wallet"><div class="between" style="align-items:center"><span class="lbl" style="color:var(--w-title,var(--mint))">Tu pago en este proyecto</span><span class="muted" style="color:var(--w-sub)">${icon.lock} Solo tú</span></div>
+    <div class="row" style="gap:8px;align-items:baseline"><b class="num" style="font-size:34px;line-height:1">${R.money(price * doneN)}</b><span class="small" style="color:var(--w-sub)">de ${R.money(price * n)}</span></div>
+    <p class="small" style="margin:0;color:var(--w-sub)">${R.money(price)} por video aprobado y subido · se paga 3 días después de confirmar el servicio</p></section>`;
+  if (sj.status === 'activo' && doneN === n) html += `<section class="jban jb-ok"><b>¡Terminaste tus ${n} videos!</b><p>Marca el servicio como finalizado para que lo confirmen y te paguen.</p></section><button class="hb x-coral" data-act="colabFinish" data-id="${sj.id}">Servicio finalizado</button>`;
+  if (sj.status === 'finalizado') html += `<section class="jban jb-wait"><b>Servicio finalizado</b><p>El equipo lo está confirmando. Te pagarán ${R.money(price * n)} dentro de los 3 días siguientes.</p></section>`;
+  if (sj.status === 'cerrado') html += `<section class="jban jb-ok"><b>Servicio confirmado</b><p>Recibirás ${R.money(price * n)}. ¡Gracias por tu trabajo!</p></section>`;
+  const selId = (ui.colabSel || {})[sj.id] || (sj.videos.find((v) => ['montaje', 'aj1', 'final', 'aj2', 'upload'].indexOf(v.item.stage) !== -1) || sj.videos[0]).id;
+  html += `<section class="card" style="gap:8px"><div class="between" style="align-items:center"><p class="lbl" style="margin:0">Tus videos</p><span class="muted">${doneN} de ${n} listos</span></div>
+    ${sj.videos.map((v) => { const it = v.item; const chh = JOB_CH[it.stage]; const on = v.id === selId; const mine = ['montaje', 'aj1', 'final', 'aj2', 'upload'].indexOf(it.stage) !== -1; const due = it.stage === 'montaje' ? 'Montaje: ' + R.fmtWhen(v.montaje_due) : it.stage === 'done' ? 'Subido a Drive' : it.stage === 'upload' ? 'Aprobado · falta subir' : 'Final: ' + R.fmtWhen(v.final_due);
+      return `<button class="jvid${on ? ' on c' : ''}" data-act="colabSel" data-j="${sj.id}" data-v="${v.id}"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span style="flex:1;min-width:0"><b style="display:block;font-size:13px">Video ${v.num} · publica ${R.fmtDay(v.publish_date)}</b><span class="small" style="display:block;margin-top:1px;color:${mine ? '#FFC978' : 'var(--tx4)'}">${due}</span></span><span class="chip13" style="color:${chh[2]};background:${chh[3]}">${chh[0]}</span></button>`; }).join('')}</section>`;
+  const v = sj.videos.find((x) => x.id === selId);
+  if (v) {
+    const it = v.item; const ch = JOB_CH[it.stage];
+    const can = sj.status === 'activo';
+    const list = (arr, title) => `<div class="obsbox"><p>${title}</p>${(arr || []).map((o, k) => `<button class="obs${o.done ? ' done' : ''}" ${can ? `data-act="colabCheck" data-id="${it.id}" data-i="${k}"` : 'disabled'}><i>${icon.tick}</i><span>${esc(o.t)}<small>Observación del equipo</small></span></button>`).join('')}</div>`;
+    const all = (arr) => (arr || []).every((o) => o.done);
+    const n1 = (it.obs1 || []).filter((o) => o.done).length, n2 = (it.obs2 || []).filter((o) => o.done).length;
+    let title = '', sub = '', body = '', acts = '', note = '';
+    const btn = (t, act, dis) => `<button class="hb ${dis ? 'x-off' : 'x-coral'}" data-act="colabStep" data-id="${it.id}" data-k="${act}" ${dis ? 'disabled' : ''}>${t}</button>`;
+    if (it.stage === 'montaje') { title = 'Entrega el montaje'; sub = 'Plazo: ' + R.fmtWhen(v.montaje_due) + '. Si lo enviaste por WhatsApp o Drive, márcalo aquí para que quede registrado a tiempo.'; acts = v.shot ? btn('Entregué el montaje', 'montaje') : ''; note = v.shot ? '' : 'Se activa cuando el video esté grabado.'; }
+    else if (it.stage === 'rev1') { title = 'Estamos revisando tu montaje'; sub = `Entregado ${R.fmtWhen(it.montaje_at)}. Te llegarán las observaciones aquí.`; }
+    else if (it.stage === 'aj1') { title = 'Haz estos ajustes'; sub = 'Marca cada punto cuando lo termines. Luego entrega el video final antes del ' + R.fmtWhen(v.final_due) + '.'; body = list(it.obs1, `Revisión de montaje · ${n1} de ${(it.obs1 || []).length}`); acts = btn('Entregué el video final', 'final', !all(it.obs1)); note = all(it.obs1) ? 'Plazo: ' + R.fmtWhen(v.final_due) + '.' : 'Marca todos los ajustes para entregar.'; }
+    else if (it.stage === 'final') { title = 'Montaje aprobado: entrega el final'; sub = 'Plazo del video final: ' + R.fmtWhen(v.final_due) + '.'; acts = btn('Entregué el video final', 'final'); }
+    else if (it.stage === 'rev2') { title = 'Revisión final en curso'; sub = 'Es la última revisión. Si no hay observaciones, te pediremos subirlo a Drive.'; }
+    else if (it.stage === 'aj2') { title = 'Últimos ajustes'; sub = 'Cuando los termines, lo subes a Drive. No hay otra revisión.'; body = list(it.obs2, `Revisión final · ${n2} de ${(it.obs2 || []).length}`); acts = btn('Listo, subir a Drive', 'upload', !all(it.obs2)); note = all(it.obs2) ? '' : 'Marca todos los ajustes para continuar.'; }
+    else if (it.stage === 'upload') {
+      title = 'El video está perfecto, súbelo'; sub = 'Súbelo con este nombre en la carpeta del proyecto.';
+      body = `<div class="drivebox"><b>Súbelo aquí</b>${sj.drive_url ? `<a href="${esc(sj.drive_url)}" target="_blank" rel="noopener">${esc(sj.drive_url.replace(/^https?:\/\//, '').slice(0, 42))}${sj.drive_url.length > 50 ? '…' : ''}</a>` : '<span class="small">Pide el enlace de la carpeta al equipo.</span>'}<span class="small">Nombre del archivo: ${esc(String(sj.project.client).replace(/\s+/g, ''))}_Video${v.num}_FINAL.mp4</span></div>`;
+      acts = btn('Ya lo subí', 'uploaded');
+    } else { title = `Video ${v.num} listo`; sub = 'Aprobado y subido a Drive.'; }
+    if (!can) { acts = ''; note = ''; }
+    const undo = it.prev_by === me.id && R.within(it.prev_at) && can ? undoLink('colabUndo', `data-id="${it.id}"`) : '';
+    html += `<section class="card jobd"><div class="between" style="align-items:center"><p class="lbl" style="margin:0">Video ${v.num}${v.title ? ' · ' + esc(v.title) : ''}</p><span class="chip13" style="color:${ch[2]};background:${ch[3]}">${ch[0]}</span></div>
+      <b class="num" style="font-size:17px">${title}</b><p class="muted" style="margin:-6px 0 0;line-height:1.45">${sub}</p>${body}${acts}${note ? `<p class="muted" style="margin:-4px 0 0;text-align:center">${note}</p>` : ''}${undo ? `<div class="pextra">${undo}</div>` : ''}</section>`;
+  }
+  const ps = (H.partners || []).filter((x) => x.phone);
+  if (ps.length) html += `<div class="row" style="gap:8px;flex-wrap:wrap">${ps.map((x) => `<a class="btn sm b-ghost" href="https://wa.me/51${x.phone}" target="_blank" rel="noopener">${waIc}Escribir a ${esc(String(x.name).split(' ')[0])}</a>`).join('')}</div>`;
+  return html;
+}
+function colabLayout(body) {
+  return `<div class="wrap"><main style="padding-bottom:30px">${st.isDemo() ? demoBar() : ''}${body}
+    <button class="btn b-ghost" data-act="signOut" style="margin-top:8px">Cerrar sesión</button><p class="muted" style="text-align:center;margin:4px 0 0">Registro audiovisual · versión ${VERSION}</p></main></div>`;
+}
+
 function vNewProject() {
   return `<a href="#/equipo" class="row muted" style="text-decoration:none">${icon.back} Equipo</a><h1>Nuevo proyecto</h1><p class="sub">Un proyecto es un paquete de videos de un cliente (por ejemplo, 16 videos al mes). Los montos por tarea salen solos del presupuesto (cláusula cuarta).</p>
   <form data-form="project" class="card">
@@ -1723,8 +2660,6 @@ const RULE_DEF = [
     ['tol', 'Tardanza hasta', 'se paga pero resta 1 · después es falta', 5, 15, 90, (x) => x + ' min']]],
   ['Plazos de entrega', [
     ['pre', 'Guion y storyboard', 'el día antes del rodaje · luego tu compañero puede tomarlos', 30, 720, 1380, (x) => R.hm(x)],
-    ['mon', 'Montaje (con apoyo)', 'días antes de publicar, a las 21:00', 1, 1, 5, (x) => x + (x === 1 ? ' día' : ' días')],
-    ['fin', 'Video final', 'días antes de publicar, a las 21:00', 1, 0, 3, (x) => x + (x === 1 ? ' día' : ' días')],
     ['take', 'Tomar lo del compañero', 'horas antes del rodaje · hasta ahí se toma y se entrega', 1, 1, 12, (x) => x + ' h'],
     ['undo', 'Deshacer una tarea', 'tiempo para corregir un error al marcar', 5, 5, 60, (x) => x + ' min']]],
   ['Confirmar asistencia', [
@@ -1732,13 +2667,20 @@ const RULE_DEF = [
     ['conf', 'Reunión · confirmar con', 'horas antes · sin confirmar resta 2', 1, 6, 48, (x) => x + ' h'],
     ['madr', 'Madrugada · hasta', 'si el plazo cae antes, pasa a las 23:59 del día anterior', 30, 0, 480, (x) => R.hm(x)]]]
 ];
+// 1.4 · Entregas al límite (para mostrar propuestas)
+const ENT_DEF = [
+  ['mon', 'Días de apoyo', 'antes de publicar · entregas al límite', 0, 0, 0, (x) => x + ' días'], ['monh', 'Hora del apoyo', 'último envío del montaje', 0, 0, 0, R.hm],
+  ['self', 'Entrega por su cuenta', 'hasta esta hora del día anterior', 0, 0, 0, R.hm], ['auto', 'Pasa al líder', 'si nadie lo tomó', 0, 0, 0, R.hm],
+  ['fix', 'Corregir cambios', 'si se pidieron cambios', 0, 0, 0, R.hm],
+  ['pmon', 'Montaje · sin apoyo', 'día antes de publicar', 0, 0, 0, R.hm], ['pfin', 'Video final · sin apoyo', 'día antes; luego se puede tomar', 0, 0, 0, R.hm],
+  ['prev', 'Revisión · sin apoyo', 'si no se revisa, se aprueba', 0, 0, 0, R.hm], ['pfix', 'Corregir · sin apoyo', 'si se pidieron cambios', 0, 0, 0, R.hm], ['fin', 'Video final', 'días antes de publicar, 23:59', 0, 0, 0, (x) => x + ' día antes']];
 const PCT_DEF = [['pre', 'Preproducción', 'pre'], ['rod', 'Rodaje', 'prod'], ['mon', 'Montaje', 'post'], ['aca', 'Video final', 'star']];
 const REM_DEF = [
   ['Reuniones y rodajes', [['reu', 'pre', 'Reunión de preproducción', '4 h antes y 30 min antes', 'A los dos'], ['rod', 'prod', 'Rodaje', 'El día anterior a las 20:00 y 1 h antes', 'A los dos'], ['arr', 'prod', 'Llegada sin marcar', '10 min después de la hora, si aún no marcaste', 'A quien falte marcar']]],
   ['Entregas', [['pre', 'pre', 'Guion y storyboard por vencer', '3 h antes del plazo', 'Al dueño del video'], ['take', 'pre', 'Tarea disponible para tomar', 'Cuando vence una tarea de tu compañero', 'Al otro socio'], ['mon', 'post', 'Montaje por vencer', '24 h antes y 6 h antes', 'Al dueño del video'], ['fin', 'post', 'Video final por vencer', '6 h antes', 'A quien le toca el final']]],
   ['Equipo', [['team', 'team', 'Avisos de tu compañero', 'Si avisa que no irá, pide finalizar una reunión o marca su llegada', 'Al otro socio · a ti para confirmar']]]
 ];
-function adminOnly(body) { return st.isAdmin() ? body : `${backTo('#/', 'Inicio')}${banner('bad', 'Solo para el administrador', 'Esta sección la ve solo quien administra el equipo.')}`; }
+function adminOnly(body) { return st.isAdmin() ? body : `${backTo('#/', 'Inicio')}${banner('bad', 'Solo para el líder de proyecto', 'Esta sección la ve solo el líder de proyecto.')}`; }
 function aitem(href, tint, ic, title, sub, badge = '') {
   return `<a class="ait" href="${href}"><span class="tic tint-${tint}">${ic}</span><span class="ttx"><b>${title}</b><span>${sub}</span></span>${badge}${icon.chev}</a>`;
 }
@@ -1749,6 +2691,8 @@ function vAdmin(sub) {
   if (sub === 'porcentajes') return vAdminPct();
   if (sub === 'recordatorios') return vAdminRem();
   if (sub === 'practica') return vAdminPractice();
+  if (sub === 'entregas') return vAdminEntregas();
+  if (sub === 'integrantes') return vIntegrantes();
   const S0 = st.settings();
   const pend = st.proposals().filter((p) => p.status === 'pendiente');
   const pct = Object.assign({}, R.DEFAULT_PCT, S0.pct || {});
@@ -1756,25 +2700,30 @@ function vAdmin(sub) {
   const remOn = REM_DEF.reduce((a, g) => a + g[1].filter((r) => rem[r[0]] !== false).length, 0);
   const L = st.look();
   let html = `${backTo('#/', 'Inicio')}<div><div class="between" style="align-items:center"><h1 style="font-size:28px">Administrador</h1><span class="pill-amber">${icon.shield}Solo tú</span></div><p class="sub">Tu socio no ve esta sección. Lo que toca el acuerdo se propone y se aplica cuando él lo aprueba.</p></div>`;
-  if (pend.length) html += `<section class="pendbox"><div class="row" style="gap:8px"><span class="hdot blue"></span><b class="small" style="color:#C9D8FF">Esperando que tu socio apruebe · ${pend.length}</b></div>${pend.map((p) => `<a class="penditem" href="#/propuesta/${p.id}"><span style="flex:1"><b class="small">${p.kind === 'pct' ? 'Porcentajes del acuerdo' : 'Reglas de registro'}</b><br><span class="muted">${propSummary(p)} · ${R.fmtWhen(p.created_at)}</span></span><span class="gchip g-next">Pendiente</span></a>`).join('')}</section>`;
+  if (pend.length) html += `<section class="pendbox"><div class="row" style="gap:8px"><span class="hdot blue"></span><b class="small" style="color:#C9D8FF">Esperando que tu socio apruebe · ${pend.length}</b></div>${pend.map((p) => `<a class="penditem" href="${p.kind === 'apoyo' ? '#/admin/integrantes' : '#/propuesta/' + p.id}"><span style="flex:1"><b class="small">${p.kind === 'pct' ? 'Porcentajes del acuerdo' : p.kind === 'apoyo' ? 'Apoyo en la edición · ' + esc(first(st.member(p.data.member) || { name: 'socio' })) : 'Reglas de registro'}</b><br><span class="muted">${propSummary(p)} · ${R.fmtWhen(p.created_at)}</span></span><span class="gchip g-next">Pendiente</span></a>`).join('')}</section>`;
   html += `<div><p class="lbl alb">Acuerdo · con aprobación del socio</p><div class="agrp">
     ${aitem('#/admin/porcentajes', 'pre', icon.pie('var(--c-pre)'), 'Porcentajes del acuerdo', `Pre ${pct.pre} · Rodaje ${pct.rod} · Montaje ${pct.mon} · Final ${pct.aca}`, st.pendingProposal('pct') ? '<span class="gchip g-next">1 propuesta</span>' : '')}
+    ${aitem('#/admin/entregas', 'post', icon.cut('var(--c-post)', 19), 'Entregas al límite', (() => { const r = Object.assign({}, R.DEFAULT_RULES, S0.rules || {}); return `Apoyo ${r.mon} días · ${R.hm(r.monh)} · pasa a ti ${R.hm(r.auto)}`; })())}
     ${aitem('#/admin/reglas', 'pre', icon.clock.replace(/width="12" height="12"/, 'width="19" height="19"').replace('currentColor', 'var(--c-pre)'), 'Reglas de registro', 'Llegadas, plazos y avisos de inasistencia', st.pendingProposal('rules') ? '<span class="gchip g-next">1 propuesta</span>' : '')}</div></div>`;
   html += `<div><p class="lbl alb">Avisos · los cambias tú</p><div class="agrp">${aitem('#/admin/recordatorios', 'prod', icon.bell('var(--c-prod)'), 'Recordatorios automáticos', `${remOn} de 8 activos · descanso 22:00 a 7:00`)}</div></div>`;
   html += `<div><p class="lbl alb">App · los cambias tú</p><div class="agrp">
     ${aitem('#/admin/apariencia', 'info', icon.palette, 'Apariencia', `Color principal y urgencia <span class="sw4">${[L.main, L.u0, L.u1, L.u2].map((c) => `<i style="background:${c}"></i>`).join('')}</span>`)}
     ${aitem('#/admin/practica', 'lab', icon.flask, 'Modo práctica', 'Prueba con un proyecto de ejemplo · no toca los datos reales', st.practice() ? '<span class="gchip g-live">Encendido</span>' : '<span class="gchip g-past">Apagado</span>')}</div></div>`;
   html += `<div><p class="lbl alb">Equipo</p><div class="agrp">
-    ${aitem('#/equipo', 'blue', icon.users, 'Integrantes e invitaciones', st.partners().map((m) => esc(m.name.split(' ')[0]) + (m.role === 'admin' ? ' (admin)' : '')).join(' · '))}
+    ${aitem('#/admin/integrantes', 'blue', icon.users, 'Integrantes e invitaciones', S.data.members.filter((m) => m.active && m.role !== 'colaborador').map((m) => esc(m.name.split(' ')[0]) + (m.role === 'admin' ? ' (admin)' : '') + (!m.user_id ? ' (invitado)' : '')).join(' · ') + (S.data.members.some((m) => m.active && m.role === 'colaborador') ? ' · colaboradores' : ''))}
     ${aitem('#/historial', 'info', icon.hist, 'Historial de cambios', 'Cada ajuste queda registrado · lo ve también tu socio')}</div></div>`;
   html += `<p class="muted" style="margin:0 4px;line-height:1.45">Clientes y proyectos se crean desde el selector de arriba (el nombre del proyecto).</p>`;
   return html;
 }
 function propSummary(p) {
   const old = p.old || {};
+  if (p.kind === 'apoyo') return `${esc(st.member(p.data.member).name)} · ${p.data.apoyo ? 'con apoyo' : 'sin apoyo'} en la edición`;
   if (p.kind === 'pct') return PCT_DEF.map(([k, n]) => `${n.split(' ')[0]} ${p.data[k]}`).join(' · ');
-  const all = RULE_DEF.flatMap((g) => g[1]);
-  return Object.entries(p.data).map(([k, v]) => { const d = all.find((x) => x[0] === k); const was = old[k] != null ? old[k] : R.DEFAULT_RULES[k]; return d ? `${d[1]}: ${d[6](was)} → ${d[6](v)}` : k; }).join(' · ');
+  const all = RULE_DEF.flatMap((g) => g[1]).concat(ENT_DEF);
+  return Object.entries(p.data).map(([k, v]) => {
+    if (k === 'cli') return 'Por cliente: ' + (Object.entries(v || {}).map(([cl, d]) => `${esc(cl)} ${d} días`).join(', ') || 'ninguno');
+    const d = all.find((x) => x[0] === k); const was = old[k] != null ? old[k] : R.DEFAULT_RULES[k]; return d ? `${d[1]}: ${d[6](was)} → ${d[6](v)}` : k;
+  }).join(' · ');
 }
 // ==================================================================
 // 1.3 · Apariencia C: colores para los dos, por separado en noche y día
@@ -1784,13 +2733,15 @@ const LOOK_DEF = {
     main: '#FFB547', u0: '#FF6B5B', u1: '#FF9F2E', u2: '#5A5D67',
     stPre: '#12805A', stRod: '#A15F00', stPost: '#B4452A', bdPre: '#6EE7B7', bdRod: '#FFB547', bdPost: '#FF8A65', stOn: 100, stOff: 22, bdOp: 55, fgOn: '#FFFFFF',
     r1: ['#17130C', '#3A3220', '#FFB547', '#FFD08A'], r2: ['#1C130A', '#4A3414', '#FF9F2E', '#FFC978'], r3: ['#0C1720', '#1E3A52', '#5CC8FF', '#A8E1FF'], r4: ['#160F22', '#3E2C63', '#B98CFF', '#D6C2FF'],
-    meta: ['#16140F', '#3A3220', '#FFB547', '#2A2518'], wallet: ['#121A16', '#1F3A2C', '#6EE7B7', '#F4F4F5']
+    meta: ['#16140F', '#3A3220', '#FFB547', '#2A2518'], wallet: ['#121A16', '#1F3A2C', '#6EE7B7', '#F4F4F5'],
+    opRacha: 100, opHero: 100, opAct: 100, opMeta: 100, opWallet: 100, opCards: 100
   },
   light: {
     main: '#D98A00', u0: '#D93B2B', u1: '#E07B00', u2: '#8B8B94',
     stPre: '#12805A', stRod: '#A15F00', stPost: '#B4452A', bdPre: '#12805A', bdRod: '#A15F00', bdPost: '#B4452A', stOn: 100, stOff: 12, bdOp: 45, fgOn: '#FFFFFF',
     r1: ['#FFF4E0', '#F2D9A6', '#E08A00', '#7A4A00'], r2: ['#FFEBD6', '#F5C99A', '#E06F00', '#7A3D00'], r3: ['#E3F3FC', '#A9D7F0', '#1E88C7', '#0B4A70'], r4: ['#F1E9FF', '#D4C0FA', '#7C4DDB', '#3E2273'],
-    meta: ['#FFF7E8', '#EFD9AE', '#D98A00', '#F1E3C4'], wallet: ['#E9F7F0', '#B7E2CC', '#0F8A5F', '#0B1F15']
+    meta: ['#FFF7E8', '#EFD9AE', '#D98A00', '#F1E3C4'], wallet: ['#E9F7F0', '#B7E2CC', '#0F8A5F', '#0B1F15'],
+    opRacha: 100, opHero: 100, opAct: 100, opMeta: 100, opWallet: 100, opCards: 100
   }
 };
 function lookFor(mode, saved) {
@@ -1816,6 +2767,8 @@ function applyLook13() {
   d.setProperty('--meta-bg', L.meta[0]); d.setProperty('--meta-line', L.meta[1]); d.setProperty('--meta-bar', L.meta[2]); d.setProperty('--meta-track', L.meta[3]);
   d.setProperty('--w-bg', L.wallet[0]); d.setProperty('--w-line', L.wallet[1]); d.setProperty('--w-title', L.wallet[2]); d.setProperty('--w-money', L.wallet[3]);
   for (let n = 1; n <= 4; n++) { const r = L['r' + n]; d.setProperty(`--r${n}-bg`, r[0]); d.setProperty(`--r${n}-bd`, r[1]); d.setProperty(`--r${n}-c`, r[2]); d.setProperty(`--r${n}-t`, r[3]); }
+  // 1.5 · Opacidad de las tarjetas (Inicio y demás secciones).
+  [['opRacha', 'racha'], ['opHero', 'hero'], ['opAct', 'act'], ['opMeta', 'meta'], ['opWallet', 'wallet'], ['opCards', 'cards']].forEach(([k, n]) => d.setProperty('--op-' + n, (L[k] == null ? 100 : L[k]) + '%'));
 }
 const SUG = {
   main: ['#FFB547', '#FF8A65', '#6EE7B7', '#8AB4FF', '#B98CFF', '#F5C542'],
@@ -1846,13 +2799,13 @@ function vAdminLook() {
   const lvP = L.r3;
   const tileP = (K, ic, on) => `<span class="stile" style="min-height:70px;border-radius:16px;cursor:default;background:${over(L['st' + K], surf, on ? L.stOn : L.stOff)};border-color:${over(L['bd' + K], surf, L.bdOp)};color:${on ? L.fgOn : (isL ? '#15161C' : '#F4F4F5')}">${ic(on ? L.fgOn : L['bd' + K], 20)}<span style="font-size:10px">${{ Pre: 'Preproducción', Rod: 'Rodaje', Post: 'Posproducción' }[K]}</span></span>`;
   html += `<section class="card" style="gap:12px;background:${isL ? '#F6F5F2' : '#0B0C10'}"><p class="lbl">Vista previa · ${mode === 'dark' ? 'noche' : 'día'}</p>
-    <div class="racha" style="background:${lvP[0]};border-color:${lvP[1]};padding:12px 14px"><div class="rfire" style="width:60px;height:70px">${icon.flame(lvP[2], 44)}</div><div class="rtx"><p class="lbl" style="color:${lvP[3]}">Tu racha</p><b class="num" style="font-size:32px;line-height:1;color:${lvP[3]}">15</b><span class="rlv" style="--lvc:${lvP[2]};--lvt:${lvP[3]};--lvchip:${over(lvP[2], lvP[0], 18)}">Nivel 3 · Responsable</span></div></div>
-    <div class="dsqs">${[['HOY', 'u0'], ['DOM', 'u1'], ['LUN', 'u2'], ['MAR', null]].map(([d, k], i) => `<div class="dsq ${k ? '' : 'd-none'} ${i === 0 ? 'on' : ''}" style="${k ? `--uc:${L[k]}` : ''}"><span class="dw">${d}</span><b class="num">${i + 1}</b></div>`).join('')}</div>
+    <div class="racha" style="background:${over(lvP[0], (isL ? '#F6F5F2' : '#0B0C10'), L.opRacha == null ? 100 : L.opRacha)};border-color:${lvP[1]};padding:12px 14px"><div class="rfire" style="width:60px;height:70px">${icon.flame(lvP[2], 44)}</div><div class="rtx"><p class="lbl" style="color:${lvP[3]}">Tu racha</p><b class="num" style="font-size:32px;line-height:1;color:${lvP[3]}">15</b><span class="rlv" style="--lvc:${lvP[2]};--lvt:${lvP[3]};--lvchip:${over(lvP[2], lvP[0], 18)}">Nivel 3 · Responsable</span></div></div>
+    <div class="actbox" style="background:${over(surf, (isL ? '#F6F5F2' : '#0B0C10'), L.opAct == null ? 100 : L.opAct)};padding:10px"><div class="dsqs">${[['HOY', 'u0'], ['DOM', 'u1'], ['LUN', 'u2'], ['MAR', null]].map(([d, k], i) => `<div class="dsq ${k ? '' : 'd-none'} ${i === 0 ? 'on' : ''}" style="${k ? `--uc:${L[k]}` : ''}"><span class="dw">${d}</span><b class="num">${i + 1}</b></div>`).join('')}</div><div class="small" style="padding:2px 4px 4px;font-weight:600">Tus actividades del día</div></div>
     <div class="stiles">${tileP('Pre', icon.pen, stage === 'Pre')}${tileP('Rod', icon.cam, stage === 'Rod')}${tileP('Post', icon.cut, stage === 'Post')}</div>
-    <div class="grid2"><div style="border-radius:16px;padding:12px;background:${L.meta[0]};border:1px solid ${L.meta[1]}"><p class="lbl" style="color:${L.meta[2]}">Meta del equipo</p><b class="num" style="font-size:24px;color:${isL ? '#15161C' : '#F4F4F5'}">56%</b><div style="height:8px;border-radius:9px;background:${L.meta[3]};margin-top:6px"><div style="width:56%;height:100%;border-radius:9px;background:${L.meta[2]}"></div></div></div>
-      <div style="border-radius:16px;padding:12px;background:${L.wallet[0]};border:1px solid ${L.wallet[1]}"><p class="lbl" style="color:${L.wallet[2]}">En la billetera</p><b class="num" style="font-size:24px;color:${L.wallet[3]}">S/ 156.25</b></div></div>
+    <div class="grid2"><div style="border-radius:16px;padding:12px;background:${over(L.meta[0], (isL ? '#F6F5F2' : '#0B0C10'), L.opMeta == null ? 100 : L.opMeta)};border:1px solid ${L.meta[1]}"><p class="lbl" style="color:${L.meta[2]}">Meta del equipo</p><b class="num" style="font-size:24px;color:${isL ? '#15161C' : '#F4F4F5'}">56%</b><div style="height:8px;border-radius:9px;background:${L.meta[3]};margin-top:6px"><div style="width:56%;height:100%;border-radius:9px;background:${L.meta[2]}"></div></div></div>
+      <div style="border-radius:16px;padding:12px;background:${over(L.wallet[0], (isL ? '#F6F5F2' : '#0B0C10'), L.opWallet == null ? 100 : L.opWallet)};border:1px solid ${L.wallet[1]}"><p class="lbl" style="color:${L.wallet[2]}">En la billetera</p><b class="num" style="font-size:24px;color:${L.wallet[3]}">S/ 156.25</b></div></div>
     <span class="hb" style="min-height:44px;background:${over(L.main, surf, 18)};border:1px solid ${over(L.main, surf, 45)};color:${L.main};font-size:14px">Botón principal</span></section>`;
-  const SECS = [['main', 'Principal'], ['etapas', 'Etapas'], ['urg', 'Urgencia'], ['racha', 'Racha'], ['meta', 'Meta del equipo'], ['wallet', 'Billetera']];
+  const SECS = [['main', 'Principal'], ['etapas', 'Etapas'], ['urg', 'Urgencia'], ['racha', 'Racha'], ['meta', 'Meta del equipo'], ['wallet', 'Billetera'], ['opac', 'Opacidad']];
   html += `<div class="row" style="gap:6px;flex-wrap:wrap">${SECS.map(([k, t]) => `<button class="btn sm ${sec === k ? 'x-amber' : 'b-ghost'}" data-act="lkSec" data-k="${k}">${t}</button>`).join('')}</div>`;
   let body = '';
   if (sec === 'main') body = colorRow('Color principal', 'main', L.main, SUG.main, warnLow(L.main, surf));
@@ -1873,6 +2826,10 @@ function vAdminLook() {
   }
   if (sec === 'meta') body = colorRow('Fondo', 'meta.0', L.meta[0], isL ? SUG.bgl : SUG.bg) + colorRow('Borde', 'meta.1', L.meta[1], SUG.bd) + colorRow('Barra y título', 'meta.2', L.meta[2], SUG.rc, warnLow(L.meta[2], L.meta[0])) + colorRow('Fondo de la barra', 'meta.3', L.meta[3], isL ? SUG.bgl : SUG.bg);
   if (sec === 'wallet') body = colorRow('Fondo', 'wallet.0', L.wallet[0], isL ? SUG.bgl : SUG.bg) + colorRow('Borde', 'wallet.1', L.wallet[1], SUG.bd) + colorRow('Título', 'wallet.2', L.wallet[2], SUG.rc, warnLow(L.wallet[2], L.wallet[0])) + colorRow('Monto', 'wallet.3', L.wallet[3], SUG.tx, warnLow(L.wallet[3], L.wallet[0]));
+  if (sec === 'opac') body = `<p class="muted" style="margin:0;line-height:1.45">Qué tan sólido se ve el fondo de cada tarjeta. Al bajarlo se funde con el fondo de la pantalla.</p>`
+    + rangeRow('Racha', 'opRacha', L.opRacha == null ? 100 : L.opRacha) + rangeRow('Aviso urgente', 'opHero', L.opHero == null ? 100 : L.opHero)
+    + rangeRow('Tus actividades (días y tareas)', 'opAct', L.opAct == null ? 100 : L.opAct) + rangeRow('Meta del equipo', 'opMeta', L.opMeta == null ? 100 : L.opMeta)
+    + rangeRow('Billetera', 'opWallet', L.opWallet == null ? 100 : L.opWallet) + rangeRow('Tarjetas de las demás secciones', 'opCards', L.opCards == null ? 100 : L.opCards);
   html += `<section class="card" style="gap:16px">${body}</section>`;
   html += `<div class="row" style="gap:10px"><button class="btn b-ghost" style="flex:1" data-act="lkReset">Restaurar</button><button class="btn x-amber" style="flex:2" data-act="lookSave" ${changed ? '' : 'disabled'}>Guardar para los dos</button></div><p class="muted" style="margin:-6px 0 0;text-align:center">Restaurar vuelve esta sección (${mode === 'dark' ? 'noche' : 'día'}) a los colores de fábrica. Queda en el historial.</p>`;
   return html;
@@ -1947,12 +2904,29 @@ function vAdminRem() {
 }
 function vAdminPractice() {
   const on = st.practice();
-  const P = [['Un proyecto de ejemplo ya armado', 'Con videos repartidos, un rodaje próximo y tareas por vencer.'], ['Ver como administrador o como socio', 'Cambias de vista con un toque para ver lo que le aparece a cada uno.'], ['Marca, toma, deshaz y avisa', 'Todo funciona igual que en la app real, con las mismas reglas.'], ['Una franja violeta te lo recuerda', 'Mientras estés en práctica la verás arriba en todas las pantallas.']];
+  const P = [['Un proyecto de ejemplo ya armado', 'Con videos repartidos, un rodaje próximo y tareas por vencer. Con tu socio con apoyo o sin apoyo.'], ['Reloj de práctica', 'Adelanta la hora (+1 h, +6 h, +1 día) para ver cómo cambian los plazos y los avisos.'], ['Ver como administrador o como socio', 'Cambias de vista con un toque para ver lo que le aparece a cada uno.'], ['Marca, toma, deshaz y avisa', 'Todo funciona igual que en la app real, con las mismas reglas.'], ['Una franja violeta te lo recuerda', 'Mientras estés en práctica la verás arriba en todas las pantallas.']];
   let html = `${backTo('#/admin', 'Administrador')}<div style="display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;padding:4px 0"><span class="tic tint-lab" style="width:72px;height:72px;border-radius:22px">${icon.flask.replace('width="19" height="19"', 'width="34" height="34"')}</span><h1 style="font-size:28px">Modo práctica</h1><p class="sub" style="font-size:14px">Prueba todo con un proyecto de ejemplo antes de usarlo de verdad. Lo que marques aquí no llega a la base real, ni al historial, ni a la billetera.</p></div>`;
   html += `<section class="tlist" style="padding:6px 14px">${P.map(([t, d], i) => `<div class="trow" style="align-items:flex-start"><span class="tipn lab">${i + 1}</span><span class="ttx"><b>${t}</b><span>${d}</span></span></div>`).join('')}</section>`;
   html += on ? `<div class="row" style="gap:10px"><button class="btn b-ghost" style="flex:1" data-act="demoReset">Reiniciar ejemplo</button><button class="btn" style="flex:1;background:var(--tx);color:var(--bg)" data-act="practiceOff">Salir</button></div>` : `<button class="btn b-purple" data-act="practiceOn">Entrar al modo práctica</button>`;
+  if (on) html += `<div class="row" style="gap:10px"><button class="btn b-ghost" style="flex:1" data-act="seed" data-k="con">Ejemplo con apoyo</button><button class="btn b-ghost" style="flex:1" data-act="seed" data-k="sin">Ejemplo sin apoyo</button></div>`;
   html += `<p class="muted" style="margin:-6px 0 0;text-align:center">Solo cambia este celular. Tu socio sigue viendo los datos reales.</p>`;
   return html;
+}
+// 1.5 · Qué cambia al dar o quitar el apoyo en la edición (Integrantes D).
+function apoyoFacts(on, name, you) {
+  const L = LN();
+  const su = you ? 'tus' : 'sus', tu = you ? 'tu' : 'su';
+  return on ? [
+    'Rige desde los videos que aún no se graban. Los que ya están en edición siguen igual.',
+    `${you ? 'Envías tu' : name + ' envía su'} montaje hasta 2 días antes de publicar a las 21:00 y ${L} hace ${tu} video final.`,
+    `Si no llega a tiempo, a las 12:00 del día antes el video pasa a ${L}.`,
+    `${you ? 'Ya no tomas' : name + ' ya no toma'} la edición de otros.`
+  ] : [
+    'Rige desde los videos que aún no se graban. Los que ya están en edición siguen igual.',
+    `${you ? 'Editas tus' : name + ' edita ' + su} videos completos: montaje hasta las 12:00 y video final hasta las 18:00 del día antes de publicar.`,
+    `${L} revisa ${tu} entrega. Desde las 18:00, si no entregó, otro socio puede tomar el video.`,
+    `Los videos de ${L} también vencen a las 18:00, y ${you ? 'tú puedes' : name + ' puede'} tomarlos si no entrega.`
+  ];
 }
 function vProposal(id) {
   const p = st.proposals().find((x) => x.id === id);
@@ -1961,15 +2935,28 @@ function vProposal(id) {
   const who = st.member(p.proposed_by);
   const old = p.old || {};
   let rows = '';
+  if (p.kind === 'apoyo') {
+    const tm = st.member(p.data.member);
+    const facts = apoyoFacts(p.data.apoyo, first(tm), p.data.member === me.id);
+    rows = facts.map((f) => `<div class="srow"><span class="ttx"><span style="color:var(--tx2);font-size:13px;line-height:1.45">${f}</span></span></div>`).join('');
+    const status0 = { pendiente: ['Pendiente', 'next'], aprobada: ['Aceptada', 'done'], rechazada: ['Rechazada', 'past'], retirada: ['Retirada', 'past'] }[p.status];
+    let h = `${backTo('#/', 'Inicio')}<div><div class="between" style="align-items:center"><p class="lbl">Propuesta de ${esc(who.name)}</p><span class="gchip g-${status0[1]}">${status0[0]}</span></div><h1 style="font-size:24px">${p.data.apoyo ? (p.data.member === me.id ? 'Recibir apoyo en la edición' : 'Dar apoyo a ' + first(tm)) : (p.data.member === me.id ? 'Quitarte el apoyo en la edición' : 'Quitar el apoyo a ' + first(tm))}</h1></div><div class="agrp">${rows}</div>`;
+    if (p.status === 'pendiente' && p.data.member === me.id) h += `<div class="row" style="gap:10px"><button class="btn b-ghost" style="flex:1" data-act="propDecide" data-id="${p.id}" data-s="rechazada">Rechazar</button><button class="btn b-mint" style="flex:2" data-act="propDecide" data-id="${p.id}" data-s="aprobada">Aceptar</button></div>`;
+    else if (p.status === 'pendiente' && p.proposed_by === me.id) h += `<button class="btn b-ghost" data-act="propWithdraw" data-id="${p.id}">Retirar propuesta</button>`;
+    else if (p.decided_by) h += banner(p.status === 'aprobada' ? 'ok' : 'wait', `${status0[0]} por ${esc(st.member(p.decided_by).name)}`, R.fmtWhen(p.decided_at));
+    return h;
+  }
   if (p.kind === 'pct') {
     const was = Object.assign({}, R.DEFAULT_PCT, old);
     rows = PCT_DEF.map(([k, n, ic]) => `<div class="srow${was[k] !== p.data[k] ? ' ch' : ''}"><span class="tic tint-${ic}">${stageIc(ic)}</span><span class="ttx"><b>${n}</b><span>Antes ${was[k]} %</span></span><b class="num sval">${p.data[k]} %</b></div>`).join('');
   } else {
-    const all = RULE_DEF.flatMap((g) => g[1]);
-    rows = Object.entries(p.data).map(([k, v]) => { const d = all.find((x) => x[0] === k); if (!d) return ''; const was = old[k] != null ? old[k] : R.DEFAULT_RULES[k]; return `<div class="srow ch"><span class="ttx"><b>${d[1]}</b><span>Antes: ${d[6](was)} · ${d[2]}</span></span><b class="num sval">${d[6](v)}</b></div>`; }).join('');
+    const all = RULE_DEF.flatMap((g) => g[1]).concat(ENT_DEF);
+    rows = Object.entries(p.data).map(([k, v]) => {
+      if (k === 'cli') { const was = old.cli || {}; return `<div class="srow ch"><span class="ttx"><b>Días de apoyo por cliente</b><span>Antes: ${Object.entries(was).map(([cl, d]) => esc(cl) + ' ' + d + ' días').join(', ') || 'los del equipo'}</span></span><b class="num sval" style="font-size:13px">${Object.entries(v || {}).map(([cl, d]) => esc(cl) + ' ' + d + ' días').join('<br>') || 'Los del equipo'}</b></div>`; }
+      const d = all.find((x) => x[0] === k); if (!d) return ''; const was = old[k] != null ? old[k] : R.DEFAULT_RULES[k]; return `<div class="srow ch"><span class="ttx"><b>${d[1]}</b><span>Antes: ${d[6](was)} · ${d[2]}</span></span><b class="num sval">${d[6](v)}</b></div>`; }).join('');
   }
   const status = { pendiente: ['Pendiente', 'next'], aprobada: ['Aprobada', 'done'], rechazada: ['Rechazada', 'past'], retirada: ['Retirada', 'past'] }[p.status];
-  let html = `${backTo('#/', 'Inicio')}<div><div class="between" style="align-items:center"><p class="lbl">Propuesta de ${esc(who.name)}</p><span class="gchip g-${status[1]}">${status[0]}</span></div><h1 style="font-size:26px">${p.kind === 'pct' ? 'Porcentajes del acuerdo' : 'Reglas de registro'}</h1><p class="sub">${R.fmtWhen(p.created_at)}${p.kind === 'pct' ? ' · si la apruebas, rige desde el próximo proyecto' : ' · si la apruebas, se aplica desde ahora'}</p></div>`;
+  let html = `${backTo('#/', 'Inicio')}<div><div class="between" style="align-items:center"><p class="lbl">Propuesta de ${esc(who.name)}</p><span class="gchip g-${status[1]}">${status[0]}</span></div><h1 style="font-size:26px">${p.kind === 'pct' ? 'Porcentajes del acuerdo' : Object.keys(p.data).every((k) => ENT_DEF.some((x) => x[0] === k) || k === 'cli') ? 'Entregas al límite' : 'Reglas de registro'}</h1><p class="sub">${R.fmtWhen(p.created_at)}${p.kind === 'pct' ? ' · si la apruebas, rige desde el próximo proyecto' : ' · si la apruebas, se aplica desde ahora'}</p></div>`;
   html += `<div class="agrp">${rows}</div>`;
   if (p.status === 'pendiente' && p.proposed_by !== me.id) html += `<div class="row" style="gap:10px"><button class="btn b-ghost" style="flex:1" data-act="propDecide" data-id="${p.id}" data-s="rechazada">Rechazar</button><button class="btn b-mint" style="flex:2" data-act="propDecide" data-id="${p.id}" data-s="aprobada">Aprobar</button></div><p class="muted" style="margin:-6px 0 0;text-align:center">Queda registrado en el historial con fecha y hora.</p>`;
   else if (p.status === 'pendiente') html += `<button class="btn b-ghost" data-act="propWithdraw" data-id="${p.id}">Retirar propuesta</button>`;
@@ -1989,7 +2976,7 @@ function sheetMark(v, k, hireId) {
   const cm = R.canMark(v, k, S.me, st.ctx(v.project_id), new Date(), { hire: h });
   return `<form data-form="mark" class="" style="display:contents"><input type="hidden" name="v" value="${v.id}"><input type="hidden" name="k" value="${k}"><input type="hidden" name="h" value="${hireId || ''}">
   <h2>${R.KIND_LABEL[k]} · video ${v.num}</h2>
-  ${h ? `<div class="banner bn-fm"><div><b>Con Guillermo · contratado por ${esc(st.member(h.hired_by).name)}</b><p>Quedará como "Hecho por Guillermo". Recibes ${R.money(val * 0.8)} (80 %) y ${R.money(val * 0.2)} siguen siendo de ${esc(st.member(h.hired_by).name)}. No suma ni resta racha.</p></div></div>` : ''}
+  ${h ? `<div class="banner bn-fm"><div><b>Con Guillermo · contratado por ${esc(st.member(h.hired_by).name)}</b><p>Quedará como "Hecho por Guillermo". ${gp(h) < 1 ? `Recibes ${R.money(val * gp(h))} (${gTxt(h)}) y ${R.money(val * (1 - gp(h)))} siguen siendo de ${esc(st.member(h.hired_by).name)}` : `Recibes ${R.money(val)} (todo)`}. No suma ni resta racha.</p></div></div>` : ''}
   ${cm.claimed ? banner('wait', `Entregas lo que tomaste de ${esc(st.member(v.owner).name)}`, `Cobras ${R.money(val)} y sumas +${R.PTS.rescue} puntos de rescate.`) : ''}
   ${cm.late ? banner('warn', 'Fuera de plazo', 'Se paga igual, pero resta 3 puntos de racha.') : ''}
   ${cm.apoyo ? banner('wait', 'Acabado de apoyo (5.5)', `Si el montaje llegó a tiempo, el pago es de ${esc(st.member(v.owner).name)}.`) : ''}
@@ -2037,9 +3024,9 @@ function fly(rect, text, down) {
   setTimeout(() => d.remove(), 1500);
 }
 function centerRect() { return { left: window.innerWidth / 2 - 10, top: window.innerHeight / 2, width: 20 }; }
-function showUndo(task, amt) {
+function showUndo(task, amt, text) {
   if (!task || !task.id) return;
-  ui.undo = { id: task.id, amt, until: Date.now() + 8000 };
+  ui.undo = { id: task.id, amt, text, until: Date.now() + 8000 };
   ui.bump = Date.now();
   render();
   setTimeout(() => { if (ui.undo && ui.undo.id === task.id && Date.now() >= ui.undo.until - 50) { ui.undo = null; render(); } }, 8000);
@@ -2074,11 +3061,14 @@ function render() {
   const r = location.hash.replace(/^#\/?/, '').split('/');
   let html;
   ui.wantAnim = null;
-  if (!S.session) html = vLogin(r[0] === 'i' ? r[1] : null);
+  if (!S.session) html = vLogin(r[0] === 'i' ? r[1] : (st.pendingInvite() || {}).code || null);
+  else if (S.inviteErr) html = vInviteTaken();
+  else if (S.inviteDone) html = vInviteDone();
   else if (!S.teamId || !S.me) html = vNoTeam(r[0] === 'i' ? r[1] : ui.inviteCode);
-  else if (r[0] === 'i' && r[1]) html = layout('home', vAccept(r[1]));
+  else if (r[0] === 'i' && r[1]) html = S.me.role === 'colaborador' ? colabLayout(vAccept(r[1])) : layout('home', vAccept(r[1]));
+  else if (S.me.role === 'colaborador') html = colabLayout(vColab());
   else {
-    const map = { admin: ['', () => vAdmin(r[1])], propuesta: ['home', () => vProposal(r[1])], '': ['home', vHome], videos: ['vids', vEtapas], rodajes: ['vids', vRodajesPasados], semana: ['vids', () => vWeek(r[1])], v: ['vids', () => vVideo(r[1])], e: ['vids', () => vEvent(r[1])], resumen: ['sum', vSummary], cierre: ['sum', vClose], historial: ['hist', vHistory], equipo: ['', vTeam], proyecto: ['', vNewProject] };
+    const map = { admin: ['', () => vAdmin(r[1])], propuesta: ['home', () => vProposal(r[1])], '': ['home', vHome], videos: ['vids', vEtapas], rodajes: ['vids', vRodajesPasados], semana: ['vids', () => vWeek(r[1])], v: ['vids', () => vVideo(r[1])], e: ['vids', () => vEvent(r[1])], resumen: ['sum', vSummary], cierre: ['sum', vClose], historial: ['hist', vHistory], equipo: ['', vTeam], proyecto: ['', vNewProject], encargo: ['', () => (r[1] || '').split('?')[0] === 'nuevo' ? vJobNew(Object.fromEntries(new URLSearchParams((r[1] || '').split('?')[1] || ''))) : vJob(r[1])] };
     const [tab, fn] = map[r[0]] || map[''];
     html = layout(tab, fn());
   }
@@ -2167,6 +3157,7 @@ const ACT = {
     if (k === 'rod') { const now = new Date(); const r = weekRodaje(st.ctx(), now); if (r && now >= new Date(new Date(r.starts_at).getTime() - R.RULES.open * 60000) && R.limaDate(now) === R.limaDate(r.starts_at)) { location.hash = '#/e/' + r.id; return; } }
     render();
   },
+  postToggle: (el) => { ui.postOpen = Object.assign({}, ui.postOpen || {}); ui.postOpen[el.dataset.v] = !ui.postOpen[el.dataset.v]; render(); },
   pastToggle: (el) => { ui.past = Object.assign({}, ui.past || {}); ui.past[el.dataset.k] = !ui.past[el.dataset.k]; render(); },
   scope: (el) => { ui.scope = el.dataset.k; render(); },
   mark: (el) => { const v = S.data.videos.find((x) => x.id === el.dataset.v); openSheet(sheetMark(v, el.dataset.k, el.dataset.h)); },
@@ -2184,8 +3175,95 @@ const ACT = {
     const t = await st.markTask(v, k, hire ? { hire_id: hire.id } : {}, null);
     if (v.owner === S.me.id && !hire) ui.burst = Date.now();
     if (amt) fly(rect, '+ ' + R.money(amt));
-    showUndo(t, amt);
+    const helpedOwn = v.owner === S.me.id && st.member(v.owner).apoyo && (k === 'montaje' || k === 'acabado');
+    showUndo(t, amt, cm.self ? 'Entregado · ' + first(st.admin() || { name: 'el líder' }) + ' revisa tu video' : helpedOwn ? 'Montaje listo · ' + R.money(postValue(v)) + ' en espera' : cm.apoyo && k === 'acabado' ? 'Final de apoyo · a ' + first(st.member(v.owner)) + ' le llegan ' + R.money(postValue(v)) : null);
     afterMark(v, k, cm, before);
+  },
+  // ---------- 1.4 · revisión, corrección y deshacer ----------
+  review: (el) => {
+    const v = S.data.videos.find((x) => x.id === el.dataset.v);
+    if (el.dataset.k === 'ok') { openSheet(sheetReview(v, 'ok')); return; }
+    if (el.dataset.k === 'no') { ui.revNote = ''; openSheet(sheetReview(v, 'no1')); return; }
+    const s = R.videoState(v, st.ctx(v.project_id), new Date());
+    openSheet(`<h2>Revisar entrega · video ${v.num}</h2><p class="sub" style="margin:0">${first(st.member(v.owner))} entregó ${s.ac && s.ac.redelivered_at ? 'la corrección' : 'el video completo'}. Revísalo y decide.</p>
+      <div class="grid2"><button class="hb x-red" data-act="review" data-v="${v.id}" data-k="no" style="font-size:14px">Pedir cambios</button><button class="hb x-green" data-act="review" data-v="${v.id}" data-k="ok" style="font-size:14px">Aprobar</button></div><button class="btn b-ghost" data-act="close">Volver</button>`);
+  },
+  reviewGo: async (el) => {
+    const v = S.data.videos.find((x) => x.id === el.dataset.v);
+    const ok = el.dataset.ok === '1';
+    sheetHtml = null;
+    const res = await st.reviewDelivery(v, ok, ok ? null : ui.revNote);
+    const O = first(st.member(v.owner));
+    ui.revNote = '';
+    offerUndo(res === 'aprobada' ? `Aprobado · a ${O} le llegan ${R.money(postValue(v))}` : res === 'cambios' ? `Cambios pedidos · ${O} corrige hasta las ${R.hm(R.RULES.fix)}` : 'El video pasa a ti', () => st.reviewUndo(v));
+  },
+  reviewUndo: async (el) => { const v = S.data.videos.find((x) => x.id === el.dataset.v); await st.reviewUndo(v); },
+  redeliver: async (el) => {
+    const v = S.data.videos.find((x) => x.id === el.dataset.v);
+    if (!confirm(`¿Entregar la corrección del video ${v.num}?`)) return;
+    await st.redeliver(v);
+    offerUndo('Corrección entregada · ' + first(st.admin() || { name: 'el líder' }) + ' la revisa', () => st.redeliverUndo(v));
+  },
+  redeliverUndo: async (el) => { const v = S.data.videos.find((x) => x.id === el.dataset.v); await st.redeliverUndo(v); },
+  unclaim: async (el) => { await st.unclaim(el.dataset.id); },
+  undoArr: async (el) => { const a = S.data.attendance.find((x) => x.id === el.dataset.a); if (a) await st.undoArrival(a); },
+  undoEnd: async (el) => { await st.undoEnd(evById(el.dataset.e)); },
+  undoCancel: async (el) => { await st.undoCancel(evById(el.dataset.e)); },
+  undoDecision: async (el) => { const a = S.data.attendance.find((x) => x.id === el.dataset.a); if (a) await st.undoDecision(a); },
+  entStep: (el) => {
+    const base = entBase();
+    ui.ent = Object.assign({}, ui.ent || {});
+    const k = el.dataset.k; const cur = ui.ent[k] != null ? ui.ent[k] : base[k];
+    ui.ent[k] = Math.max(Number(el.dataset.min), Math.min(Number(el.dataset.max), cur + Number(el.dataset.d)));
+    if (ui.ent[k] === base[k]) delete ui.ent[k];
+    render();
+  },
+  entCli: (el) => {
+    const base = entBase();
+    const clients = Array.from(new Set(S.data.projects.map((p) => p.client).filter(Boolean)));
+    const cl = clients[Number(el.dataset.i)];
+    const cli = Object.assign({}, base.cli, (ui.ent || {}).cli || {});
+    if (cli[cl] != null) delete cli[cl]; else cli[cl] = Math.max(2, ((ui.ent || {}).mon || base.mon) + 1);
+    ui.ent = Object.assign({}, ui.ent || {}, { cli });
+    render();
+  },
+  entCliStep: (el) => {
+    const base = entBase();
+    const clients = Array.from(new Set(S.data.projects.map((p) => p.client).filter(Boolean)));
+    const cl = clients[Number(el.dataset.i)];
+    const cli = Object.assign({}, base.cli, (ui.ent || {}).cli || {});
+    cli[cl] = Math.max(2, Math.min(6, (cli[cl] || base.mon) + Number(el.dataset.d)));
+    ui.ent = Object.assign({}, ui.ent || {}, { cli });
+    render();
+  },
+  entDiscard: () => { ui.ent = null; render(); },
+  entPropose: async () => {
+    const base = entBase();
+    const e = ui.ent || {};
+    const data = {};
+    for (const k of ENT_KEYS) if (e[k] != null && e[k] !== base[k]) data[k] = e[k];
+    if (e.cli && JSON.stringify(e.cli) !== JSON.stringify(base.cli)) data.cli = e.cli;
+    if (!Object.keys(data).length) return;
+    await st.propose('rules', data); ui.ent = null;
+  },
+  choquePick: (el) => { ui.choque.picks[Number(el.dataset.n)] = el.dataset.k; openSheet(sheetChoque()); },
+  choqueSave: async () => {
+    const ch = ui.choque; if (!ch) return;
+    sheetHtml = null;
+    if (ch.mode === 'reparto') {
+      const rows = ch.rows.map((r) => Object.assign({}, r));
+      ch.list.forEach((x, n) => Object.assign(rows[x.i], choqueApply(x, ch.picks[n])));
+      ui.choque = null;
+      await doReparto(ch.rod, rows);
+    } else {
+      ui.choque = null;
+      for (let n = 0; n < ch.list.length; n++) {
+        const x = ch.list[n]; const patch = choqueApply(x, ch.picks[n]);
+        if (patch.apoyo_due) await st.setApoyoDue(x.it.video, patch.apoyo_due);
+        if (patch.publish_date) await st.setPublish(x.it.video, patch.publish_date);
+      }
+      location.hash = '#/videos';
+    }
   },
   claim: async (el) => {
     const v = S.data.videos.find((x) => x.id === el.dataset.v);
@@ -2193,7 +3271,8 @@ const ACT = {
     const cm = R.canMark(v, k, S.me, st.ctx(v.project_id), new Date());
     if (!cm.claim) { st.toast(cm.why || 'Ya no se puede tomar', 'bad'); return; }
     const c = await st.claimTask(v, k);
-    if (c && c.id) { ui.undo = { claim: c.id, until: Date.now() + 8000, text: `Lo tomaste · entrégalo antes de ${R.fmtWhen(cm.limit)}` }; render(); setTimeout(() => { if (ui.undo && ui.undo.claim === c.id) { ui.undo = null; render(); } }, 8000); }
+    const lim = k === 'montaje' ? R.takeLimit(v, 'montaje', st.ctx(v.project_id)) : cm.limit;
+    if (c && c.id) { ui.undo = { claim: c.id, until: Date.now() + 8000, text: k === 'montaje' ? `Lo tomaste · entrégalo hasta ${whenRel(lim)}` : `Lo tomaste · entrégalo antes de ${R.fmtWhen(lim)}` }; render(); setTimeout(() => { if (ui.undo && ui.undo.claim === c.id) { ui.undo = null; render(); } }, 8000); }
   },
   rsvp: async (el) => {
     const e = evById(el.dataset.e);
@@ -2220,6 +3299,7 @@ const ACT = {
   undoQuick: async (el) => {
     const u = ui.undo; if (!u) return;
     ui.undo = null;
+    if (u.fn) { await u.fn(); return; }
     if (u.claim) { await st.unclaim(u.claim); return; }
     const rect = el.getBoundingClientRect();
     await st.undoOwn(u.id);
@@ -2238,22 +3318,23 @@ const ACT = {
     const other = st.partners().find((m) => m.id !== v.owner);
     if (other && confirm(`¿Pasar el video ${v.num} a ${other.name}? Háganlo solo de mutuo acuerdo: queda en el historial.`)) await st.changeOwner(v.id, other.id);
   },
-  checkin: async (el) => { const e = evById(el.dataset.e); await st.checkIn(e); if (S.me.role === 'admin' && Date.now() <= new Date(e.starts_at).getTime() + R.RULES.punt * 60000) { ui.burst = Date.now(); render(); } },
-  confirmArr: async (el) => { const a = S.data.attendance.find((x) => x.id === el.dataset.a); await st.confirmArrival(a, el.dataset.m); },
+  checkin: async (el) => { const e = evById(el.dataset.e); await st.checkIn(e); if (S.me.role === 'admin' && Date.now() <= new Date(e.starts_at).getTime() + R.RULES.punt * 60000) { ui.burst = Date.now(); render(); } const a = st.attOf(e.id, S.me.id); if (a) offerUndo('Llegada registrada', () => st.undoArrival(st.attOf(e.id, S.me.id))); },
+  confirmArr: async (el) => { const a = S.data.attendance.find((x) => x.id === el.dataset.a); await st.confirmArrival(a, el.dataset.m); offerUndo('Llegada confirmada', () => st.undoArrival(S.data.attendance.find((x) => x.id === a.id))); },
   endMeeting: async (el) => {
     const e = evById(el.dataset.e);
     const c = st.ctx(e.project_id);
     const pendPre = e.video_ids.map((id) => c.videos.find((v) => v.id === id)).filter((v) => v && v.owner !== S.me.id).filter((v) => { const s = R.videoState(v, c); return !s.g || !s.s; });
     const direct = S.me.role === 'admin' || R.adminAbsent(e, c);
     const warn = pendPre.length ? `\n\nOjo: ${st.member(pendPre[0].owner).name} todavía no termina ${pendPre.length === 1 ? 'el video' : 'los videos'} ${pendPre.map((v) => v.num).join(', ')}. Al finalizar, ya no suma el punto de reunión (igual tiene plazo hasta el día antes del rodaje, 18:00).` : '';
-    if (!confirm((direct ? '¿Finalizar la reunión ahora?' : '¿Pedir al administrador que finalice la reunión? Quedará con la hora de ahora.') + warn)) return;
+    if (!confirm((direct ? '¿Finalizar la reunión ahora?' : '¿Pedir a ' + LN() + ' que finalice la reunión? Quedará con la hora de ahora.') + warn)) return;
     await st.endMeeting(e);
+    if (evById(e.id).ended_at) offerUndo('Reunión finalizada', () => st.undoEnd(evById(e.id)));
   },
-  confirmEnd: async (el) => { await st.confirmEnd(evById(el.dataset.e)); },
+  confirmEnd: async (el) => { const id = el.dataset.e; await st.confirmEnd(evById(id)); offerUndo('Reunión finalizada', () => st.undoEnd(evById(id))); },
   extraMeet: (el) => { const r = evById(el.dataset.r); openSheet(dateTimeSheet('extraMeet', 'Otra reunión', `Antes de ${R.fmtWhen(R.preDueFor(r.starts_at))} (plazo de preproducción).`, { r: r.id }, R.limaDate(new Date()), '18:00', 'Agendar')); },
   reday: (el) => { const e = evById(el.dataset.e); openSheet(dateTimeSheet('reday', 'Reprogramar el rodaje', 'Se crea un rodaje nuevo con los mismos videos. El anterior queda como "reprogramado" en el historial. Los plazos de preproducción se mueven con el rodaje.', { e: e.id, a: el.dataset.a || '' }, R.addDays(R.limaDate(e.starts_at), 1), R.limaTime(e.starts_at), 'Reprogramar')); },
   moveEv: (el) => { const e = evById(el.dataset.e); openSheet(dateTimeSheet('moveEv', 'Cambiar fecha u hora', 'Solo mientras nadie haya marcado su llegada. Queda en el historial.', { e: e.id }, R.limaDate(e.starts_at), R.limaTime(e.starts_at), 'Guardar')); },
-  cancelEv: async (el) => { const e = evById(el.dataset.e); const note = prompt(`¿Cancelar ${e.kind === 'rodaje' ? 'el rodaje' : 'la reunión'} del ${R.fmtWhen(e.starts_at)}? Queda en el historial. Escribe el motivo (opcional):`, ''); if (note === null) return; await st.cancelEvent(e, note.trim()); },
+  cancelEv: async (el) => { const e = evById(el.dataset.e); const note = prompt(`¿Cancelar ${e.kind === 'rodaje' ? 'el rodaje' : 'la reunión'} del ${R.fmtWhen(e.starts_at)}? Queda en el historial. Escribe el motivo (opcional):`, ''); if (note === null) return; await st.cancelEvent(e, note.trim()); offerUndo('Cancelado', () => st.undoCancel(evById(e.id))); },
   delEv: async (el) => { const e = evById(el.dataset.e); if (!confirm('¿Borrar? Está vacío, así que no se pierde ningún registro.')) return; await st.deleteEvent(e); location.hash = '#/videos'; },
   newRod: () => openSheet(dateTimeSheet('newRod', 'Programar rodaje', 'Para los videos que se quedaron sin rodaje.', {}, R.addDays(R.limaDate(new Date()), 2), '10:00', 'Programar')),
   delProject: async (el) => { const p = projOf(el.dataset.id); if (!confirm(`¿Borrar el proyecto ${p.client} · ${p.name}? Está vacío.`)) return; await st.deleteProject(p); if (S.projectId === p.id) { const n = S.data.projects.find((x) => x.status !== 'archivado'); st.switchProject(n ? n.id : null); } },
@@ -2261,7 +3342,7 @@ const ACT = {
   practiceOn: () => { if (confirm('Entrarás a un espacio de práctica en este celular. Tus datos reales no cambian. ¿Entrar?')) st.setPractice(true); },
   practiceOff: () => st.setPractice(false),
   notice: (el) => { openSheet(sheetNotice(evById(el.dataset.e), !!el.dataset.fm)); },
-  decide: async (el) => { const a = S.data.attendance.find((x) => x.id === el.dataset.a); await st.decideNotice(a, el.dataset.d); },
+  decide: async (el) => { const a = S.data.attendance.find((x) => x.id === el.dataset.a); await st.decideNotice(a, el.dataset.d); offerUndo('Respuesta registrada', () => st.undoDecision(S.data.attendance.find((x) => x.id === a.id))); },
   repro: (el) => {
     const e = evById(el.dataset.e);
     const left = e.video_ids.filter((id) => !S.data.tasks.find((t) => t.video_id === id && t.kind === 'rodaje'));
@@ -2277,6 +3358,74 @@ const ACT = {
   askCorr: async (el) => { const t = prompt('Describe la corrección. El registro original no se borra; tu compañero tendrá que aprobarla.'); if (t) await st.requestCorrection(Number(el.dataset.id), t); },
   corr: async (el) => { const c = S.data.corrections.find((x) => x.id === el.dataset.id); await st.decideCorrection(c, el.dataset.s); },
   rename: async (el) => { const m = st.member(el.dataset.id); const n = prompt('Nombre (así aparecerá en avisos, recibos e historial):', m.name); if (n && n.trim() && n.trim() !== m.name) await st.renameMember(m.id, n); },
+  // ---------- 1.4 · Integrantes C ----------
+  apoyoAsk: (el) => { ui.apoyoAsk = ui.apoyoAsk === el.dataset.id ? null : el.dataset.id; render(); },
+  apoyoPend: () => st.toast('Aún no entra al equipo: cancela la invitación y vuelve a invitarlo con la etiqueta que quieras', 'bad'),
+  apoyoGo: async (el) => { const m = st.member(el.dataset.id); await st.proposeApoyo(m, !m.apoyo); ui.apoyoAsk = null; render(); },
+  memEdit: (el) => { ui.memEdit = Object.assign({}, ui.memEdit, { [el.dataset.id]: !(ui.memEdit || {})[el.dataset.id] }); render(); },
+  memRenew: async (el) => { await st.renewInvite(st.member(el.dataset.id)); },
+  memCancel: async (el) => { const m = st.member(el.dataset.id); if (confirm(`¿Cancelar la invitación de ${m.name}? El enlace dejará de funcionar.`)) await st.cancelInvite(m); },
+  memInvite: () => { ui.inv = { role: 'socio', apoyo: true, name: '', phone: '' }; openSheet(sheetInvite()); },
+  invRole: (el) => { ui.inv = Object.assign({}, ui.inv, { role: el.dataset.k }); openSheet(sheetInvite()); },
+  invGo: async () => {
+    const d = ui.inv || {};
+    const name = String(d.name || '').trim();
+    const ph = String(d.phone || '').replace(/\D/g, '');
+    if (!name) return st.toast('Escribe el nombre', 'bad');
+    if (ph && !st.PHONE_RE.test(ph)) return st.toast('El WhatsApp debe tener 9 dígitos y empezar con 9', 'bad');
+    if (d.role === 'colaborador') { ui.job = null; ui.inv = d; sheetHtml = null; location.hash = '#/encargo/nuevo'; return; }
+    const code = await st.inviteMember(name, 'socio', !!d.apoyo);
+    const m = S.data.members.find((x) => x.invite_code === code);
+    if (m && ph) await st.saveMembers({ [m.id]: { phone: ph } }, null, 'Invitación lista');
+    const link = location.origin + location.pathname + '#/i/' + code;
+    const msg = `Hola ${name.split(' ')[0]}, te invito como Socio a nuestro equipo en la app de registro. Ahí marcamos nuestras tareas y vemos cuánto le toca a cada uno: ${link}`;
+    ui.inv = null;
+    openSheet(`<h2>Invitación lista</h2><p class="sub" style="margin:0">Envíale este enlace a ${esc(name)}. Vence en 7 días; si vence, generas uno nuevo desde Integrantes.</p>
+      <div class="pmsg pm-green"><span class="pdot"></span><p>${esc(msg)}</p></div>
+      <a class="hb x-green" href="https://wa.me/${ph ? '51' + ph : ''}?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">${waIc}Enviar por WhatsApp</a>
+      <button class="btn b-ghost" data-act="copy" data-t="${esc(link)}">Copiar enlace</button><button class="btn b-ghost" data-act="close">Listo</button>`);
+  },
+  memSave: async () => { await st.saveMembers(ui.memCh || {}, ui.gPhone != null ? ui.gPhone : null); ui.memCh = {}; ui.memEdit = {}; ui.gPhone = null; render(); },
+  // ---------- 1.4 · Entrega vencida ----------
+  reprog: (el) => openSheet(sheetReprog(S.data.videos.find((x) => x.id === el.dataset.v))),
+  // ---------- 1.4 · Encargo al colaborador ----------
+  jobNewFor: (el) => { ui.job = null; ui.inv = null; location.hash = '#/encargo/nuevo?m=' + el.dataset.id; },
+  jobWho: (el) => { ui.job.member_id = el.dataset.id; render(); },
+  jobVid: (el) => { const a = ui.job.video_ids; const i = a.indexOf(el.dataset.id); if (i === -1) a.push(el.dataset.id); else a.splice(i, 1); render(); },
+  jobPrice: (el) => { ui.job.price = Math.max(5, Number(ui.job.price) + Number(el.dataset.d)); render(); },
+  jobPayer: (el) => { ui.job.payer = el.dataset.k; render(); },
+  jobCreate: async () => {
+    const d = ui.job; const p = st.project();
+    if (!d.member_id && !String(d.name || '').trim()) return st.toast('Escribe el nombre del editor', 'bad');
+    const ph = String(d.phone || '').replace(/\D/g, '');
+    if (!d.member_id && ph && !st.PHONE_RE.test(ph)) return st.toast('El WhatsApp debe tener 9 dígitos y empezar con 9', 'bad');
+    const j = await st.createJob({ member_id: d.member_id || null, name: String(d.name || '').trim(), phone: ph, project_id: p.id, video_ids: d.video_ids.slice(), price: d.price, payer: d.payer, drive_url: String(d.drive_url || '').trim() });
+    ui.job = null; ui.inv = null;
+    st.toast(otherPartner() ? 'Encargo enviado a ' + otherPartner().name.split(' ')[0] + ' para que lo apruebe' : 'Encargo creado');
+    if (j && j.id) location.hash = '#/encargo/' + j.id;
+  },
+  jobDecide: async (el) => {
+    const j = S.data.jobs.find((x) => x.id === el.dataset.id); const s0 = el.dataset.s;
+    if ((s0 === 'cancelado' || s0 === 'rechazado') && !confirm(s0 === 'cancelado' ? '¿Cancelar este encargo?' : '¿Rechazar este encargo?')) return;
+    await st.decideJob(j, s0);
+  },
+  jobClose: async (el) => { const j = S.data.jobs.find((x) => x.id === el.dataset.id); if (confirm('¿Confirmas que los videos están en Drive y registras el pago al editor?')) await st.decideJob(j, 'cerrado'); },
+  jobSel: (el) => { ui.jobSel = Object.assign({}, ui.jobSel, { [el.dataset.j]: el.dataset.v }); render(); },
+  jobObs: async (el) => {
+    const lines = String((ui.obs || {})[el.dataset.id] || '').split('\n').map((x) => x.trim()).filter(Boolean);
+    if (!lines.length) return st.toast('Escribe al menos una observación (una por línea)', 'bad');
+    await st.jobStep(el.dataset.id, 'obs', lines); ui.obs[el.dataset.id] = ''; st.toast('Observaciones enviadas al editor'); render();
+  },
+  jobOk: async (el) => { await st.jobStep(el.dataset.id, 'ok'); st.toast('Aprobado'); },
+  jobUndo: async (el) => { await st.jobUndo(el.dataset.id); },
+  // ---------- 1.4 · Vista del colaborador ----------
+  colabJob: (el) => { ui.colabJob = el.dataset.id; render(); },
+  colabSel: (el) => { ui.colabSel = Object.assign({}, ui.colabSel, { [el.dataset.j]: el.dataset.v }); render(); },
+  colabAccept: async (el) => { await st.jobAccept(el.dataset.id); },
+  colabFinish: async (el) => { if (confirm('¿Marcar el servicio como finalizado? El equipo lo confirmará y registrará tu pago.')) await st.jobFinish(el.dataset.id); },
+  colabStep: async (el) => { await st.jobStep(el.dataset.id, el.dataset.k); st.toast({ montaje: 'Montaje entregado', final: 'Video final entregado', upload: 'Listo para subir', uploaded: '¡Video listo!' }[el.dataset.k] || 'Registrado'); },
+  colabCheck: async (el) => { await st.jobStep(el.dataset.id, 'check', null, Number(el.dataset.i)); },
+  colabUndo: async (el) => { await st.jobUndo(el.dataset.id); },
   copy: async (el) => { try { await navigator.clipboard.writeText(el.dataset.t); st.toast('Enlace copiado'); } catch (e) { prompt('Copia el enlace:', el.dataset.t); } },
   photo: async (el) => { const url = await st.fileUrl(el.dataset.p); openSheet(url ? `<img class="photo" style="max-height:70vh" src="${esc(url)}" alt="Evidencia"><button class="btn b-ghost" data-act="close">Cerrar</button>` : '<p class="empty">No se pudo cargar la foto.</p><button class="btn b-ghost" data-act="close">Cerrar</button>'); },
   hire: (el) => {
@@ -2287,19 +3436,55 @@ const ACT = {
     openSheet(`<h2>Contratar a Guillermo</h2>
     <p class="sub" style="margin:0">Para la reunión del ${R.fmtWhen(e.starts_at)}.</p>
     <div class="card tight"><div class="between small"><span class="muted">Hace</span><b>Tus guiones y storyboards de esta semana</b></div>
-    <div class="between small"><span class="muted">Cobra</span><b>80 % · ${R.money(val * 0.8)} por video</b></div>
+    <div class="between small"><span class="muted">Cobra</span><b>${gTxt(S.me)} · ${R.money(val * gp(S.me))} por video</b></div>
     <div class="between small"><span class="muted">Lo recibe</span><b>${esc(other ? other.name : 'tu compañero')}</b></div>
-    <div class="between small"><span class="muted">Tú conservas</span><b>20 % · ${R.money(val * 0.2)} por video</b></div></div>
+    ${gp(S.me) < 1 ? `<div class="between small"><span class="muted">Tú conservas</span><b>${Math.round((1 - gp(S.me)) * 100)} % · ${R.money(val * (1 - gp(S.me)))} por video</b></div>` : '<div class="between small"><span class="muted">Tú conservas</span><b>Nada: lo cedes todo</b></div>'}</div>
     <p class="muted" style="margin:0">Tu compañero tiene que aceptar. Tu asistencia queda como "no requerida": no es falta ni suma racha. El rodaje y la edición de tus videos siguen siendo tuyos.</p>
     <button class="btn b-purple" data-act="hireGo" data-e="${e.id}">Contratar</button><button class="btn b-ghost" data-act="close">Cancelar</button>`);
   },
   hireGo: async (el) => { const e = evById(el.dataset.e); sheetHtml = null; await st.hireGuillermo(e); },
   hireDecide: async (el) => { const h = S.data.hires.find((x) => x.id === el.dataset.id); await st.decideHire(h, el.dataset.s); },
   signOut: () => st.signOut(),
+  // 1.5 · Invitación en un paso
+  invOk: (el) => { ui.invOk = el.checked; ui.invNudge = false; render(); },
+  invMore: () => { ui.invMore = !ui.invMore; render(); },
+  invMailOff: () => { ui.invMail = null; render(); },
+  invAcc: async (el) => {
+    const code = el.dataset.code;
+    const info = ui.inviteInfo || {};
+    const ok = info.role === 'colaborador' || ui.invOk;
+    if (!ok) { ui.invNudge = true; render(); return; }
+    const nameEl = document.querySelector('[name=invname]');
+    const name = nameEl ? nameEl.value.trim() : '';
+    ui.invName = name || null;
+    st.savePendingInvite({ code, ok: true, name });
+    if (el.dataset.k === 'google') { location.href = st.googleUrl(); return; }
+    if (el.dataset.k === 'demo') { ui.email = 'invitado' + Math.floor(Math.random() * 1000) + '@demo'; await st.verifyCode(ui.email, '000000'); location.hash = '#/'; render(); return; }
+    ui.invMail = 'form'; render();
+  },
+  invAccept: async (el) => {
+    const info = ui.inviteInfo || {};
+    if (info.role !== 'colaborador' && !ui.invOk && !((st.pendingInvite() || {}).ok)) { ui.invNudge = true; render(); return; }
+    const nameEl = document.querySelector('[name=invname]');
+    const okd = await st.acceptInvite(el.dataset.code, nameEl ? nameEl.value.trim() : '');
+    if (okd === false) { render(); return; }
+    S.inviteDone = { name: S.me ? S.me.name : '', at: new Date() };
+    ui.inviteInfo = null; ui.invOk = false; location.hash = '#/'; render();
+  },
+  invSeen: () => { ui.inviteInfo = null; ui.invOk = false; ui.invMail = null; location.hash = '#/'; st.inviteSeen(); },
+  invDrop: () => { st.clearPendingInvite(); ui.inviteInfo = null; location.hash = '#/'; st.inviteSeen(); },
+  invForget: () => { st.clearPendingInvite(); ui.inviteInfo = null; ui.inviteCode = null; location.hash = '#/'; render(); },
+  switchAccount: () => st.switchAccount(),
   google: () => { location.href = st.googleUrl(); },
   demoAs: (el) => { ui.undo = null; ui.rpop = null; return st.demoSwitch(el.dataset.id); },
-  demoReset: () => { if (confirm('¿Borrar todos los datos de la demo?')) st.demoReset(); },
-  seed: async () => { await seedDemo(); location.hash = '#/'; location.reload(); }
+  demoReset: async () => { if (!confirm('¿Reiniciar el ejemplo? Se borra lo que probaste.')) return; if (st.practice()) { let k = 'con'; try { k = localStorage.getItem('ra-seed') || 'con'; } catch (e) { /* */ } await seedDemo(k); location.hash = '#/'; location.reload(); } else st.demoReset(); },
+  seed: async (el) => { await seedDemo(el.dataset.k); location.hash = '#/'; location.reload(); },
+  clock: (el) => {
+    const m = Number(el.dataset.m);
+    window.__clk = m === 0 ? 0 : (window.__clk || 0) + m * 60000;
+    try { if (window.__clk) localStorage.setItem('ra-clock', String(window.__clk)); else localStorage.removeItem('ra-clock'); } catch (e) { /* */ }
+    st.load().catch(() => {}); render();
+  }
 };
 
 const FORM = {
@@ -2311,7 +3496,10 @@ const FORM = {
   verify: async (f) => { await st.verifyCode(ui.email, f.code.trim()); location.hash = location.hash || '#/'; render(); },
   createTeam: async (f) => { await st.createTeam(f.team.trim(), f.me.trim()); location.hash = '#/equipo'; },
   goInvite: (f) => { location.hash = '#/i/' + f.code.trim().toUpperCase(); },
-  accept: async (f) => { await st.acceptInvite(f.code, f.name.trim()); ui.inviteInfo = null; location.hash = '#/'; st.toast('¡Ya eres parte del equipo!'); },
+  invMail: async (f) => {
+    ui.email = f.email.trim().toLowerCase();
+    await st.sendCode(ui.email); ui.invMail = 'sent'; ui.codeSent = true; render();
+  },
   invite: async (f, form) => { await st.invite(f.name.trim(), 'socio', !!form.apoyo.checked); form.reset(); },
   project: async (f) => { await st.createProject({ client: f.client.trim(), name: f.name.trim(), budget: Number(f.budget), videos_total: Number(f.videos), start_date: f.start }); location.hash = '#/videos'; },
   plan: async (f) => {
@@ -2319,6 +3507,12 @@ const FORM = {
     if (R.at(f.md, f.mt) >= R.preDueFor(R.at(f.rd, f.rt))) throw new Error(`La reunión tiene que ser antes de ${R.fmtWhen(R.preDueFor(R.at(f.rd, f.rt)))} (día antes del rodaje, 18:00)`);
     await st.planWeek({ rodaje_date: f.rd, rodaje_time: f.rt, meeting_date: f.md, meeting_time: f.mt });
     ui.stage = 'pre';
+    // 1.4: ¿el rodaje o la reunión nuevos caen el último día de apoyo de un video ya repartido?
+    const c = st.ctx();
+    const vids = c.videos.filter((v) => { const s = R.videoState(v, c); return !s.mo && !s.delivered; });
+    const list = choquesDe(vids.map((v) => ({ video: v, num: v.num, owner: v.owner, publish_date: v.publish_date, apoyo_due: v.apoyo_due })), [[f.rd, 'rodaje'], [f.md, 'reunión']])
+      .filter((x) => x.kind === 'clash' && (x.apoyoDay === f.rd || x.apoyoDay === f.md));
+    if (list.length) { ui.choque = { mode: 'plan', list, picks: {} }; openSheet(sheetChoque()); return; }
     location.hash = '#/videos';
   },
   reparto: async (f) => {
@@ -2326,12 +3520,18 @@ const FORM = {
     const n = Number(f.n);
     const videos = Array.from({ length: n }, (_, i) => ({ publish_date: f['pub' + i], owner: f['own' + i], title: (f['tit' + i] || '').trim() }));
     const rd = R.limaDate(rod.starts_at);
-    const soon = videos.map((v, i) => ({ v, i })).filter(({ v }) => v.publish_date <= R.addDays(rd, 2));
-    if (soon.length && !confirm(`Ojo: ${soon.length === 1 ? 'un video se publica' : soon.length + ' videos se publican'} muy cerca del rodaje (${R.fmtDay(rd)}): su montaje vencería antes o el mismo día. ¿Guardar igual?`)) return;
-    await st.reparto(rod, videos);
-    ui.stage = 'pre';
-    const mt = S.data.events.find((e) => e.kind === 'reunion' && e.rodaje_id === rod.id && active(e) && !e.ended_at);
-    location.hash = mt ? '#/e/' + mt.id : '#/videos';
+    if (videos.some((v) => !v.publish_date || v.publish_date <= rd)) throw new Error('La publicación debe ser después del rodaje (' + R.fmtDay(rd) + ')');
+    // 1.4: aviso de choque (apoyo en día de rodaje o reunión, o poco tiempo entre rodaje y publicación).
+    const base = S.data.videos.filter((x) => x.project_id === rod.project_id).reduce((m, x) => Math.max(m, x.num), 0);
+    const list = choquesDe(videos.map((v, i) => Object.assign({}, v, { num: base + i + 1, rodajeDate: rd })));
+    if (list.length) { ui.choque = { mode: 'reparto', rod, rows: videos, list, picks: {} }; openSheet(sheetChoque()); return; }
+    await doReparto(rod, videos);
+  },
+  reviewNote: async (f) => {
+    const v = S.data.videos.find((x) => x.id === f.v);
+    ui.revNote = (f.note || '').trim();
+    if (!ui.revNote) throw new Error('Escribe qué debe corregir');
+    openSheet(sheetReview(v, 'no2'));
   },
   mark: async (f) => {
     const v = S.data.videos.find((x) => x.id === f.v);
@@ -2379,6 +3579,14 @@ const FORM = {
     sheetHtml = null;
     await st.newRodaje(S.projectId, ids, f.d, f.t);
   },
+  reprog: async (f) => {
+    const v = S.data.videos.find((x) => x.id === f.v);
+    const s0 = R.videoState(v, st.ctx(v.project_id), new Date());
+    const lateMine = s0.overdue && s0.inCharge === S.me.id;
+    if (!confirm(`¿Reprogramar la entrega del video ${v.num} al ${R.fmtDay(f.d)}?${lateMine ? ' Resta 3 puntos de racha.' : ''}`)) return;
+    await st.reprogramDelivery(v, f.d, f.note);
+    sheetHtml = null; st.toast(`Entrega del video ${v.num} reprogramada al ${R.fmtDay(f.d)}`);
+  },
   phone: async (f) => { await st.setPhone(f.m, f.p); },
   pay: async (f, form) => {
     const file = form.proof && form.proof.files[0];
@@ -2388,6 +3596,15 @@ const FORM = {
   }
 };
 
+async function doReparto(rod, videos) {
+  await st.reparto(rod, videos);
+  ui.stage = 'pre';
+  const mt = S.data.events.find((e) => e.kind === 'reunion' && e.rodaje_id === rod.id && active(e) && !e.ended_at);
+  location.hash = mt ? '#/e/' + mt.id : '#/videos';
+}
+// 1.5 · Sin zoom con dos dedos (Safari ignora user-scalable=no): la app siempre encaja en la pantalla.
+['gesturestart', 'gesturechange'].forEach((ev) => document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
+document.addEventListener('touchmove', (e) => { if (e.touches && e.touches.length > 1) e.preventDefault(); }, { passive: false });
 document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
@@ -2399,6 +3616,25 @@ document.addEventListener('click', async (e) => {
   try { await fn(el, e); } catch (err) { console.error(err); }
 });
 document.addEventListener('change', (e) => { if (e.target.closest('label.opt')) syncOpts(); if (e.target.closest('label.own')) syncOwn(); if (e.target.dataset && e.target.dataset.lk) { lkSet(e.target.dataset.lk, e.target.dataset.num ? Number(e.target.value) : e.target.value); render(); } });
+// 1.4: campos que se guardan mientras escribes (sin volver a dibujar la pantalla).
+document.addEventListener('input', (e) => {
+  const t = e.target; const d = t.dataset || {};
+  if (d.mf) {
+    const val = d.mf === 'phone' || d.mf === 'gphone' ? t.value.replace(/\D/g, '').slice(0, 9) : t.value;
+    if (d.mf === 'gphone') ui.gPhone = val;
+    else { ui.memCh = ui.memCh || {}; ui.memCh[d.id] = Object.assign({}, ui.memCh[d.id], { [d.mf]: val }); }
+    if (d.mf !== 'name') {
+      const box = t.closest('.wafield'); const ok = st.PHONE_RE.test(val);
+      if (box) { box.querySelector('.okdot').hidden = !ok; box.querySelector('.wabad').hidden = ok || !val; const a = box.querySelector('.watry'); a.hidden = !ok; a.href = 'https://wa.me/51' + val + '?text=Hola'; }
+      t.style.borderColor = val && !ok ? 'var(--u0)' : '';
+    }
+  }
+  if (d.inv) { ui.inv = ui.inv || {}; ui.inv[d.inv] = t.type === 'checkbox' ? t.checked : t.value; }
+  if (d.job && ui.job) ui.job[d.job] = t.value;
+  if (d.obs) { ui.obs = ui.obs || {}; ui.obs[d.obs] = t.value; }
+  if (t.name === 'invname') ui.invName = t.value;
+});
+document.addEventListener('change', (e) => { const d = e.target.dataset || {}; if (d.inv && e.target.type === 'checkbox') { ui.inv = ui.inv || {}; ui.inv.apoyo = e.target.checked; } });
 document.addEventListener('submit', async (e) => {
   const form = e.target.closest('form[data-form]');
   if (!form) return;

@@ -84,9 +84,9 @@ test('apoyo en el acabado se le paga al dueño; montaje no entregado pasa al que
   assert.equal(s4.apoyo, false);
 });
 
-test('racha: W 40 (24 entregas + 8 llegadas + 8 puntos de reunión); S suma 14 neto y nunca baja de cero', () => {
+test('racha: W 43 (24 entregas + 8 llegadas + 8 puntos de reunión + 3 por rescatar el video que pasó a él); S suma 14 neto y nunca baja de cero', () => {
   const { ctx } = scenario();
-  assert.equal(streak('W', ctx, NOW).pts, 40);
+  assert.equal(streak('W', ctx, NOW).pts, 43);
   assert.equal(streak('W', ctx, NOW).level.name, 'Imparable');
   const net = streakEvents('S', ctx, NOW).reduce((a, e) => a + e.pts, 0);
   assert.equal(net, 14);
@@ -136,11 +136,19 @@ test('colaborador: el presupuesto cubre hasta S/ 25 por video y la suma sigue en
     const v = ctx.videos.find((x) => x.num === num);
     for (const t of ctx.tasks.filter((x) => x.video_id === v.id && (x.kind === 'montaje' || x.kind === 'acabado'))) t.done_by = 'E';
   }
+  // 1.4: el excedente (S/ 15 por video) lo pone el dueño de los videos (por defecto): el editor recibe S/ 40 por video.
+  const base = payouts(project, Object.assign({}, ctx, { jobs: [] }), NOW).porMiembro.S.total;
   const p = payouts(project, ctx, NOW);
-  assert.equal(p.porMiembro.E.total, 50);
-  assert.equal(Math.round(p.excedente.E * 100) / 100, 30);
+  assert.equal(p.porMiembro.E.total, 80);
   const sum = Object.values(p.porMiembro).reduce((a, m) => a + m.total, 0);
   assert.equal(Math.round(sum * 100) / 100, 1000);
+  // "Por definir": el excedente queda aparte y la suma sigue en S/ 1,000
+  ctx.jobs[0].payer = 'tbd';
+  const q = payouts(project, ctx, NOW);
+  assert.equal(q.porMiembro.E.total, 50);
+  assert.equal(Math.round(q.excedente.E * 100) / 100, 30);
+  assert.equal(Math.round(Object.values(q.porMiembro).reduce((a, m) => a + m.total, 0) * 100) / 100, 1000);
+  assert.ok(base > 0);
 });
 
 test('Guillermo al 80 %: el que asiste cobra el 80 % de la preproducción hecha por Guillermo; la suma sigue en S/ 1,000', () => {
@@ -202,7 +210,7 @@ test('1.1 · solo se marca lo que ya puede haber pasado', () => {
   const day = new Date('2026-12-23T10:30:00-05:00');
   assert.equal(canMark(vx, 'rodaje', S, ctx, day).ok, false); // sin llegada
   ctx.attendance.push({ event_id: 'Jx', member_id: 'S', claimed_at: '2026-12-23T09:58:00-05:00' });
-  assert.match(canMark(vx, 'rodaje', S, ctx, day).why, /confirmación/);
+  assert.match(canMark(vx, 'rodaje', S, ctx, day).why, /la confirme/);
   ctx.attendance[ctx.attendance.length - 1].arrived_at = '2026-12-23T09:58:00-05:00';
   assert.equal(canMark(vx, 'rodaje', S, ctx, day).ok, true);
 });

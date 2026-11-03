@@ -2,9 +2,13 @@
 <html lang="es">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#0B0C10">
 <script>try{if(localStorage.getItem("ra-theme")==="light")document.documentElement.dataset.theme="light"}catch(e){}</script>
+<script>
+// 1.5 · Reloj de práctica: en el modo práctica la app puede "adelantar la hora" para probar los plazos.
+try{if(localStorage.getItem("ra-practice")==="1"){var RD=Date;window.__RD=RD;window.__clk=+(localStorage.getItem("ra-clock")||0);var N=function(){return RD.now()+(window.__clk||0)};var D=function(){var a=Array.prototype.slice.call(arguments);if(!(this instanceof D))return new RD(N()).toString();return a.length?new(Function.prototype.bind.apply(RD,[null].concat(a)))():new RD(N())};D.prototype=RD.prototype;D.now=N;D.UTC=RD.UTC;D.parse=RD.parse;window.Date=D}}catch(e){}
+</script>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Registro">

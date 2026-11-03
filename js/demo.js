@@ -2,19 +2,23 @@
 import { api } from './api.js';
 import { at, addDays, limaDate } from './rules.js';
 
-export async function seedDemo() {
+export async function seedDemo(variant) {
+  // 1.5: dos ejemplos: tu socio con apoyo ("Socio") o sin apoyo ("Ana").
+  const sinApoyo = variant === 'sin';
+  const SN = sinApoyo ? 'Ana' : 'Socio';
+  try { localStorage.setItem('ra-seed', sinApoyo ? 'sin' : 'con'); localStorage.removeItem('ra-clock'); window.__clk = 0; } catch (e) { /* */ }
   if (api.mode !== 'demo') return;
   api.reset();
-  api.db = { teams: [], users: [], who: null, members: [], projects: [], videos: [], tasks: [], events: [], attendance: [], hires: [], log: [], corrections: [], proposals: [], claims: [] };
+  api.db = { teams: [], users: [], who: null, members: [], projects: [], videos: [], tasks: [], events: [], attendance: [], hires: [], log: [], corrections: [], proposals: [], claims: [], jobs: [], job_items: [] };
   api.logId = 0;
   api.seeding = true;
   await api.verifyCode('williams@demo');
   const wUser = api.db.who;
   const team = await api.rpc('create_team', { team_name: 'Williams Velasquez · Audiovisual', my_name: 'Williams' });
-  const code = await api.rpc('create_invite', { t: team, invite_name: 'Socio', invite_role: 'socio', gets_apoyo: true });
-  await api.verifyCode('socio@demo');
+  const code = await api.rpc('create_invite', { t: team, invite_name: SN, invite_role: 'socio', gets_apoyo: !sinApoyo });
+  await api.verifyCode(sinApoyo ? 'ana@demo' : 'socio@demo');
   const sUser = api.db.who;
-  await api.rpc('accept_invite', { code, my_name: 'Socio' });
+  await api.rpc('accept_invite', { code, my_name: SN });
   const W = api.db.members.find((m) => m.user_id === wUser).id;
   const S = api.db.members.find((m) => m.user_id === sUser).id;
   const as = (u) => api.switchUser(u === W ? wUser : sUser);
@@ -72,8 +76,30 @@ export async function seedDemo() {
   const m3 = addDays(D, 3), r3 = addDays(D, 5);
   const rod3 = await api.insert('events', { team_id: team, project_id: p.id, kind: 'rodaje', status: 'activo', starts_at: iso(r3, '10:00'), tolerance_min: 45, video_ids: [] });
   await api.insert('events', { team_id: team, project_id: p.id, kind: 'reunion', status: 'activo', rodaje_id: rod3.id, starts_at: iso(m3, '10:00'), tolerance_min: 45, video_ids: [] });
+  // 1.4 · Colaborador externo: dos videos más de Williams (grabados en el rodaje 1) los edita "Editor".
+  as(W);
+  const extra = [];
+  for (const n of [9, 10]) extra.push(await api.insert('videos', { team_id: team, project_id: p.id, num: n, publish_date: addDays(D, 4), owner: W }));
+  for (const e of [w1.reu, w1.rod]) { const ev = api.db.events.find((x) => x.id === e.id); ev.video_ids = ev.video_ids.concat(extra.map((v) => v.id)); }
+  for (const v of extra) { await task(W, v, 'guion', iso(m1, '12:00')); await task(W, v, 'storyboard', iso(m1, '12:10')); await task(W, v, 'rodaje', iso(r1, '12:00')); }
+  as(W);
+  const ecode = await api.rpc('create_invite', { t: team, invite_name: 'Editor', invite_role: 'colaborador', gets_apoyo: false });
+  await api.verifyCode('editor@demo');
+  const eUser = api.db.who;
+  await api.rpc('accept_invite', { code: ecode, my_name: 'Editor' });
+  const E = api.db.members.find((m) => m.user_id === eUser).id;
+  as(W);
+  const job = await api.insert('jobs', { team_id: team, project_id: p.id, member_id: E, service: 'edicion', video_ids: extra.map((v) => v.id), price: 30, payer: 'owner', drive_url: 'https://drive.google.com/drive/folders/ejemplo', status: 'invitado' });
+  api.switchUser(eUser);
+  await api.rpc('job_accept', { job: job.id });
+  const it9 = api.db.job_items.find((i) => i.job_id === job.id && i.video_id === extra[0].id);
+  await api.rpc('job_step', { item: it9.id, act: 'montaje' });
+  it9.montaje_at = iso(addDays(D, -1), '20:30'); { const tk = api.db.tasks.find((t) => t.id === (it9.prev || {}).task); if (tk) tk.done_at = it9.montaje_at; } it9.prev = null;
+  as(W);
+  await api.rpc('job_step', { item: it9.id, act: 'obs', obs: ['Subir el volumen de la voz en 0:12', 'Cortar la pausa larga en 0:40'] });
+  it9.prev = null;
   // WhatsApp de ejemplo
-  for (const m of api.db.members) m.phone = m.id === W ? '987654321' : '912345678';
+  for (const m of api.db.members) m.phone = m.id === W ? '987654321' : m.id === E ? '923456789' : '912345678';
   as(W);
   api.seeding = false;
   api.db.log.sort((a, b) => new Date(a.at) - new Date(b.at)).forEach((l, i) => { l.id = i + 1; });
