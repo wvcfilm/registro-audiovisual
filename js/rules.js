@@ -638,7 +638,7 @@ export function canMark(video, kind, me, ctx, now = new Date(), opts = {}) {
     // 1.3: sin guion no se graba (se reprograma); sin storyboard sí se graba y su valor se reparte.
     if (!st.g) return { ok: false, noGuion: true, why: 'Sin guion no se graba: reprográmalo' };
     const mine = (ctx.attendance || []).find((a) => a.event_id === r.id && a.member_id === me.id);
-    if (!mine || !mine.arrived_at) return { ok: false, why: mine && mine.claimed_at ? 'Tu llegada espera confirmación del administrador' : 'Primero registra tu llegada al rodaje' };
+    if (!mine || !mine.arrived_at) return { ok: false, why: mine && mine.claimed_at ? 'Tu llegada espera que ' + adminName(ctx) + ' la confirme' : 'Primero registra tu llegada al rodaje' };
     const split = !st.s;
     if (isOwner) return { ok: true, split };
     const oa = (ctx.attendance || []).find((a) => a.event_id === r.id && a.member_id === video.owner);
@@ -722,7 +722,7 @@ function canMarkPair(video, kind, me, ctx, now, st) {
   return { ok: false, why: `Es de ${owner.name}` };
 }
 
-const adminName = (ctx) => { const a = (ctx.members || []).find((m) => m.role === 'admin' && m.active !== false); return a ? String(a.name).split(' ')[0] : 'el administrador'; };
+const adminName = (ctx) => { const a = (ctx.members || []).find((m) => m.role === 'admin' && m.active !== false); return a ? String(a.name).split(' ')[0] : 'el líder'; };
 
 // 1.4 · Deshacer: 10 minutos, y nunca después del plazo de esa acción. El administrador puede desmarcar tareas siempre.
 export function undoUntil(task, ctx) {

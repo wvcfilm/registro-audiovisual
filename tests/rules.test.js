@@ -210,7 +210,7 @@ test('1.1 · solo se marca lo que ya puede haber pasado', () => {
   const day = new Date('2026-12-23T10:30:00-05:00');
   assert.equal(canMark(vx, 'rodaje', S, ctx, day).ok, false); // sin llegada
   ctx.attendance.push({ event_id: 'Jx', member_id: 'S', claimed_at: '2026-12-23T09:58:00-05:00' });
-  assert.match(canMark(vx, 'rodaje', S, ctx, day).why, /confirmación/);
+  assert.match(canMark(vx, 'rodaje', S, ctx, day).why, /la confirme/);
   ctx.attendance[ctx.attendance.length - 1].arrived_at = '2026-12-23T09:58:00-05:00';
   assert.equal(canMark(vx, 'rodaje', S, ctx, day).ok, true);
 });

@@ -95,6 +95,7 @@ export function ctx(projectId = S.projectId) {
 export const project = () => S.data.projects.find((p) => p.id === S.projectId) || null;
 export const member = (id) => S.data.members.find((m) => m.id === id) || { name: '—', role: '' };
 export const partners = () => S.data.members.filter((m) => m.active && m.user_id && (m.role === 'admin' || m.role === 'socio'));
+export const leaderName = () => { const a = S.data.members.find((m) => m.role === 'admin' && m.active); return a ? String(a.name).split(' ')[0] : 'el líder'; };
 export const isAdmin = () => !!(S.me && S.me.role === 'admin');
 export const admin = () => S.data.members.find((m) => m.role === 'admin' && m.active);
 
@@ -170,7 +171,7 @@ export function reparto(rodaje, videos) {
 }
 export function endMeeting(e) {
   if (S.me.role === 'admin' || adminAbsent(e, ctx(e.project_id))) return run(() => api.update('events', e.id, { ended_at: new Date().toISOString(), ended_set_at: new Date().toISOString(), ended_by: S.me.id }), 'Reunión finalizada');
-  return run(() => api.update('events', e.id, { end_requested_at: new Date().toISOString(), end_requested_by: S.me.id }), 'Solicitud enviada al administrador');
+  return run(() => api.update('events', e.id, { end_requested_at: new Date().toISOString(), end_requested_by: S.me.id }), 'Solicitud enviada a ' + leaderName());
 }
 export const confirmEnd = (e) => run(() => api.update('events', e.id, { ended_at: e.end_requested_at || new Date().toISOString(), ended_set_at: new Date().toISOString(), ended_by: S.me.id }), 'Reunión finalizada');
 export const cancelEvent = (e, note) => run(() => api.update('events', e.id, { status: 'cancelado', cancel_note: note || null, canceled_at: new Date().toISOString() }), 'Cancelado');
@@ -228,7 +229,7 @@ export function checkIn(event) {
     if (api.mode === 'demo' && (S.me.role === 'admin' || leaderAway(event, ctx(event.project_id)))) patch.arrived_at = now;
     if (a) return api.update('attendance', a.id, patch);
     return api.insert('attendance', Object.assign({ team_id: S.teamId, event_id: event.id, member_id: S.me.id }, patch));
-  }, S.me.role === 'admin' ? 'Llegada registrada' : 'Llegada enviada: el administrador la confirma');
+  }, S.me.role === 'admin' ? 'Llegada registrada' : leaderAway(event, ctx(event.project_id)) ? 'Llegada registrada · ' + leaderName() + ' aún no llega, vale tu hora' : 'Llegada enviada: ' + leaderName() + ' la confirma');
 }
 export function confirmArrival(att, mode) {
   return run(() => api.update('attendance', att.id, { arrived_at: mode === 'claimed' ? att.claimed_at : new Date().toISOString(), confirmed_by: S.me.id, confirmed_at: new Date().toISOString() }), 'Llegada confirmada');

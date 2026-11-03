@@ -29,7 +29,7 @@ h1,h2,h3{font-family:var(--disp);margin:0}
 h1{font-size:26px}h2{font-size:19px}h3{font-size:16px}
 .sub{color:var(--tx3);font-size:13px;margin:4px 0 0;line-height:1.45}
 .lbl{margin:0;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--tx4)}
-.card{border-radius:20px;padding:16px;background:var(--s1);border:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
+.card{border-radius:20px;padding:16px;background:color-mix(in srgb,var(--s1) var(--op-cards,100%),transparent);border:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
 .card.tight{gap:8px;padding:14px}
 .row{display:flex;align-items:center;gap:12px}
 .between{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
@@ -255,7 +255,7 @@ nav.tabs a.on{color:var(--amber)}
 .lg{width:8px;height:8px;border-radius:3px;display:inline-block}.lg.u0{background:var(--u0)}.lg.u1{background:var(--u1)}.lg.u2{background:var(--u2)}
 .c-u0{color:var(--u0)!important}.c-u1{color:var(--u1)!important}.c-u2{color:var(--tx4)!important}
 /* Lista de tareas */
-.tlist{display:flex;flex-direction:column;border-radius:20px;background:var(--s1);border:1px solid var(--line);padding:4px 14px}
+.tlist{display:flex;flex-direction:column;border-radius:20px;background:color-mix(in srgb,var(--s1) var(--op-cards,100%),transparent);border:1px solid var(--line);padding:4px 14px}
 .trow{position:relative;display:flex;align-items:center;gap:12px;min-height:64px;padding:8px 0;border-top:1px solid var(--sep);animation:rowIn2 .3s ease-out both}
 .tlist>.lbl+.trow,.tlist>.trow:first-child{border-top:1px solid var(--sep)}
 .tlist>.trow:first-child{border-top:none}
@@ -329,7 +329,7 @@ nav.tabs a.on{color:var(--amber)}
 .pill-amber{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--amber);background:color-mix(in srgb,var(--amber) 14%,var(--bg));padding:6px 10px;border-radius:999px}
 .pill-amber svg{width:14px;height:14px}
 .alb{margin:0 0 8px 4px}
-.agrp{border-radius:20px;background:var(--s1);border:1px solid var(--line);overflow:hidden}
+.agrp{border-radius:20px;background:color-mix(in srgb,var(--s1) var(--op-cards,100%),transparent);border:1px solid var(--line);overflow:hidden}
 .ait,.srow{display:flex;align-items:center;gap:12px;min-height:68px;padding:10px 14px;color:var(--tx);text-decoration:none;border-bottom:1px solid var(--sep)}
 .ait:last-child,.srow:last-child{border-bottom:none}
 .ait:hover{background:var(--s2)}
@@ -518,7 +518,7 @@ nav.tabs a.on{color:var(--amber)}
 .ebar{height:10px;border-radius:999px;background:#1A2620;overflow:hidden}.ebar>i{display:block;height:100%;border-radius:999px;background:var(--mint);transition:width .6s cubic-bezier(.2,.8,.2,1)}
 .mhead.late .ebar{background:#2A1414}.mhead.late .ebar>i{background:#FF6B5B}
 [data-theme=light] .ebar{background:#DCEFE5}
-.vcard13{position:relative;border-radius:22px;padding:14px;background:var(--s1);border:1px solid #23252D;display:flex;flex-direction:column;gap:12px;animation:rowIn2 .3s ease-out both}
+.vcard13{position:relative;border-radius:22px;padding:14px;background:color-mix(in srgb,var(--s1) var(--op-cards,100%),transparent);border:1px solid #23252D;display:flex;flex-direction:column;gap:12px;animation:rowIn2 .3s ease-out both}
 .vcard13.miss{border-color:#5C2420}.vcard13.good{border-color:#2F6B4F}
 [data-theme=light] .vcard13{border-color:#E4E2DC}
 .vhead{display:flex;align-items:center;gap:12px}
@@ -655,7 +655,7 @@ main>*{min-width:0;max-width:100%}
 .in,input,select,textarea{font-size:16px} /* iPhone no hace zoom al escribir */
 
 /* ===== 1.4 · Integrantes (Opción C) ===== */
-.mcard{border-radius:20px;padding:14px;background:var(--s1);border:1px solid var(--line);display:flex;flex-direction:column;gap:12px;min-width:0}
+.mcard{border-radius:20px;padding:14px;background:color-mix(in srgb,var(--s1) var(--op-cards,100%),transparent);border:1px solid var(--line);display:flex;flex-direction:column;gap:12px;min-width:0}
 .rolechip{font-size:11px;font-weight:700;padding:4px 9px;border-radius:999px;flex-shrink:0;white-space:nowrap}
 .wafield{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:14px;background:var(--s3);border:1px solid var(--line);min-width:0}
 .pfx{display:flex;align-items:center;justify-content:center;min-height:48px;padding:0 10px;border-radius:12px;background:var(--s2);border:1px solid var(--line2);font-weight:700;color:var(--tx3);font-size:15px;flex-shrink:0}
@@ -715,3 +715,39 @@ main>*{min-width:0;max-width:100%}
 [data-theme=light] .paybtn.on{background:#FFEDE5;color:#B4381E}
 [data-theme=light] .privbox .lbl{color:#B4381E!important}
 [data-theme=light] .jvid .small[style*="FFC978"],[data-theme=light] .wabad{color:#A8650A!important}
+
+/* ===== 1.5 · Posproducción: videos minimizables y edición pareja ===== */
+.vtoggle{width:100%;padding:0;margin:0;border:none;background:transparent;color:inherit;font-family:inherit;text-align:left;cursor:pointer;min-height:52px}
+.vtoggle .vnum{flex-shrink:0}
+.vsum{display:flex!important;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vsum i{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.vchev{display:flex;align-items:center;color:var(--tx4);transition:transform .2s;flex-shrink:0}
+.vchev.on{transform:rotate(180deg)}
+.vcard13.mini{padding:10px 14px;gap:0}
+.vdetail{align-self:flex-start;display:inline-flex;align-items:center;gap:4px;font-size:13px;text-decoration:none;color:var(--tx3)!important}
+.vdetail svg{width:14px;height:14px}
+.tile.todo.post.urg{background:#1F1012;border-color:#7A2A24;color:#FFC2BA;animation:tileGlow 1.6s ease-in-out infinite}.tile.todo.post.urg small{color:#FF8A7A}
+.tile.miss{background:#1F1012;border-color:#5C2420;color:#FFC2BA}.tile.miss small{color:#FF8A7A}
+@keyframes tileGlow{0%,100%{box-shadow:0 0 0 0 rgba(255,107,91,.4)}50%{box-shadow:0 0 0 5px rgba(255,107,91,0)}}
+[data-theme=light] .tile.todo.post.urg,[data-theme=light] .tile.miss{background:#FDE7E1;border-color:#F0B3A3;color:#9A2E18}
+.clockrow{display:flex;flex-direction:column;gap:6px;padding-top:6px;border-top:1px dashed color-mix(in srgb,#B98CFF 40%,transparent)}
+.clk{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:var(--tx2)}
+.clk.on{color:#C9B2FF}
+
+/* ===== 1.5 · Inicio P: "Tus actividades" (días y tareas en un mismo fondo) ===== */
+.actbox{border-radius:22px;padding:12px 12px 6px;background:color-mix(in srgb,var(--s1) var(--op-act,100%),transparent);border:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.actbox .dsq{min-height:0;aspect-ratio:1/1}
+.tlist.flat{background:transparent;border:none;border-radius:0;padding:0 2px}
+.dsq.d-none{background:var(--s3)}
+/* ===== 1.5 · Opacidad de las tarjetas (Administrador → Apariencia → Opacidad) ===== */
+.meta{background:color-mix(in srgb,var(--meta-bg) var(--op-meta,100%),transparent)}
+.wallet{background:color-mix(in srgb,var(--w-bg) var(--op-wallet,100%),transparent)}
+.racha.lv0{background:color-mix(in srgb,#15161C var(--op-racha,100%),transparent)}
+.hero{background:color-mix(in srgb,var(--s1) var(--op-hero,100%),transparent)}
+.hero.h-urg{background:color-mix(in srgb,var(--hero-urg) var(--op-hero,100%),transparent)}
+.hero.h-calm{background:color-mix(in srgb,#17140E var(--op-hero,100%),transparent)}
+.hero.h-miss{background:color-mix(in srgb,#1F0E0E var(--op-hero,100%),transparent)}
+.hero.h-idle{background:color-mix(in srgb,var(--s1) var(--op-hero,100%),transparent)}
+.hero.h-ok{background:color-mix(in srgb,var(--ok-bg) var(--op-hero,100%),transparent)}
+[data-theme=light] .hero.h-calm{background:color-mix(in srgb,#FFF7E8 var(--op-hero,100%),transparent)}
+[data-theme=light] .hero.h-miss{background:color-mix(in srgb,#FFF0EE var(--op-hero,100%),transparent)}

@@ -2,7 +2,11 @@
 import { api } from './api.js';
 import { at, addDays, limaDate } from './rules.js';
 
-export async function seedDemo() {
+export async function seedDemo(variant) {
+  // 1.5: dos ejemplos: tu socio con apoyo ("Socio") o sin apoyo ("Ana").
+  const sinApoyo = variant === 'sin';
+  const SN = sinApoyo ? 'Ana' : 'Socio';
+  try { localStorage.setItem('ra-seed', sinApoyo ? 'sin' : 'con'); localStorage.removeItem('ra-clock'); window.__clk = 0; } catch (e) { /* */ }
   if (api.mode !== 'demo') return;
   api.reset();
   api.db = { teams: [], users: [], who: null, members: [], projects: [], videos: [], tasks: [], events: [], attendance: [], hires: [], log: [], corrections: [], proposals: [], claims: [], jobs: [], job_items: [] };
@@ -11,10 +15,10 @@ export async function seedDemo() {
   await api.verifyCode('williams@demo');
   const wUser = api.db.who;
   const team = await api.rpc('create_team', { team_name: 'Williams Velasquez · Audiovisual', my_name: 'Williams' });
-  const code = await api.rpc('create_invite', { t: team, invite_name: 'Socio', invite_role: 'socio', gets_apoyo: true });
-  await api.verifyCode('socio@demo');
+  const code = await api.rpc('create_invite', { t: team, invite_name: SN, invite_role: 'socio', gets_apoyo: !sinApoyo });
+  await api.verifyCode(sinApoyo ? 'ana@demo' : 'socio@demo');
   const sUser = api.db.who;
-  await api.rpc('accept_invite', { code, my_name: 'Socio' });
+  await api.rpc('accept_invite', { code, my_name: SN });
   const W = api.db.members.find((m) => m.user_id === wUser).id;
   const S = api.db.members.find((m) => m.user_id === sUser).id;
   const as = (u) => api.switchUser(u === W ? wUser : sUser);
