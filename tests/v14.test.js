@@ -161,3 +161,45 @@ test('1.4 · la suma sigue cuadrando: cuatro videos por los cuatro caminos', () 
   assert.equal(Math.round(p.porMiembro.S.post * 100) / 100, 50, 'S cobra el video 2 (apoyo) y el 3 (aprobado)');
   assert.equal(Math.round(p.porMiembro.W.post * 100) / 100, 50, 'W cobra el 1 (suyo) y el 4 (pasó a él)');
 });
+
+test('1.4 · entrega vencida: nunca se bloquea; tarde −3, sin entregar −3 (−4 si la tomó), reprogramar vencida −3', () => {
+  const { v, c } = one();
+  const late = T('2026-11-21', '09:00'); // pasó el final (vie 20, 23:59) y nadie lo tomó: pasó solo a las 12:00
+  const cm = canMark(v, 'montaje', W, c, late);
+  assert.equal(cm.ok, true, 'el administrador puede entregarlo igual');
+  assert.equal(cm.late, true);
+  assert.equal(videoState(v, c, late).overdue, true);
+  assert.equal(pts('W', c, late), -3, 'sin entregar a tiempo');
+  c.tasks.push({ id: 'm2', video_id: 'v7', kind: 'montaje', done_by: 'W', done_at: iso('2026-11-21', '09:10') });
+  c.tasks.push({ id: 'a2', video_id: 'v7', kind: 'acabado', done_by: 'W', done_at: iso('2026-11-21', '10:00') });
+  assert.equal(pts('W', c, T('2026-11-21', '11:00')), -3, 'entregado tarde');
+  assert.equal(canUndo(c.tasks[2], W, c, T('2026-11-21', '10:05')), true);
+  // Tomado y sin entregar: −4; si reprograma la entrega vencida: −3 (en lugar de −4)
+  const b = one();
+  b.c.claims.push({ id: 'cl', video_id: 'v7', kind: 'montaje', member_id: 'W', status: 'activa', created_at: iso('2026-11-20', '09:00'), limit_at: iso('2026-11-20', '23:59') });
+  assert.equal(pts('W', b.c, T('2026-11-21', '09:00')), -4);
+  b.v.reprog = [{ from: '2026-11-21', to: '2026-11-24', at: iso('2026-11-21', '09:30'), by: 'W', late: true, charge: 'W' }];
+  b.v.publish_date = '2026-11-24';
+  b.v.handoff = { at: iso('2026-11-20', '09:00'), why: 'tomado' };
+  b.c.claims[0].limit_at = iso('2026-11-23', '23:59');
+  assert.equal(pts('W', b.c, T('2026-11-21', '10:00')), -3);
+  assert.equal(videoState(b.v, b.c, T('2026-11-21', '10:00')).post.handoff, true, 'después de reprogramar sigue siendo del administrador');
+  assert.equal(pts('S', b.c, T('2026-11-21', '10:00')), -3, 'los −3 del socio se quedan');
+});
+
+test('1.4 · colaborador: los socios no marcan sus videos; el excedente a medias reparte el descuento y la suma cuadra', () => {
+  const { v, c } = one();
+  const E = { id: 'E', name: 'Editor', role: 'colaborador', active: true };
+  c.members.push(E);
+  c.jobs = [{ id: 'J', member_id: 'E', project_id: 'P', video_ids: ['v7'], price: 40, payer: 'half', status: 'activo' }];
+  assert.equal(canMark(v, 'montaje', S, c, T('2026-11-18', '10:00')).colab, true);
+  assert.equal(canMark(v, 'acabado', W, c, T('2026-11-18', '10:00')).ok, false);
+  assert.equal(videoState(v, c, T('2026-11-18', '10:00')).phase, 'colab');
+  c.tasks.push({ id: 'm', video_id: 'v7', kind: 'montaje', done_by: 'E', done_at: iso('2026-11-18', '10:00') });
+  c.tasks.push({ id: 'a', video_id: 'v7', kind: 'acabado', done_by: 'E', done_at: iso('2026-11-20', '10:00') });
+  const P1 = Object.assign({}, P, { videos_total: 1, budget: 62.5 });
+  const p = payouts(P1, c, T('2026-11-22', '10:00'));
+  assert.equal(Math.round(p.porMiembro.E.total * 100) / 100, 40);
+  assert.equal(Math.round(Object.values(p.porMiembro).reduce((a, m) => a + m.total, 0) * 100) / 100, Math.round(p.pagado * 100) / 100, 'el excedente sale de los socios: la suma no cambia');
+  assert.equal(Math.round((p.porMiembro.W.total) * 100) / 100, -7.5, 'Williams pone la mitad del excedente (S/ 7.50)');
+});

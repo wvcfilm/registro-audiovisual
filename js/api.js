@@ -2,7 +2,7 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
 import * as R from './rules.js';
 
-const TABLES = ['members', 'projects', 'videos', 'tasks', 'events', 'attendance', 'hires', 'log', 'corrections', 'proposals', 'claims'];
+const TABLES = ['members', 'projects', 'videos', 'tasks', 'events', 'attendance', 'hires', 'log', 'corrections', 'proposals', 'claims', 'jobs', 'job_items'];
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Math.random().toString(16).slice(2) + Date.now().toString(16));
 
 // ------------------------------------------------------------------
@@ -119,7 +119,7 @@ class DemoAPI {
     const vids = new Set(videos.map((v) => v.id));
     const events = d.events.filter((e) => e.project_id === projectId);
     const evIds = new Set(events.map((e) => e.id));
-    return { members: d.members, projects: d.projects, videos, tasks: d.tasks.filter((t) => vids.has(t.video_id)), events, attendance: d.attendance.filter((a) => evIds.has(a.event_id)), hires: d.hires.filter((h) => evIds.has(h.event_id)), claims: d.claims.filter((c) => vids.has(c.video_id)), jobs: [] };
+    return { members: d.members, projects: d.projects, videos, tasks: d.tasks.filter((t) => vids.has(t.video_id)), events, attendance: d.attendance.filter((a) => evIds.has(a.event_id)), hires: d.hires.filter((h) => evIds.has(h.event_id)), claims: d.claims.filter((c) => vids.has(c.video_id)), jobs: d.jobs.filter((j) => j.project_id === projectId) };
   }
   acOf(v) { return this.db.tasks.find((t) => t.video_id === v.id && t.kind === 'acabado' && !t.void && t.done_by === v.owner); }
   log(teamId, projectId, type, data, actor) {
@@ -141,8 +141,10 @@ class DemoAPI {
     if (fn === 'create_invite') {
       const me = this.me(a.t);
       if (!me || me.role !== 'admin') throw new Error('Solo el administrador invita');
+      if (['socio', 'colaborador'].indexOf(a.invite_role) === -1) throw new Error('Rol no válido');
+      if (!String(a.invite_name || '').trim()) throw new Error('Escribe un nombre');
       const code = Math.random().toString(16).slice(2, 10).toUpperCase();
-      this.db.members.push({ id: uuid(), team_id: a.t, user_id: null, name: a.invite_name, role: a.invite_role, apoyo: !!a.gets_apoyo, invite_code: code, invite_expires: new Date(Date.now() + 7 * 864e5).toISOString(), active: true, created_at: new Date().toISOString() });
+      this.db.members.push({ id: uuid(), team_id: a.t, user_id: null, name: String(a.invite_name).trim(), role: a.invite_role, apoyo: a.invite_role === 'socio' && !!a.gets_apoyo, invite_code: code, invite_expires: new Date(Date.now() + 7 * 864e5).toISOString(), active: true, created_at: new Date().toISOString() });
       this.log(a.t, null, 'invite', { name: a.invite_name, role: a.invite_role });
       this.persist(); return code;
     }
@@ -197,6 +199,28 @@ class DemoAPI {
       this.log(v.team_id, v.project_id, 'tasks.update', { new: JSON.parse(JSON.stringify(k)), old });
       this.persist(); return k.review;
     }
+    if (fn === 'renew_invite') {
+      const m = this.db.members.find((x) => x.id === a.m);
+      const me = m && this.me(m.team_id);
+      if (!me || me.role !== 'admin') throw new Error('Solo el administrador invita');
+      if (m.user_id) throw new Error('Ya entró al equipo');
+      Object.assign(m, { invite_code: Math.random().toString(16).slice(2, 10).toUpperCase(), invite_expires: new Date(Date.now() + 7 * 864e5).toISOString(), active: true });
+      this.persist(); return m.invite_code;
+    }
+    if (fn === 'reprogram_delivery') return this.reprogram(a);
+    if (fn === 'colab_home') return this.colabHome(a.t);
+    if (fn === 'job_accept' || fn === 'job_finish') {
+      const j = this.db.jobs.find((x) => x.id === a.job);
+      const me = j && this.me(j.team_id);
+      if (!j || !me || j.member_id !== me.id) throw new Error('Este encargo no es tuyo');
+      const old = JSON.parse(JSON.stringify(j));
+      if (fn === 'job_accept') { if (j.status !== 'invitado') throw new Error('El encargo no está esperando tu respuesta'); Object.assign(j, { status: 'activo', accepted_at: new Date().toISOString() }); }
+      else { if (this.db.job_items.some((i) => i.job_id === j.id && i.stage !== 'done')) throw new Error('Faltan videos por terminar'); Object.assign(j, { status: 'finalizado', finished_at: new Date().toISOString() }); }
+      this.log(j.team_id, j.project_id, 'jobs.update', { new: JSON.parse(JSON.stringify(j)), old });
+      this.persist(); return null;
+    }
+    if (fn === 'job_step') return this.jobStep(a.item, a.act, a.obs, a.idx);
+    if (fn === 'job_undo') return this.jobUndo(a.item);
     if (fn === 'move_video') {
       const v = this.db.videos.find((x) => x.id === a.v);
       if (!v || !this.partner(v.team_id)) throw new Error('Sin permiso');
@@ -210,6 +234,120 @@ class DemoAPI {
       this.persist(); return null;
     }
     throw new Error('Función desconocida: ' + fn);
+  }
+  // ---------- 1.4: reprogramar la entrega y colaborador externo (igual que la base) ----------
+  reprogram(a) {
+    const v = this.db.videos.find((x) => x.id === a.v);
+    const me = v && this.me(v.team_id);
+    if (!me || me.role !== 'admin') throw new Error('Solo el administrador reprograma la entrega');
+    const today = R.limaDate(new Date());
+    if (!a.new_date || a.new_date <= today) throw new Error('Elige una fecha desde mañana');
+    if (a.new_date === v.publish_date) throw new Error('Es la misma fecha');
+    const c = this.ctxFor(v.project_id);
+    const s = R.videoState(v, c, new Date());
+    if (s.delivered) throw new Error('Ese video ya se entregó');
+    const old = JSON.parse(JSON.stringify(v));
+    const late = new Date() > s.d.finalDue && !!s.r;
+    const handoff = v.handoff || (s.post.handoff ? { at: s.post.handoffAt.toISOString(), why: s.post.handoffWhy } : null);
+    const days = Math.round((new Date(a.new_date + 'T12:00:00Z') - new Date(v.publish_date + 'T12:00:00Z')) / 864e5);
+    if (v.apoyo_due) v.apoyo_due = new Date(new Date(v.apoyo_due).getTime() + days * 864e5).toISOString();
+    v.reprog = (v.reprog || []).concat([{ from: v.publish_date, to: a.new_date, at: new Date().toISOString(), by: me.id, late, charge: s.inCharge, note: a.note ? String(a.note).trim() || null : null }]);
+    v.handoff = handoff; v.publish_date = a.new_date;
+    const fin = R.videoState(v, this.ctxFor(v.project_id), new Date()).d.finalDue.toISOString();
+    for (const cl of this.db.claims.filter((x) => x.video_id === v.id && x.kind === 'montaje')) cl.limit_at = fin;
+    this.log(v.team_id, v.project_id, 'videos.update', { new: JSON.parse(JSON.stringify(v)), old });
+    this.persist(); return null;
+  }
+  colabHome(t) {
+    const me = this.me(t);
+    if (!me) return null;
+    const P = (d, h) => R.at(d, h).toISOString();
+    return {
+      me: { id: me.id, name: me.name, phone: me.phone || null, role: me.role },
+      team: (this.db.teams.find((x) => x.id === t) || {}).name,
+      partners: this.db.members.filter((m) => m.team_id === t && (m.role === 'admin' || m.role === 'socio') && m.active && m.user_id).map((m) => ({ name: m.name, role: m.role, phone: m.phone || null })),
+      jobs: this.db.jobs.filter((j) => j.member_id === me.id && R.JOB_LIVE.indexOf(j.status) !== -1).map((j) => {
+        const pr = this.db.projects.find((x) => x.id === j.project_id) || {};
+        return {
+          id: j.id, status: j.status, service: j.service, price: j.price, drive_url: j.drive_url || null, accepted_at: j.accepted_at || null, finished_at: j.finished_at || null, closed_at: j.closed_at || null,
+          project: { client: pr.client, name: pr.name },
+          videos: this.db.videos.filter((v) => j.video_ids.indexOf(v.id) !== -1).sort((a, b) => a.num - b.num).map((v) => {
+            const i = this.db.job_items.find((x) => x.job_id === j.id && x.video_id === v.id) || {};
+            return { id: v.id, num: v.num, title: v.title || null, publish_date: v.publish_date, montaje_due: P(R.addDays(v.publish_date, -3), '21:00'), final_due: P(R.addDays(v.publish_date, -1), '18:00'),
+              shot: this.db.tasks.some((k) => k.video_id === v.id && k.kind === 'rodaje' && !k.void),
+              item: { id: i.id, stage: i.stage, obs1: i.obs1 || [], obs2: i.obs2 || [], montaje_at: i.montaje_at || null, final_at: i.final_at || null, uploaded_at: i.uploaded_at || null, prev_at: i.prev ? i.prev.at : null, prev_by: i.prev ? i.prev.by : null } };
+          })
+        };
+      })
+    };
+  }
+  jobTask(j, i, kind, me) {
+    const t = { id: uuid(), team_id: j.team_id, project_id: j.project_id, video_id: i.video_id, kind, done_by: me.id, done_at: new Date().toISOString(), created_at: new Date().toISOString(), void: false };
+    this.db.tasks.push(t);
+    this.log(j.team_id, j.project_id, 'tasks.insert', { new: t, old: null }, me.id);
+    return t.id;
+  }
+  jobStep(itemId, act, obs, idx) {
+    const i = this.db.job_items.find((x) => x.id === itemId);
+    const j = i && this.db.jobs.find((x) => x.id === i.job_id);
+    if (!i || !j) throw new Error('No encontrado');
+    const me = this.me(j.team_id);
+    if (!me) throw new Error('Sin permiso');
+    const old = JSON.parse(JSON.stringify(i));
+    const pv = { stage: i.stage, obs1: i.obs1, obs2: i.obs2, montaje_at: i.montaje_at || null, final_at: i.final_at || null, uploaded_at: i.uploaded_at || null, at: new Date().toISOString(), by: me.id, act };
+    const allDone = (arr) => (arr || []).every((o) => o.done);
+    const now = new Date().toISOString();
+    let res;
+    if (['montaje', 'final', 'check', 'upload', 'uploaded'].indexOf(act) !== -1) {
+      if (me.id !== j.member_id) throw new Error('Solo el colaborador del encargo');
+      if (j.status !== 'activo') throw new Error('El encargo no está activo');
+      if (act === 'montaje') {
+        if (i.stage !== 'montaje') throw new Error('El montaje ya se entregó');
+        if (!this.db.tasks.some((k) => k.video_id === i.video_id && k.kind === 'rodaje' && !k.void)) throw new Error('Primero tiene que grabarse el video');
+        pv.task = this.jobTask(j, i, 'montaje', me); Object.assign(i, { stage: 'rev1', montaje_at: now, prev: pv });
+      } else if (act === 'final') {
+        if (!(i.stage === 'final' || (i.stage === 'aj1' && allDone(i.obs1)))) throw new Error('Primero marca todos los ajustes');
+        Object.assign(i, { stage: 'rev2', final_at: i.final_at || now, prev: pv });
+      } else if (act === 'check') {
+        if ((i.stage !== 'aj1' && i.stage !== 'aj2') || idx == null) throw new Error('No hay ajustes por marcar');
+        const key = i.stage === 'aj1' ? 'obs1' : 'obs2';
+        const arr = (i[key] || []).map((o, k) => k === Number(idx) ? Object.assign({}, o, { done: !o.done }) : o);
+        i[key] = arr;
+      } else if (act === 'upload') {
+        if (!(i.stage === 'aj2' && allDone(i.obs2))) throw new Error('Primero marca todos los ajustes');
+        Object.assign(i, { stage: 'upload', prev: pv });
+      } else {
+        if (i.stage !== 'upload') throw new Error('Todavía no está aprobado');
+        pv.task = this.jobTask(j, i, 'acabado', me); Object.assign(i, { stage: 'done', uploaded_at: now, prev: pv });
+      }
+      res = i.stage;
+    } else if (act === 'ok' || act === 'obs') {
+      if (!(me.role === 'admin' || me.role === 'socio')) throw new Error('Revisan los socios');
+      if (j.status !== 'activo' && j.status !== 'finalizado') throw new Error('El encargo no está activo');
+      if (i.stage !== 'rev1' && i.stage !== 'rev2') throw new Error('No hay nada por revisar');
+      let arr = null;
+      if (act === 'obs') { arr = (obs || []).map((x) => String(x).trim()).filter(Boolean).map((t) => ({ t, done: false })); if (!arr.length) throw new Error('Escribe al menos una observación'); }
+      const nx = i.stage === 'rev1' ? (act === 'ok' ? 'final' : 'aj1') : (act === 'ok' ? 'upload' : 'aj2');
+      if (arr) i[i.stage === 'rev1' ? 'obs1' : 'obs2'] = arr;
+      Object.assign(i, { stage: nx, prev: pv });
+      res = nx;
+    } else throw new Error('Acción no válida');
+    this.log(j.team_id, j.project_id, 'job_items.update', { new: JSON.parse(JSON.stringify(i)), old });
+    this.persist(); return res;
+  }
+  jobUndo(itemId) {
+    const i = this.db.job_items.find((x) => x.id === itemId);
+    const j = i && this.db.jobs.find((x) => x.id === i.job_id);
+    const me = j && this.me(j.team_id);
+    if (!i || !me || !i.prev || i.prev.by !== me.id || !R.within(i.prev.at)) throw new Error('Solo se deshace en los primeros 10 minutos');
+    if (j.status !== 'activo' && j.status !== 'finalizado') throw new Error('El encargo ya se cerró');
+    const old = JSON.parse(JSON.stringify(i));
+    if (i.prev.task) { const k = this.db.tasks.findIndex((t) => t.id === i.prev.task); if (k >= 0) { const t = this.db.tasks.splice(k, 1)[0]; this.log(j.team_id, j.project_id, 'tasks.delete', { new: null, old: t }); } }
+    const p = i.prev;
+    Object.assign(i, { stage: p.stage, obs1: p.obs1, obs2: p.obs2, montaje_at: p.montaje_at, final_at: p.final_at, uploaded_at: p.uploaded_at, prev: null });
+    if (j.status === 'finalizado') Object.assign(j, { status: 'activo', finished_at: null });
+    this.log(j.team_id, j.project_id, 'job_items.update', { new: JSON.parse(JSON.stringify(i)), old });
+    this.persist(); return i.stage;
   }
   async list(table, teamId) {
     if (!this.partner(teamId)) return [];
@@ -255,8 +393,21 @@ class DemoAPI {
         this.log(t.team_id, t.project_id, 'tasks.update', { new: JSON.parse(JSON.stringify(t)), old });
       }
     }
+    if (table === 'jobs') {
+      const me = this.me(row.team_id);
+      if (!me || me.role !== 'admin') throw new Error('El encargo lo arma el administrador');
+      const cm = this.db.members.find((m) => m.id === row.member_id);
+      if (!cm || cm.role !== 'colaborador') throw new Error('Elige un colaborador');
+      if (!(row.video_ids || []).length) throw new Error('Elige al menos un video');
+      if (!(Number(row.price) > 0)) throw new Error('Escribe el monto por video');
+      if (this.db.tasks.some((t) => row.video_ids.indexOf(t.video_id) !== -1 && (t.kind === 'montaje' || t.kind === 'acabado') && !t.void)) throw new Error('Algún video ya tiene montaje o final');
+      if (this.db.jobs.some((j) => ['propuesto'].concat(R.JOB_LIVE).indexOf(j.status) !== -1 && j.video_ids.some((x) => row.video_ids.indexOf(x) !== -1))) throw new Error('Algún video ya está en otro encargo');
+      const others = this.db.members.filter((m) => m.team_id === row.team_id && (m.role === 'admin' || m.role === 'socio') && m.active && m.user_id && m.id !== me.id).length;
+      row = Object.assign({}, row, { status: this.seeding && row.status ? row.status : others ? 'propuesto' : 'invitado', proposed_by: me.id, payer: row.payer || 'owner', service: row.service || 'edicion' });
+    }
     const r = Object.assign({ id: uuid(), created_at: new Date().toISOString() }, row);
     if (table === 'tasks' && (!r.done_at || !this.seeding)) r.done_at = new Date().toISOString();
+    if (table === 'jobs') for (const vid of r.video_ids) this.db.job_items.push({ id: uuid(), team_id: r.team_id, job_id: r.id, video_id: vid, stage: 'montaje', obs1: [], obs2: [], prev: null });
     this.db[table].push(r);
     this.log(r.team_id, this.projectOf(table, r), table + '.insert', { new: r, old: null });
     // 1.3 (igual que la base): grabar sin storyboard lo reparte mitad y mitad y lo cierra.
@@ -275,6 +426,13 @@ class DemoAPI {
     const me = this.me(r.team_id);
     if (!me) throw new Error('Sin permiso');
     if (table === 'tasks' && me.role !== 'admin') throw new Error('Solo el administrador corrige tareas');
+    if (table === 'jobs' && patch.status && patch.status !== r.status) {
+      const ok = (r.status === 'propuesto' && (patch.status === 'invitado' || patch.status === 'rechazado') && me.id !== r.proposed_by)
+        || (patch.status === 'cancelado' && (r.status === 'propuesto' || r.status === 'invitado') && me.role === 'admin')
+        || (r.status === 'finalizado' && patch.status === 'cerrado' && (me.role === 'admin' || me.role === 'socio'));
+      if (!ok) throw new Error(r.status === 'propuesto' && me.id === r.proposed_by ? 'Lo aprueba tu socio' : 'Ese cambio de estado no se puede');
+      patch = Object.assign({}, patch, patch.status === 'cerrado' ? { closed_at: new Date().toISOString() } : patch.status === 'cancelado' ? {} : { decided_by: me.id, decided_at: new Date().toISOString() });
+    }
     if (table === 'log') throw new Error('El historial no se edita');
     const old = JSON.parse(JSON.stringify(r));
     if (table === 'proposals' && patch.status && patch.status !== old.status) {

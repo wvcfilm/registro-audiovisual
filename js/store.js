@@ -36,12 +36,21 @@ export async function loadTeams() {
 
 export async function load() {
   if (!S.teamId) return;
-  const OPTIONAL = { proposals: 1, claims: 1 };
+  const OPTIONAL = { proposals: 1, claims: 1, jobs: 1, job_items: 1 };
   const rows = await Promise.all(TABLES.map((t) => OPTIONAL[t] ? api.list(t, S.teamId).catch(() => []) : api.list(t, S.teamId)));
   TABLES.forEach((t, i) => { S.data[t] = rows[i] || []; });
   try { S.settings = (await api.rpc('team_settings', { t: S.teamId })) || {}; } catch (e) { S.settings = S.settings || {}; }
   setRules(S.settings.rules);
   S.me = S.data.members.find((m) => m.user_id === S.session.user.id) || null;
+  // 1.4: el colaborador externo no ve las tablas del equipo: su vista sale de colab_home.
+  S.colab = null;
+  const tm = S.teams.find((x) => x.team_id === S.teamId);
+  if (!S.me && tm && tm.role === 'colaborador') {
+    try { S.colab = await api.rpc('colab_home', { t: S.teamId }); } catch (e) { S.colab = { jobs: [] }; }
+    S.me = Object.assign({ id: tm.member_id, name: tm.name, role: 'colaborador', user_id: S.session.user.id, active: true }, (S.colab && S.colab.me) || {});
+  } else if (S.me && S.me.role === 'colaborador') {
+    try { S.colab = await api.rpc('colab_home', { t: S.teamId }); } catch (e) { S.colab = { jobs: [] }; }
+  }
   const open = S.data.projects.filter((p) => p.status === 'abierto');
   if (!S.projectId || !S.data.projects.find((p) => p.id === S.projectId)) {
     const saved = localStorage.getItem('ra-project');
@@ -79,7 +88,7 @@ export function ctx(projectId = S.projectId) {
     attendance: d.attendance.filter((a) => evIds.has(a.event_id)),
     hires: d.hires.filter((h) => evIds.has(h.event_id)),
     claims: (d.claims || []).filter((c) => vids.has(c.video_id)),
-    jobs: []
+    jobs: (d.jobs || []).filter((j) => !projectId || j.project_id === projectId)
   };
 }
 
@@ -380,3 +389,48 @@ export const undoDecision = (att) => run(() => api.update('attendance', att.id, 
 // Choque de fechas: adelantar el montaje (con apoyo) o mover la publicación.
 export const setApoyoDue = (video, iso) => run(() => api.update('videos', video.id, { apoyo_due: iso }), 'Montaje adelantado');
 export const setPublish = (video, date) => run(() => api.update('videos', video.id, { publish_date: date }), 'Fecha de publicación cambiada');
+
+// ---------- 1.4 · Integrantes, entrega reprogramada y colaborador externo ----------
+export const inviteMember = (name, role, apoyo) => run(() => api.rpc('create_invite', { t: S.teamId, invite_name: name, invite_role: role, gets_apoyo: !!apoyo }), null);
+export const renewInvite = (m) => run(() => api.rpc('renew_invite', { m: m.id }), 'Enlace nuevo listo');
+export const cancelInvite = (m) => run(() => api.update('members', m.id, { active: false }), 'Invitación cancelada');
+// Guarda nombres y WhatsApp cambiados (solo lo que cambió).
+export function saveMembers(changes, guillermoPhone, okMsg = 'Integrantes guardados · queda en el historial') {
+  return run(async () => {
+    for (const [id, ch] of Object.entries(changes)) {
+      const m = S.data.members.find((x) => x.id === id); if (!m) continue;
+      const patch = {};
+      if (ch.name != null && ch.name.trim() && ch.name.trim() !== m.name) patch.name = ch.name.trim();
+      if (ch.phone != null) { const p = String(ch.phone).replace(/\D/g, ''); if (p && !PHONE_RE.test(p)) throw new Error(`El WhatsApp de ${m.name} debe tener 9 dígitos y empezar con 9`); if ((p || null) !== (m.phone || null)) patch.phone = p || null; }
+      if (Object.keys(patch).length) await api.update('members', id, patch);
+    }
+    if (guillermoPhone != null) {
+      const p = String(guillermoPhone).replace(/\D/g, '');
+      if (p && !PHONE_RE.test(p)) throw new Error('El WhatsApp de Guillermo debe tener 9 dígitos y empezar con 9');
+      if ((p || null) !== (((S.settings || {}).guillermo || {}).phone || null)) await api.rpc('save_settings', { t: S.teamId, k: 'guillermo', v: { phone: p || null } });
+    }
+  }, okMsg);
+}
+export const reprogramDelivery = (video, date, note) => run(() => api.rpc('reprogram_delivery', { v: video.id, new_date: date, note: note || null }), null);
+// Encargo a un colaborador: si es nuevo, primero se crea su invitación.
+export function createJob(j) {
+  return run(async () => {
+    let memberId = j.member_id;
+    if (!memberId) {
+      const code = await api.rpc('create_invite', { t: S.teamId, invite_name: j.name, invite_role: 'colaborador', gets_apoyo: false });
+      const ms = await api.list('members', S.teamId);
+      const m = ms.find((x) => x.invite_code === code);
+      if (!m) throw new Error('No se pudo crear la invitación');
+      memberId = m.id;
+      const p = String(j.phone || '').replace(/\D/g, '');
+      if (p && PHONE_RE.test(p)) await api.update('members', memberId, { phone: p });
+    }
+    return api.insert('jobs', { team_id: S.teamId, project_id: j.project_id, member_id: memberId, service: 'edicion', video_ids: j.video_ids, price: Number(j.price), payer: j.payer || 'owner', drive_url: j.drive_url || null });
+  }, null);
+}
+export const decideJob = (j, status) => run(() => api.update('jobs', j.id, { status }), status === 'invitado' ? 'Aprobado: ya puedes enviar la invitación' : status === 'rechazado' ? 'Encargo rechazado' : status === 'cancelado' ? 'Encargo cancelado' : status === 'cerrado' ? 'Pago al editor registrado' : null);
+export const jobStep = (itemId, act, obs, idx) => run(() => api.rpc('job_step', { item: itemId, act, obs: obs || null, idx: idx == null ? null : idx }), null);
+export const jobUndo = (itemId) => run(() => api.rpc('job_undo', { item: itemId }), 'Deshecho');
+export const jobAccept = (jobId) => run(() => api.rpc('job_accept', { job: jobId }), '¡Listo! Ya puedes ver tus videos');
+export const jobFinish = (jobId) => run(() => api.rpc('job_finish', { job: jobId }), 'Servicio finalizado: el equipo lo confirmará');
+export const jobItems = (jobId) => (S.data.job_items || []).filter((i) => i.job_id === jobId);

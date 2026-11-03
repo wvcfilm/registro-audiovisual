@@ -134,7 +134,12 @@ export function videoState(video, ctx, now = new Date()) {
   if (post.handoff) { if (mo && mo.done_by === video.owner) mo = null; if (ac && ac.done_by === video.owner) ac = null; }
   // Entregado al cliente: final de apoyo hecho, entrega propia aprobada, o final normal.
   const delivered = !!ac && (!post.self || post.review === 'aprobada');
+  // Quién tiene la entrega en sus manos (para "entrega vencida" y los puntos al reprogramar).
+  const adm = (ctx.members || []).find((m) => m.role === 'admin' && m.active !== false);
+  const inCharge = post.colab ? post.job.member_id : (post.handoff || (post.apoyoPath && mo)) && adm ? adm.id : video.owner;
+  const overdue = !delivered && !!d.finalDue && now > d.finalDue && !!r;
   return {
+    inCharge, overdue,
     owner, d, g, s, r, mo, ac, rodaje, post, ownMo,
     phase: post.phase,
     preLate: late(g, d.preDue) || late(s, d.preDue),
@@ -157,9 +162,18 @@ export function reviewOf(ac, d, now = new Date()) {
   if (ac.review === 'pendiente' && d.finalDue && now > d.finalDue) return 'aprobada'; // no la revisó a tiempo: se aprueba sola
   return ac.review;
 }
+export const JOB_LIVE = ['invitado', 'activo', 'finalizado', 'cerrado'];
+// Encargo vigente a un colaborador externo que incluye este video.
+export function jobOf(video, ctx) {
+  return (ctx.jobs || []).find((j) => JOB_LIVE.indexOf(j.status) !== -1 && (j.video_ids || []).indexOf(video.id) !== -1) || null;
+}
 export function postState(video, owner, d, mo, ac, ctx, now = new Date()) {
-  const out = { phase: 'normal', handoff: false, apoyoPath: false, self: false, review: null, handoffAt: null, handoffWhy: null };
+  const out = { phase: 'normal', handoff: false, apoyoPath: false, self: false, review: null, handoffAt: null, handoffWhy: null, colab: false, job: null };
+  const job = jobOf(video, ctx);
+  if (job) { out.phase = 'colab'; out.colab = true; out.job = job; return out; }
   if (!owner || !owner.apoyo || !d.apoyoDue) return out;
+  // 1.4: si el video ya había pasado al administrador y luego se reprogramó, sigue siendo suyo.
+  if (video.handoff && video.handoff.at) { out.handoff = true; out.phase = 'pasado'; out.handoffAt = new Date(video.handoff.at); out.handoffWhy = video.handoff.why || 'auto'; return out; }
   const ownMo = mo && mo.done_by === video.owner ? mo : null;
   const ownAc = ac && ac.done_by === video.owner ? ac : null;
   if (ownMo && new Date(ownMo.done_at) <= d.apoyoDue && !(ownAc && ownAc.review)) {
@@ -233,13 +247,24 @@ export function payouts(project, ctx, now = new Date()) {
         guillermo[hire.hired_by] = guillermo[hire.hired_by] || { to: t.done_by, tasks: 0, amount: 0 };
         guillermo[hire.hired_by].tasks++; guillermo[hire.hired_by].amount += value * pct;
       } else if (doer && doer.role === 'colaborador') {
-        // El presupuesto cubre hasta el valor de la tarea; si cobra menos, el saldo queda con el dueño del video.
-        const job = jobs.find((j) => j.member_id === doer.id && j.project_id === project.id);
-        const share = job ? job.price_per_video * (value / (R.montaje + R.acabado)) : value;
+        // El presupuesto cubre hasta el valor de la tarea (tope S/ 25 por video); si cobra menos, el saldo queda con el dueño del video.
+        const job = jobs.find((j) => j.member_id === doer.id && (j.video_ids || []).indexOf(v.id) !== -1) || jobs.find((j) => j.member_id === doer.id && j.project_id === project.id);
+        const price = job ? Number(job.price != null ? job.price : job.price_per_video) : value;
+        const share = job ? price * (value / (R.montaje + R.acabado)) : value;
         const covered = Math.min(share, value);
         add(doer.id, STAGE_OF[kind], covered);
         if (value - covered > 1e-9) add(v.owner, STAGE_OF[kind], value - covered);
-        if (share - value > 1e-9) collabExtra[doer.id] = (collabExtra[doer.id] || 0) + (share - value);
+        const extra = share - value;
+        if (extra > 1e-9) {
+          // 1.4: el excedente lo pone quien se acordó (el dueño del video, a medias o por definir).
+          const payer = (job && job.payer) || 'owner';
+          if (payer === 'tbd') collabExtra[doer.id] = (collabExtra[doer.id] || 0) + extra;
+          else {
+            add(doer.id, STAGE_OF[kind], extra);
+            if (payer === 'half') { const ps = (ctx.members || []).filter((m) => (m.role === 'admin' || m.role === 'socio') && m.active !== false); ps.forEach((m) => add(m.id, STAGE_OF[kind], -extra / ps.length)); }
+            else add(payer === 'owner' ? v.owner : payer, STAGE_OF[kind], -extra);
+          }
+        }
       } else if (t.split) {
         // 1.3: grabado sin storyboard → su valor se reparte mitad y mitad; el centavo extra es del dueño del video.
         const own = ceilCent(value / 2);
@@ -373,10 +398,18 @@ export function nextLevel(points) {
 export function streakEvents(memberId, ctx, now = new Date()) {
   const ev = [];
   for (const v of ctx.videos) {
-    // 1.4: el administrador suma +3 al entregar un video que pasó a él (tomado o automático).
+    // 1.4: reprogramar una entrega ya vencida resta 3 a quien la tenía en sus manos.
+    const lateRep = (v.reprog || []).filter((r) => r.late && r.charge === memberId);
+    for (const r of lateRep) ev.push({ at: new Date(r.at), pts: PTS.handoff, why: `Reprogramaste la entrega vencida del video ${v.num}` });
+    // 1.4: el administrador suma +3 al entregar a tiempo un video que pasó a él; −3 si lo entrega tarde o no lo entrega.
     if (v.owner !== memberId) {
       const so = videoState(v, ctx, now);
-      if (so.post.handoff && so.ac && so.ac.done_by === memberId) ev.push({ at: new Date(so.ac.done_at), pts: PTS.rescue, why: `Rescataste el video ${v.num}` });
+      if (so.post.handoff && so.inCharge === memberId && !lateRep.length) {
+        const mine = so.ac && so.ac.done_by === memberId;
+        const took = (ctx.claims || []).some((c) => c.video_id === v.id && c.kind === 'montaje' && c.member_id === memberId && (c.status || 'activa') === 'activa');
+        if (mine) { const tarde = new Date(so.ac.done_at) > so.d.finalDue; ev.push({ at: new Date(so.ac.done_at), pts: tarde ? PTS.handoff : PTS.rescue, why: tarde ? `Video ${v.num} entregado tarde` : `Rescataste el video ${v.num}` }); }
+        else if (!so.ac && now > so.d.finalDue && !took) ev.push({ at: so.d.finalDue, pts: PTS.handoff, why: `Video ${v.num} sin entregar a tiempo` });
+      }
       continue;
     }
     const st = videoState(v, ctx, now);
@@ -405,7 +438,7 @@ export function streakEvents(memberId, ctx, now = new Date()) {
     const t = taskOf(ctx.tasks, v.id, c.kind);
     const rNow = rodajeOf(v, ctx);
     if (!t && PRE[c.kind] && (!rNow || rNow.id !== c.rodaje_id)) continue; // se reprogramó: el compromiso anterior no cuenta
-    if (c.kind === 'montaje') { if (claimFailed(c, v, ctx, now)) ev.push({ at: new Date(c.limit_at || takeLimit(v, c.kind, ctx)), pts: PTS.claimFail, why: `Tomaste el video ${v.num} y no lo entregaste` }); continue; }
+    if (c.kind === 'montaje') { if (!(v.reprog || []).some((r) => r.late && r.charge === memberId) && claimFailed(c, v, ctx, now)) ev.push({ at: new Date(c.limit_at || takeLimit(v, c.kind, ctx)), pts: PTS.claimFail, why: `Tomaste el video ${v.num} y no lo entregaste` }); continue; }
     if (t && t.done_by === memberId && !t.split) ev.push({ at: new Date(t.done_at), pts: PTS.rescue, why: `Rescataste el ${c.kind} del video ${v.num}` }); // 1.3: también el montaje (5.7)
     else if (claimFailed(c, v, ctx, now)) ev.push({ at: new Date(c.limit_at || takeLimit(v, c.kind, ctx)), pts: PTS.claimFail, why: `Tomaste el ${c.kind} del video ${v.num} y no lo entregaste` });
   }
@@ -527,6 +560,10 @@ export function canMark(video, kind, me, ctx, now = new Date(), opts = {}) {
     if (oa && oa.notice && oa.notice.sent_at && new Date(oa.notice.sent_at) <= noticeDeadline(r) && oa.notice.choice !== 'other') return { ok: false, why: `${owner.name} avisó a tiempo: sus videos se reprograman` };
     return { ok: true, take: true, split };
   }
+  if ((kind === 'montaje' || kind === 'acabado') && st.post.colab) {
+    const cm = (ctx.members || []).find((m) => m.id === st.post.job.member_id);
+    return { ok: false, colab: true, why: 'Lo edita ' + (cm ? String(cm.name).split(' ')[0] : 'el colaborador') };
+  }
   if (kind === 'montaje') {
     if (!st.r) return { ok: false, why: 'Primero tiene que grabarse el video' };
     const P = st.post;
@@ -539,8 +576,8 @@ export function canMark(video, kind, me, ctx, now = new Date(), opts = {}) {
       const lim = takeLimit(video, kind, ctx);
       if (P.handoff) {
         if (c && c.member_id !== me.id) return { ok: false, why: 'Ya lo tomó otra persona' };
-        if (lim && now > lim) return { ok: false, late: true, why: 'Pasó el plazo del video final' };
-        return { ok: true, take: true, claimed: !!c, limit: lim };
+        // 1.4: nunca se bloquea; vencido se entrega igual (o se reprograma la entrega).
+        return { ok: true, take: true, claimed: !!c, limit: lim, late: !!(lim && now > lim) };
       }
       if (P.phase === 'riesgo') return { ok: false, claim: true, limit: st.d.autoDue, why: 'Puedes tomar el video' };
       return { ok: false, why: `Es de ${owner.name}` };
@@ -587,6 +624,7 @@ export function undoUntil(task, ctx) {
   else if (task.kind === 'acabado' && task.done_by === v.owner && d.apoyoDue) lim = task.review_round ? d.fixDue : d.autoDue;
   else if (task.kind === 'montaje' || task.kind === 'acabado') lim = d.finalDue;
   else if (task.kind === 'rodaje') lim = at(addDays(limaDate(task.done_at), 1), '00:00');
+  if (lim && lim < new Date(task.done_at)) return ten; // ya estaba vencido: solo los 10 minutos
   return lim && lim < ten ? lim : ten;
 }
 export function canUndo(task, me, ctx, now = new Date()) {

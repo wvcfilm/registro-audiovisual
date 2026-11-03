@@ -136,11 +136,19 @@ test('colaborador: el presupuesto cubre hasta S/ 25 por video y la suma sigue en
     const v = ctx.videos.find((x) => x.num === num);
     for (const t of ctx.tasks.filter((x) => x.video_id === v.id && (x.kind === 'montaje' || x.kind === 'acabado'))) t.done_by = 'E';
   }
+  // 1.4: el excedente (S/ 15 por video) lo pone el dueño de los videos (por defecto): el editor recibe S/ 40 por video.
+  const base = payouts(project, Object.assign({}, ctx, { jobs: [] }), NOW).porMiembro.S.total;
   const p = payouts(project, ctx, NOW);
-  assert.equal(p.porMiembro.E.total, 50);
-  assert.equal(Math.round(p.excedente.E * 100) / 100, 30);
+  assert.equal(p.porMiembro.E.total, 80);
   const sum = Object.values(p.porMiembro).reduce((a, m) => a + m.total, 0);
   assert.equal(Math.round(sum * 100) / 100, 1000);
+  // "Por definir": el excedente queda aparte y la suma sigue en S/ 1,000
+  ctx.jobs[0].payer = 'tbd';
+  const q = payouts(project, ctx, NOW);
+  assert.equal(q.porMiembro.E.total, 50);
+  assert.equal(Math.round(q.excedente.E * 100) / 100, 30);
+  assert.equal(Math.round(Object.values(q.porMiembro).reduce((a, m) => a + m.total, 0) * 100) / 100, 1000);
+  assert.ok(base > 0);
 });
 
 test('Guillermo al 80 %: el que asiste cobra el 80 % de la preproducción hecha por Guillermo; la suma sigue en S/ 1,000', () => {

@@ -1011,6 +1011,8 @@ alter table tasks add column if not exists redelivered_at timestamptz;
 alter table tasks add column if not exists void boolean not null default false;   -- lo que marcó el dueño de un video que pasó al administrador
 alter table tasks add column if not exists voided_at timestamptz;
 alter table videos add column if not exists apoyo_due timestamptz;     -- montaje adelantado por un choque de fechas
+alter table videos add column if not exists reprog jsonb not null default '[]';  -- entregas reprogramadas (de, a, cuándo, quién, si estaba vencida)
+alter table videos add column if not exists handoff jsonb;             -- el video ya había pasado al administrador cuando se reprogramó
 alter table attendance add column if not exists confirmed_at timestamptz;
 alter table events add column if not exists ended_set_at timestamptz;
 alter table events add column if not exists ended_by uuid references members(id);
@@ -1045,7 +1047,9 @@ declare vv videos; ow members; d record; mo tasks; ac tasks; rv text;
 begin
   select * into vv from videos where id = v;
   select * into ow from members where id = vv.owner;
+  if exists (select 1 from jobs j where v = any(j.video_ids) and j.status in ('invitado', 'activo', 'finalizado', 'cerrado')) then return 'colab'; end if;
   if not coalesce(ow.apoyo, false) then return 'normal'; end if;
+  if vv.handoff is not null then return 'pasado'; end if;
   select * into d from post_dues(v);
   select * into mo from tasks where video_id = v and kind = 'montaje' and not void;
   select * into ac from tasks where video_id = v and kind = 'acabado' and not void;
@@ -1089,6 +1093,14 @@ begin
     return new;
   end if;
   if new.done_by is distinct from me then raise exception 'Solo puedes marcar tus propias tareas'; end if;
+  select role into mrole from members where id = me;
+  -- El colaborador solo marca desde su encargo (funciones job_*).
+  if mrole = 'colaborador' then
+    if coalesce(current_setting('app.job', true), '') <> '1' or new.kind not in ('montaje', 'acabado') then raise exception 'Los colaboradores entregan desde su encargo'; end if;
+    new.void := false; new.review := null; new.review_round := 0; new.split := false; new.done_at := now();
+    return new;
+  end if;
+  if new.kind in ('montaje', 'acabado') and post_phase(new.video_id) = 'colab' then raise exception 'Este video lo edita un colaborador'; end if;
   -- Estos campos los pone solo la base.
   new.void := false; new.voided_at := null; new.review := null; new.review_at := null; new.review_by := null;
   new.review_note := null; new.review_round := 0; new.redelivered_at := null;
@@ -1140,8 +1152,7 @@ begin
       elsif ph <> 'pasado' then
         raise exception 'Todavía es de tu socio: si no entrega, podrás tomarlo desde las 08:00';
       else
-        select * into pd from post_dues(v.id);
-        if now() > pd.fin then raise exception 'Pasó el plazo del video final'; end if;
+        -- 1.4: nunca se bloquea: vencido se entrega igual (resta puntos) o se reprograma la entrega.
         if exists (select 1 from claims where video_id = v.id and kind = 'montaje' and status = 'activa' and member_id <> me) then raise exception 'Ya lo tomó otra persona'; end if;
         -- Lo que marcó el dueño deja de contar (queda en el historial).
         update tasks set void = true, voided_at = now() where video_id = v.id and kind in ('montaje', 'acabado') and done_by = v.owner and not void;
@@ -1214,7 +1225,7 @@ create policy claims_delete on claims for delete using (member_id = my_member(te
 -- ---------- Deshacer (1.4): 10 minutos y nunca después del plazo de esa acción ----------
 create or replace function undo_limit(t uuid) returns timestamptz
 language plpgsql stable security definer set search_path = public as $$
-declare k tasks; vv videos; ow members; d record;
+declare k tasks; vv videos; ow members; d record; lim timestamptz;
 begin
   select * into k from tasks where id = t;
   select * into vv from videos where id = k.video_id;
@@ -1223,14 +1234,15 @@ begin
   if k.kind not in ('montaje', 'acabado') then return null; end if;
   select * into d from post_dues(vv.id);
   if coalesce(ow.apoyo, false) and k.done_by = vv.owner then
-    if k.kind = 'montaje' then return case when k.done_at <= d.apoyo then d.apoyo else d.auto end; end if;
-    return case when k.review_round > 0 then d.fix else d.auto end;
+    lim := case when k.kind = 'montaje' then case when k.done_at <= d.apoyo then d.apoyo else d.auto end when k.review_round > 0 then d.fix else d.auto end;
+  else
+    lim := d.fin;
   end if;
-  return d.fin;
+  return case when lim < k.done_at then null else lim end; -- ya estaba vencido: solo los 10 minutos
 end $$;
 create or replace function can_undo(t uuid) returns boolean
 language sql stable security definer set search_path = public as $$
-  select exists (select 1 from tasks k where k.id = t and k.done_by = my_member(k.team_id) and not k.split and not k.void and (
+  select exists (select 1 from tasks k where k.id = t and k.done_by = my_member(k.team_id) and is_partner(k.team_id) and not k.split and not k.void and (
     (k.kind in ('guion', 'storyboard') and (pre_due(k.video_id) is null or now() <= pre_due(k.video_id)))
     or (k.kind not in ('guion', 'storyboard')
         and now() <= least(k.done_at + make_interval(mins => rule_int(k.team_id, 'undo', 10)), undo_limit(k.id))
@@ -1453,3 +1465,304 @@ begin
 end $$;
 drop trigger if exists proposals_rules_guard on proposals;
 create trigger proposals_rules_guard before insert on proposals for each row execute function guard_proposal_rules();
+
+-- ---------- 1.4 · Invitaciones (arreglo) e Integrantes ----------
+-- El código ya no depende de pgcrypto (en Supabase vive en otro esquema y daba "gen_random_bytes does not exist").
+create or replace function create_invite(t uuid, invite_name text, invite_role text, gets_apoyo boolean default false) returns text
+language plpgsql security definer set search_path = public as $$
+declare c text := upper(substr(md5(gen_random_uuid()::text || clock_timestamp()::text), 1, 8));
+begin
+  if not is_admin(t) then raise exception 'Solo el administrador invita'; end if;
+  if invite_role not in ('socio', 'colaborador') then raise exception 'Rol no válido'; end if;
+  if coalesce(trim(invite_name), '') = '' then raise exception 'Escribe un nombre'; end if;
+  insert into members (team_id, name, role, apoyo, invite_code, invite_expires)
+  values (t, trim(invite_name), invite_role, invite_role = 'socio' and gets_apoyo, c, now() + interval '7 days');
+  insert into log (team_id, actor, type, data) values (t, my_member(t), 'invite', jsonb_build_object('name', trim(invite_name), 'role', invite_role));
+  return c;
+end $$;
+-- Nuevo enlace para una invitación vencida o perdida.
+create or replace function renew_invite(m uuid) returns text
+language plpgsql security definer set search_path = public as $$
+declare mm members; c text := upper(substr(md5(gen_random_uuid()::text || clock_timestamp()::text), 1, 8));
+begin
+  select * into mm from members where id = m;
+  if mm.id is null or not is_admin(mm.team_id) then raise exception 'Solo el administrador invita'; end if;
+  if mm.user_id is not null then raise exception 'Ya entró al equipo'; end if;
+  update members set invite_code = c, invite_expires = now() + interval '7 days', active = true where id = m;
+  return c;
+end $$;
+grant execute on function create_invite, renew_invite to authenticated;
+
+create or replace function save_settings(t uuid, k text, v jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare s jsonb;
+begin
+  if not is_admin(t) then raise exception 'Solo el administrador cambia los ajustes'; end if;
+  if k not in ('look', 'reminders', 'guillermo') then raise exception 'Ese ajuste se cambia con una propuesta'; end if;
+  update teams set settings = jsonb_set(coalesce(settings, '{}'), array[k], v) where id = t returning settings into s;
+  insert into log (team_id, actor, type, data) values (t, my_member(t), 'settings.' || k, jsonb_build_object('new', v));
+  return s;
+end $$;
+
+-- ---------- 1.4 · Reprogramar la entrega (solo el administrador, cualquier video sin entregar) ----------
+-- Los plazos se mueven con la fecha. Si ya estaba vencida, resta 3 puntos a quien la tenía en sus manos.
+create or replace function reprogram_delivery(v uuid, new_date date, note text default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare vv videos; ow members; d record; ph text; me uuid; adm uuid; ac tasks; cl claims; mo tasks; charge uuid; hand jsonb; late boolean; jm uuid;
+begin
+  select * into vv from videos where id = v;
+  if vv.id is null or not is_admin(vv.team_id) then raise exception 'Solo el administrador reprograma la entrega'; end if;
+  me := my_member(vv.team_id); adm := me;
+  select * into ow from members where id = vv.owner;
+  if new_date is null or new_date <= lima_day(now()) then raise exception 'Elige una fecha desde mañana'; end if;
+  if new_date = vv.publish_date then raise exception 'Es la misma fecha'; end if;
+  ph := post_phase(v);
+  select * into ac from tasks where video_id = v and kind = 'acabado' and not void;
+  if ph = 'aprobado' or (ac.id is not null and ph not in ('revision', 'cambios')) then raise exception 'Ese video ya se entregó'; end if;
+  select * into d from post_dues(v);
+  late := now() > d.fin and exists (select 1 from tasks where video_id = v and kind = 'rodaje' and not void);
+  select * into mo from tasks where video_id = v and kind = 'montaje' and not void;
+  select j.member_id into jm from jobs j where v = any(j.video_ids) and j.status in ('invitado', 'activo', 'finalizado', 'cerrado') limit 1;
+  charge := case when jm is not null then jm
+                 when ph = 'pasado' or vv.owner = adm or (ph = 'apoyo' and mo.id is not null) then adm
+                 else vv.owner end;
+  hand := vv.handoff;
+  if ph = 'pasado' and hand is null and coalesce(ow.apoyo, false) then
+    select * into cl from claims where video_id = v and kind = 'montaje' and status = 'activa' order by created_at limit 1;
+    hand := jsonb_build_object('at', case when cl.id is not null then cl.created_at
+                                          when mo.id is not null and mo.done_by <> vv.owner then mo.done_at
+                                          when ac.review = 'rechazada' then ac.review_at
+                                          when ac.review = 'cambios' then d.fix
+                                          else d.auto end,
+                               'why', case when cl.id is not null or (mo.id is not null and mo.done_by <> vv.owner) then 'tomado' when ac.review = 'rechazada' then 'rechazo' else 'auto' end);
+  end if;
+  update videos set
+    apoyo_due = case when apoyo_due is null then null else apoyo_due + make_interval(days => new_date - publish_date) end,
+    handoff = hand,
+    reprog = coalesce(reprog, '[]') || jsonb_build_array(jsonb_build_object('from', publish_date, 'to', new_date, 'at', now(), 'by', me, 'late', late, 'charge', charge, 'note', nullif(trim(coalesce(note, '')), ''))),
+    publish_date = new_date
+  where id = v;
+  update claims set limit_at = (select fin from post_dues(v)) where video_id = v and kind = 'montaje';
+end $$;
+grant execute on function reprogram_delivery to authenticated;
+
+-- ---------- 1.4 · Colaborador externo: encargos, revisiones como checklist y entrega en Drive ----------
+create table if not exists jobs (
+  id uuid primary key default gen_random_uuid(),
+  team_id uuid not null references teams(id) on delete cascade,
+  project_id uuid not null references projects(id) on delete cascade,
+  member_id uuid not null references members(id),
+  service text not null default 'edicion',
+  video_ids uuid[] not null default '{}',
+  price numeric(10,2) not null,                 -- monto acordado por video (montaje + final)
+  payer text not null default 'owner',          -- quién pone el excedente sobre S/ 25: owner (dueño de los videos) | half | tbd
+  drive_url text,
+  status text not null default 'propuesto' check (status in ('propuesto', 'invitado', 'activo', 'finalizado', 'cerrado', 'rechazado', 'cancelado')),
+  proposed_by uuid references members(id),
+  decided_by uuid references members(id),
+  decided_at timestamptz,
+  accepted_at timestamptz,
+  finished_at timestamptz,
+  closed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create table if not exists job_items (
+  id uuid primary key default gen_random_uuid(),
+  team_id uuid not null references teams(id) on delete cascade,
+  job_id uuid not null references jobs(id) on delete cascade,
+  video_id uuid not null references videos(id) on delete cascade,
+  stage text not null default 'montaje' check (stage in ('montaje', 'rev1', 'aj1', 'final', 'rev2', 'aj2', 'upload', 'done')),
+  obs1 jsonb not null default '[]',
+  obs2 jsonb not null default '[]',
+  montaje_at timestamptz,
+  final_at timestamptz,
+  uploaded_at timestamptz,
+  prev jsonb,                                   -- para deshacer el último paso (10 min)
+  unique (job_id, video_id)
+);
+alter table jobs enable row level security;
+alter table job_items enable row level security;
+drop policy if exists jobs_read on jobs;
+create policy jobs_read on jobs for select using (is_partner(team_id));
+drop policy if exists jobs_insert on jobs;
+create policy jobs_insert on jobs for insert with check (is_admin(team_id));
+drop policy if exists jobs_update on jobs;
+create policy jobs_update on jobs for update using (is_partner(team_id));
+drop policy if exists job_items_read on job_items;
+create policy job_items_read on job_items for select using (is_partner(team_id));
+drop trigger if exists jobs_log on jobs;
+create trigger jobs_log after insert or update on jobs for each row execute function log_change();
+drop trigger if exists job_items_log on job_items;
+create trigger job_items_log after update on job_items for each row execute function log_change();
+
+create or replace function guard_job() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare me uuid := my_member(new.team_id); n int; rpc boolean := coalesce(current_setting('app.job', true), '') = '1';
+begin
+  if tg_op = 'INSERT' then
+    if not is_admin(new.team_id) then raise exception 'El encargo lo arma el administrador'; end if;
+    if (select role from members where id = new.member_id) <> 'colaborador' then raise exception 'Elige un colaborador'; end if;
+    if coalesce(array_length(new.video_ids, 1), 0) = 0 then raise exception 'Elige al menos un video'; end if;
+    if new.price is null or new.price <= 0 then raise exception 'Escribe el monto por video'; end if;
+    if new.payer not in ('owner', 'half', 'tbd') then raise exception 'Quién cubre el excedente no es válido'; end if;
+    if exists (select 1 from videos x where x.id = any(new.video_ids) and x.project_id <> new.project_id) then raise exception 'Los videos tienen que ser del proyecto'; end if;
+    if exists (select 1 from tasks t where t.video_id = any(new.video_ids) and t.kind in ('montaje', 'acabado') and not t.void) then raise exception 'Algún video ya tiene montaje o final'; end if;
+    if exists (select 1 from jobs j where j.video_ids && new.video_ids and j.status in ('propuesto', 'invitado', 'activo', 'finalizado', 'cerrado')) then raise exception 'Algún video ya está en otro encargo'; end if;
+    select count(*) into n from members where team_id = new.team_id and role in ('admin', 'socio') and active and user_id is not null and id <> me;
+    new.status := case when n = 0 then 'invitado' else 'propuesto' end;
+    new.proposed_by := me; new.decided_by := null; new.decided_at := null; new.accepted_at := null; new.finished_at := null; new.closed_at := null; new.created_at := now();
+    return new;
+  end if;
+  if (new.price, new.payer, new.video_ids, new.member_id, new.service) is distinct from (old.price, old.payer, old.video_ids, old.member_id, old.service) then
+    if old.status <> 'propuesto' or not is_admin(new.team_id) then raise exception 'El encargo ya se aprobó: no se cambia'; end if;
+  end if;
+  if new.status is distinct from old.status then
+    if old.status = 'propuesto' and new.status in ('invitado', 'rechazado') then
+      if me = old.proposed_by then raise exception 'Lo aprueba tu socio'; end if;
+      new.decided_by := me; new.decided_at := now();
+    elsif new.status = 'cancelado' and old.status in ('propuesto', 'invitado') then
+      if not is_admin(new.team_id) then raise exception 'Solo el administrador cancela'; end if;
+    elsif old.status = 'invitado' and new.status = 'activo' and rpc then new.accepted_at := now();
+    elsif old.status = 'activo' and new.status = 'finalizado' and rpc then new.finished_at := now();
+    elsif old.status = 'finalizado' and new.status = 'activo' and rpc then new.finished_at := null;
+    elsif old.status = 'finalizado' and new.status = 'cerrado' then
+      if not is_partner(new.team_id) then raise exception 'Sin permiso'; end if;
+      new.closed_at := now();
+    else raise exception 'Ese cambio de estado no se puede';
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists jobs_guard on jobs;
+create trigger jobs_guard before insert or update on jobs for each row execute function guard_job();
+-- Un renglón por video del encargo.
+create or replace function job_make_items() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  insert into job_items (team_id, job_id, video_id) select new.team_id, new.id, x from unnest(new.video_ids) x on conflict do nothing;
+  return null;
+end $$;
+drop trigger if exists jobs_items on jobs;
+create trigger jobs_items after insert on jobs for each row execute function job_make_items();
+
+-- Lo que ve el colaborador (sin presupuesto, tope ni quién cubre el excedente).
+create or replace function colab_home(t uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select jsonb_build_object(
+    'me', (select jsonb_build_object('id', m.id, 'name', m.name, 'phone', m.phone, 'role', m.role) from members m where m.id = my_member(t)),
+    'team', (select name from teams where id = t),
+    'partners', (select coalesce(jsonb_agg(jsonb_build_object('name', p.name, 'role', p.role, 'phone', p.phone)), '[]') from members p where p.team_id = t and p.role in ('admin', 'socio') and p.active and p.user_id is not null),
+    'jobs', (select coalesce(jsonb_agg(jsonb_build_object(
+        'id', j.id, 'status', j.status, 'service', j.service, 'price', j.price, 'drive_url', j.drive_url,
+        'accepted_at', j.accepted_at, 'finished_at', j.finished_at, 'closed_at', j.closed_at,
+        'project', (select jsonb_build_object('client', pr.client, 'name', pr.name) from projects pr where pr.id = j.project_id),
+        'videos', (select coalesce(jsonb_agg(jsonb_build_object(
+            'id', v.id, 'num', v.num, 'title', v.title, 'publish_date', v.publish_date,
+            'montaje_due', lima_at(v.publish_date - 3, '21:00'), 'final_due', lima_at(v.publish_date - 1, '18:00'),
+            'shot', exists (select 1 from tasks k where k.video_id = v.id and k.kind = 'rodaje' and not k.void),
+            'item', (select jsonb_build_object('id', i.id, 'stage', i.stage, 'obs1', i.obs1, 'obs2', i.obs2, 'montaje_at', i.montaje_at, 'final_at', i.final_at, 'uploaded_at', i.uploaded_at, 'prev_at', i.prev->>'at', 'prev_by', i.prev->>'by') from job_items i where i.job_id = j.id and i.video_id = v.id)
+          ) order by v.num), '[]') from videos v where v.id = any(j.video_ids))
+      ) order by j.created_at), '[]') from jobs j where j.member_id = my_member(t) and j.status in ('invitado', 'activo', 'finalizado', 'cerrado'))
+  )
+$$;
+
+-- Paso de un video del encargo. Lo hace el colaborador (entregas, checklist, Drive) o un socio (revisiones).
+-- Guarda el estado anterior para poder deshacerlo 10 minutos.
+create or replace function job_step(item uuid, act text, obs text[] default null, idx int default null) returns text
+language plpgsql security definer set search_path = public as $$
+declare i job_items; j jobs; me uuid; mrole text; nx text; tk uuid; arr jsonb; pv jsonb;
+begin
+  select * into i from job_items where id = item;
+  select * into j from jobs where id = i.job_id;
+  if i.id is null then raise exception 'No encontrado'; end if;
+  me := my_member(j.team_id);
+  select role into mrole from members where id = me;
+  pv := jsonb_build_object('stage', i.stage, 'obs1', i.obs1, 'obs2', i.obs2, 'montaje_at', i.montaje_at, 'final_at', i.final_at, 'uploaded_at', i.uploaded_at, 'at', now(), 'by', me, 'act', act);
+  perform set_config('app.job', '1', true);
+  if act in ('montaje', 'final', 'check', 'upload', 'uploaded') then
+    if me <> j.member_id then raise exception 'Solo el colaborador del encargo'; end if;
+    if j.status <> 'activo' then raise exception 'El encargo no está activo'; end if;
+    if act = 'montaje' then
+      if i.stage <> 'montaje' then raise exception 'El montaje ya se entregó'; end if;
+      if not exists (select 1 from tasks where video_id = i.video_id and kind = 'rodaje' and not void) then raise exception 'Primero tiene que grabarse el video'; end if;
+      insert into tasks (team_id, project_id, video_id, kind, done_by) values (j.team_id, j.project_id, i.video_id, 'montaje', me) returning id into tk;
+      update job_items set stage = 'rev1', montaje_at = now(), prev = pv || jsonb_build_object('task', tk) where id = item;
+      return 'rev1';
+    elsif act = 'final' then
+      if not (i.stage = 'final' or (i.stage = 'aj1' and not exists (select 1 from jsonb_array_elements(i.obs1) o where not coalesce((o->>'done')::boolean, false)))) then raise exception 'Primero marca todos los ajustes'; end if;
+      update job_items set stage = 'rev2', final_at = coalesce(final_at, now()), prev = pv where id = item;
+      return 'rev2';
+    elsif act = 'check' then
+      if i.stage not in ('aj1', 'aj2') or idx is null then raise exception 'No hay ajustes por marcar'; end if;
+      arr := case when i.stage = 'aj1' then i.obs1 else i.obs2 end;
+      if idx < 0 or idx >= jsonb_array_length(arr) then raise exception 'Ajuste no válido'; end if;
+      arr := jsonb_set(arr, array[idx::text, 'done'], to_jsonb(not coalesce((arr->idx->>'done')::boolean, false)));
+      if i.stage = 'aj1' then update job_items set obs1 = arr where id = item; else update job_items set obs2 = arr where id = item; end if;
+      return i.stage;
+    elsif act = 'upload' then
+      if not (i.stage = 'aj2' and not exists (select 1 from jsonb_array_elements(i.obs2) o where not coalesce((o->>'done')::boolean, false))) then raise exception 'Primero marca todos los ajustes'; end if;
+      update job_items set stage = 'upload', prev = pv where id = item;
+      return 'upload';
+    else
+      if i.stage <> 'upload' then raise exception 'Todavía no está aprobado'; end if;
+      insert into tasks (team_id, project_id, video_id, kind, done_by) values (j.team_id, j.project_id, i.video_id, 'acabado', me) returning id into tk;
+      update job_items set stage = 'done', uploaded_at = now(), prev = pv || jsonb_build_object('task', tk) where id = item;
+      return 'done';
+    end if;
+  elsif act in ('ok', 'obs') then
+    if not is_partner(j.team_id) then raise exception 'Revisan los socios'; end if;
+    if j.status not in ('activo', 'finalizado') then raise exception 'El encargo no está activo'; end if;
+    if i.stage not in ('rev1', 'rev2') then raise exception 'No hay nada por revisar'; end if;
+    if act = 'obs' then
+      if obs is null or array_length(obs, 1) is null then raise exception 'Escribe al menos una observación'; end if;
+      arr := (select jsonb_agg(jsonb_build_object('t', trim(x), 'done', false)) from unnest(obs) x where trim(x) <> '');
+      if arr is null then raise exception 'Escribe al menos una observación'; end if;
+    end if;
+    nx := case when i.stage = 'rev1' then (case when act = 'ok' then 'final' else 'aj1' end) else (case when act = 'ok' then 'upload' else 'aj2' end) end;
+    update job_items set stage = nx, prev = pv,
+      obs1 = case when i.stage = 'rev1' and act = 'obs' then arr else obs1 end,
+      obs2 = case when i.stage = 'rev2' and act = 'obs' then arr else obs2 end where id = item;
+    return nx;
+  end if;
+  raise exception 'Acción no válida';
+end $$;
+-- Deshacer el último paso: 10 minutos y solo quien lo hizo.
+create or replace function job_undo(item uuid) returns text
+language plpgsql security definer set search_path = public as $$
+declare i job_items; j jobs; me uuid;
+begin
+  select * into i from job_items where id = item;
+  select * into j from jobs where id = i.job_id;
+  me := my_member(j.team_id);
+  if i.prev is null or (i.prev->>'by')::uuid is distinct from me or now() > (i.prev->>'at')::timestamptz + make_interval(mins => rule_int(j.team_id, 'undo', 10)) then
+    raise exception 'Solo se deshace en los primeros 10 minutos';
+  end if;
+  if j.status not in ('activo', 'finalizado') then raise exception 'El encargo ya se cerró'; end if;
+  if i.prev ? 'task' then delete from tasks where id = (i.prev->>'task')::uuid; end if;
+  update job_items set stage = i.prev->>'stage', obs1 = i.prev->'obs1', obs2 = i.prev->'obs2',
+    montaje_at = (i.prev->>'montaje_at')::timestamptz, final_at = (i.prev->>'final_at')::timestamptz, uploaded_at = (i.prev->>'uploaded_at')::timestamptz, prev = null where id = item;
+  if j.status = 'finalizado' then perform set_config('app.job', '1', true); update jobs set status = 'activo' where id = j.id; end if;
+  return i.prev->>'stage';
+end $$;
+-- El colaborador acepta las condiciones y, al terminar todo, marca el servicio como finalizado.
+create or replace function job_accept(job uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare j jobs;
+begin
+  select * into j from jobs where id = job;
+  if j.member_id is distinct from my_member(j.team_id) then raise exception 'Este encargo no es tuyo'; end if;
+  if j.status <> 'invitado' then raise exception 'El encargo no está esperando tu respuesta'; end if;
+  perform set_config('app.job', '1', true);
+  update jobs set status = 'activo' where id = job;
+end $$;
+create or replace function job_finish(job uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare j jobs;
+begin
+  select * into j from jobs where id = job;
+  if j.member_id is distinct from my_member(j.team_id) then raise exception 'Este encargo no es tuyo'; end if;
+  if exists (select 1 from job_items where job_id = job and stage <> 'done') then raise exception 'Faltan videos por terminar'; end if;
+  perform set_config('app.job', '1', true);
+  update jobs set status = 'finalizado' where id = job;
+end $$;
+grant execute on function colab_home, job_step, job_undo, job_accept, job_finish to authenticated;

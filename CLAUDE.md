@@ -42,7 +42,7 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 - `css/app.css`: estilos. Variables de color en `:root`; modo día en `[data-theme=light]`. Desde la 1.2 hay clases con el diseño de los bocetos (`.racha`, `.hero`, `.dsq`, `.trow`, `.tbtn`, `.vcard`, `.meta`, `.wallet`, `.agrp`, `.srow`…).
 - `supabase/schema.sql`: todo el esquema, **idempotente** (se puede volver a pegar entero). Cada versión agrega una sección al final (v1.1, v1.2, v1.3).
 - `sw.js`: caché sin conexión (`CACHE = 'registro-v8'`).
-- `tests/rules.test.js`, `tests/v13.test.js` y `tests/v14.test.js`: `node --test tests/*.test.js` (27 pruebas).
+- `tests/rules.test.js`, `tests/v13.test.js` y `tests/v14.test.js`: `node --test tests/*.test.js` (29 pruebas).
 
 ### Publicar una versión nueva
 1. Cambiar el código. Subir `VERSION` en `js/app.js` y `CACHE` en `sw.js` (si no, los celulares siguen con la versión vieja).
@@ -65,8 +65,10 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
   - Videos propios del administrador, de apoyo y tomados: hasta el **día antes de publicar a las 23:59**.
   - Fases (igual en `postState` de `rules.js` y `post_phase()` en SQL): normal · abierto · apoyo · solo · riesgo · revision · cambios · aprobado · pasado. Plazos: `post_dues()`.
   - **Aviso de choque** (Opción B) al programar la semana o repartir: si el último día del apoyo cae en un rodaje o reunión → "Adelantar el montaje de {socio}" / "Publicar un día después" / "Seguir igual"; si entre rodaje y publicación hay menos de días de apoyo + 1 → "Publicar el …" / "Seguir igual (sin apoyo)".
+- **Entrega vencida (1.4): nunca se bloquea.** Pasado el plazo del video final, la tarjeta se pone roja: quien lo tiene a cargo (`videoState().inCharge`) puede **"Entregar igual"** (cuenta como tarde) y el **administrador** puede **"Reprogramar entrega"** (RPC `reprogram_delivery`: nueva fecha de publicación desde mañana, nota opcional; mueve los plazos y queda en `videos.reprog`). Reprogramar sirve para **cualquier video sin entregar**, vencido o no; solo lo hace el administrador (lo coordina por fuera con el cliente). Puntos: reprogramar una entrega vencida que estaba a su cargo **−3** (en vez del −4); entregar tarde **−3**; no entregar a tiempo **−3**; si la tenía tomada y la reprograma, no se suma el −4. Si el video ya había pasado al administrador, se queda con él (`videos.handoff`).
 - **Tardanza se paga** igual (solo resta racha).
-- **Colaborador externo**: el proyecto cubre hasta **S/ 25 por video**; la diferencia la paga el socio que falló. El colaborador no ve el tope ni quién lo cubre. Sin racha para el colaborador.
+- **Colaborador externo (editor, 1.4)**: tablas `jobs` (encargo) y `job_items` (avance por video). El **administrador arma el encargo** (`#/encargo/nuevo`: editor nuevo o existente, videos sin montaje, monto por video, Drive) → **el otro socio lo aprueba** (`propuesto → invitado`) → el editor entra con su enlace y **acepta las condiciones** (`job_accept` → `activo`) → por video: **Entregué el montaje** → revisión 1 (los socios envían observaciones, una por línea, o aprueban) → ajustes en **checklist** → **Entregué el video final** → revisión 2 → últimos ajustes → **subir a Drive** (`{Cliente}_Video{n}_FINAL.mp4`) → **Servicio finalizado** (`job_finish`) → un socio **confirma y registra el pago** (`cerrado`). Todo por RPC `job_step` / `job_undo` (10 min). El proyecto cubre hasta **montaje + final por video** (S/ 25); el **excedente** lo paga el dueño del video, **a medias** o **por definir** (`jobs.payer` = owner / half / tbd; "por definir" sale aparte en el Cierre). El editor **no ve** el tope ni quién cubre (`colab_home` está saneada), no ve las tablas del equipo, no tiene racha y solo ve su vista "Mis videos". Mientras el video está en un encargo, ningún socio puede marcar su montaje/final (`post_phase = 'colab'`).
+- **Integrantes (1.4, Opción C)** en Administrador → Integrantes (`#/admin/integrantes`): grupos Socios y Colaboradores (+ Guillermo, su WhatsApp va en `teams.settings.guillermo`), nombre con lápiz, chip de rol, WhatsApp +51 con ✓ y "Probar chat", invitaciones pendientes (WhatsApp / Copiar / Enlace nuevo `renew_invite` / Cancelar), "Invitar integrante" eligiendo rol (Socio → enlace; Colaborador → arma el encargo) y **Guardar** ("Integrantes guardados · queda en el historial"). La invitación usa `md5(gen_random_uuid())` (ya no `gen_random_bytes`, que en Supabase vive en el esquema `extensions`). Equipo (engranaje) ya no repite la lista: el socio ve solo su ficha.
 - **Guillermo** (colaborador para la preproducción): lo contrata un socio para una reunión a la que no irá y el otro acepta. El que asiste hace esos guiones/storyboards "con Guillermo" y recibe **80 %**; el que contrató conserva 20 %. La asistencia del que contrató queda "no requerida" (ni falta ni racha).
 - **Cierre**: el administrador envía la liquidación, el socio la confirma (o hace una observación), el administrador registra el pago (6.2, 3 días) y se cierra el proyecto.
 
@@ -126,10 +128,10 @@ Tabla de la 1.2:
 | Historial | Hecho; aprobado | `HistorialA.dc.html` |
 | Cierre / liquidación | Funciona, diseño antiguo | `CierreA.dc.html` (y `CierreB` para editor externo con tope S/ 25) |
 | Reunión / rodaje por dentro | Funciona, diseño antiguo | `ProduccionC.dc.html` (elegida), `AvisoA.dc.html`, `GuillermoA.dc.html` |
-| Equipo / integrantes | Funciona, diseño antiguo | `IntegranteA.dc.html`, `AccesoA.dc.html` |
+| Equipo / integrantes | Hecho con el diseño (1.4) | **Integrantes C** (canvas 1.3) |
 | Entrar / invitación | Funciona | `AccesoA.dc.html` |
 | Notificaciones | **No hay aún** | `NotifSocioE.dc.html` (elegida), `NotifReunion`, `NotifColabA` |
-| Colaborador externo | **No hay aún** | `EncargoA`, `AccesoB`, `NotifColabA`, `ColaboradorA` |
+| Colaborador externo | Hecho (1.4) | `EncargoA`, `AccesoB`, `ColaboradorA` (`NotifColabA` pendiente) |
 
 Decisiones de diseño que hay que respetar:
 - La app debe verse **igual que los bocetos** (colores, tarjetas, íconos, animaciones), no solo tener su estructura.
@@ -152,7 +154,7 @@ El canvas está en la cuenta de Williams (enlace arriba). Para leerlo o editarlo
 0. **1.3 / 1.4**: detalle del video más moderno (boceto B pendiente de rediseño); actualizar el acuerdo firmado con las reglas de la 1.3 y la 1.4 (entregas al límite cambian el reparto de dinero); manual de la app. Textos de doble confirmación: se usaron Aprobar A (con "puedes deshacerlo en 10 minutos") y Pedir cambios B.
 1. **Notificaciones al celular** (la pantalla de Recordatorios ya guarda la configuración en `teams.settings.reminders`): Web Push con claves VAPID + Supabase Edge Function + tarea programada; en iPhone requiere la app instalada en la pantalla de inicio. Diseño elegido: `NotifSocioE`.
 2. **Rediseñar con el estilo de los bocetos**: reunión/rodaje por dentro (`ProduccionC`, `AvisoA`), Cierre (`CierreA`), Equipo/integrantes, Entrar.
-3. **Flujo del colaborador externo** (encargo, revisiones en checklist, Drive, "servicio finalizado", tope S/ 25): bocetos `EncargoA`, `AccesoB`, `NotifColabA`.
+3. Colaborador externo: hecho en la 1.4. Falta el aviso al celular (`NotifColabA`) y que el editor suba archivos desde la app (hoy marca y sube a Drive por fuera).
 4. **Acuerdo**: agregar la regla de la 1.2 (preproducción vencida pasa al compañero; el dueño ya no la puede marcar).
 5. **Pregunta abierta para Williams**: si la preproducción vence y nadie la toma antes del rodaje, el video no se puede grabar. ¿Se deja así o la app debe avisar?
 6. Mejoras menores: el ícono de "Equipo" (personas) abre la pantalla antigua; textos del modo práctica.
@@ -164,4 +166,5 @@ El canvas está en la cuenta de Williams (enlace arriba). Para leerlo o editarlo
 - **1.2**: diseño de los bocetos en Inicio (K), Etapas (F) y detalle del video; Administrador (apariencia, reglas y porcentajes con propuesta, recordatorios, modo práctica); botón día/noche; tema de cada video; la preproducción vencida pasa al compañero.
 - **1.3**: Tomar = comprometerse (+3/−4, también el montaje 5.7), confirmar asistencia (12 h / 18:00, −2, WhatsApp), sin guion se reprograma y sin storyboard se reparte 50/50, Inicio M, Etapas N/P, reunión con reparto y entregables, rodaje por dentro nuevo, tarjeta de racha, Apariencia C con noche y día, WhatsApp de cada integrante, botones sin texto negro.
 - **1.3.1**: arreglo del parpadeo: la pantalla ya no se vuelve a dibujar si nada cambió (cada toque la redibujaba 4 veces y al volver a la app 1 vez), y las animaciones de entrada de las tarjetas solo corren la primera vez que se abre una pantalla (`#app[data-settled]` en `render()`).
+- **1.4** (además): Integrantes C completo (arreglo de la invitación y del desborde en el celular), colaborador editor con revisiones en checklist y Drive, entrega vencida nunca bloqueada con "Reprogramar entrega" (solo administrador, −3 si ya estaba vencida).
 - **1.4**: entregas al límite (apoyo hasta 2 días antes 21:00, entrega por su cuenta con revisión, pedir cambios hasta 17:00, en riesgo 08:00–12:00 con Tomar el video, pasa solo a las 12:00, −3/+3/−4), "S/ … en espera" en la billetera, Administrador → Entregas al límite (con propuesta y plazo por cliente), aviso de choque al programar o repartir, deshacer en 10 min en todas las decisiones, final a las 23:59. Bocetos: `EntregaSocioA`, `EntregasLimiteA`, `ChoqueB` (canvas 1.3, fila "Entregas al límite").
