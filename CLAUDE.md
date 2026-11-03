@@ -2,7 +2,7 @@
 
 Léeme completo antes de cambiar algo. Aquí está qué es la app, cómo está hecha, todas las reglas y decisiones tomadas con el dueño (Williams, administrador), qué bocetos se eligieron y qué falta.
 
-Versión actual: **1.4** (2 nov 2026). Detalle en los docs del proyecto de Claude: `claude/observaciones-1.3.md` (diseño y reglas de la 1.3), `claude/version-1.3.md` (código 1.3) y `claude/entregas-al-limite.md` (reglas y código de la 1.4).
+Versión actual: **1.4** (3 nov 2026, rama `v1.4`, aún no en `main`). Detalle en los docs del proyecto de Claude: `claude/observaciones-1.3.md` (diseño y reglas de la 1.3), `claude/version-1.3.md` (código 1.3), `claude/entregas-al-limite.md` (reglas y código de la 1.4) y `claude/integrantes-colaborador-1.4.md` (integrantes, colaborador editor y entrega vencida).
 
 ---
 
