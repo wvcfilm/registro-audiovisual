@@ -151,20 +151,25 @@ class DemoAPI {
     if (fn === 'invite_info') {
       const m = this.db.members.find((x) => x.invite_code === String(a.code).toUpperCase());
       if (!m) return null;
-      return { team: (this.db.teams.find((t) => t.id === m.team_id) || {}).name, name: m.name, role: m.role, expired: new Date(m.invite_expires) < new Date(), used: !!m.user_id };
+      const adm = this.db.members.find((x) => x.team_id === m.team_id && x.role === 'admin' && x.active);
+      return { team: (this.db.teams.find((t) => t.id === m.team_id) || {}).name, team_id: m.team_id, name: m.name, role: m.role, apoyo: !!m.apoyo, by: adm ? adm.name : null, expired: new Date(m.invite_expires) < new Date(), used: !!m.user_id };
     }
     if (fn === 'accept_invite') {
       const m = this.db.members.find((x) => x.invite_code === String(a.code).toUpperCase());
       if (!m) throw new Error('Invitación no encontrada');
       if (m.user_id) throw new Error('Esta invitación ya se usó');
+      if (!uid) throw new Error('Tu sesión venció: vuelve a entrar');
+      if (new Date(m.invite_expires) < new Date()) throw new Error('La invitación venció');
+      const mine = this.db.members.find((x) => x.team_id === m.team_id && x.user_id === uid && x.active);
+      if (mine) throw new Error(`Esta cuenta ya es de ${mine.name} en este equipo: entra con la cuenta de ${m.name}`);
       m.user_id = uid; m.name = (a.my_name || '').trim() || m.name; m.invite_code = null;
-      this.log(m.team_id, null, 'join', { name: m.name, role: m.role }, m.id);
+      this.log(m.team_id, null, 'join', { name: m.name, role: m.role, reglas: true }, m.id);
       this.persist(); return m.team_id;
     }
     if (fn === 'team_settings') { const t = this.db.teams.find((x) => x.id === a.t); return t ? (t.settings || {}) : null; }
     if (fn === 'save_settings') {
       const me = this.me(a.t); if (!me || me.role !== 'admin') throw new Error('Solo el administrador cambia los ajustes');
-      if (['look', 'reminders'].indexOf(a.k) === -1) throw new Error('Ese ajuste se cambia con una propuesta');
+      if (['look', 'reminders', 'guillermo'].indexOf(a.k) === -1) throw new Error('Ese ajuste se cambia con una propuesta');
       const t = this.db.teams.find((x) => x.id === a.t); t.settings = Object.assign({}, t.settings || {}); t.settings[a.k] = a.v;
       this.log(a.t, null, 'settings.' + a.k, { new: a.v }); this.persist(); return t.settings;
     }
@@ -178,11 +183,13 @@ class DemoAPI {
       const now = new Date().toISOString();
       const old = k ? JSON.parse(JSON.stringify(k)) : null;
       if (fn === 'review_video') {
-        if (me.role !== 'admin') throw new Error('Solo el administrador revisa las entregas');
+        if (me.role !== 'admin') throw new Error('Solo el líder revisa las entregas');
         if (!k || k.review !== 'pendiente') throw new Error('No hay una entrega por revisar');
-        if (new Date() > st.d.finalDue) throw new Error('Venció el plazo de revisión: la entrega se aprobó sola');
+        const rlim = st.d.pair && !k.review_round ? st.d.revDue : st.d.finalDue;
+        if (new Date() > rlim) throw new Error('Venció el plazo de revisión: la entrega se aprobó sola');
         let res = 'aprobada';
-        if (!a.ok) { if (!String(a.motivo || '').trim()) throw new Error('Escribe qué debe corregir'); res = !k.review_round && new Date() <= st.d.fixDue ? 'cambios' : 'rechazada'; }
+        const clim = st.d.pair ? st.d.revDue : st.d.fixDue;
+        if (!a.ok) { if (!String(a.motivo || '').trim()) throw new Error('Escribe qué debe corregir'); res = !k.review_round && new Date() <= clim ? 'cambios' : 'rechazada'; }
         Object.assign(k, { review: res, review_at: now, review_by: me.id }, a.ok ? {} : { review_note: String(a.motivo).trim() }, res === 'cambios' ? { review_round: 1 } : {});
       } else if (fn === 'review_undo') {
         if (!R.canUndoReview(k, me, c, new Date())) throw new Error('Solo se deshace en los primeros 10 minutos');
@@ -383,7 +390,8 @@ class DemoAPI {
       if (row.kind !== 'montaje' && this.db.tasks.find((t) => t.video_id === row.video_id && t.kind === row.kind && !t.void)) throw new Error('Esa tarea ya está hecha');
       if (row.kind === 'montaje' && !this.seeding) {
         const v = this.db.videos.find((x) => x.id === row.video_id);
-        if (!R.canMark(v, 'montaje', me, this.ctxFor(v.project_id), new Date()).claim) throw new Error('Solo se puede tomar si no entregó el video completo a las 08:00, hasta las 12:00');
+        const cm = R.canMark(v, 'montaje', me, this.ctxFor(v.project_id), new Date());
+        if (!cm.claim) throw new Error(cm.why && cm.why !== 'Puedes tomar el video' ? cm.why : 'Todavía no se puede tomar');
       }
     }
     if (voidOwn) {
@@ -410,6 +418,8 @@ class DemoAPI {
     if (table === 'jobs') for (const vid of r.video_ids) this.db.job_items.push({ id: uuid(), team_id: r.team_id, job_id: r.id, video_id: vid, stage: 'montaje', obs1: [], obs2: [], prev: null });
     this.db[table].push(r);
     this.log(r.team_id, this.projectOf(table, r), table + '.insert', { new: r, old: null });
+    // 1.5 (igual que la base): el apoyo queda fijado en el video al grabarse.
+    if (table === 'tasks' && r.kind === 'rodaje') { const v = this.db.videos.find((x) => x.id === r.video_id); const ow = v && this.db.members.find((m) => m.id === v.owner); if (v && v.apoyo_fixed == null) v.apoyo_fixed = !!(ow && ow.role === 'socio' && ow.apoyo); }
     // 1.3 (igual que la base): grabar sin storyboard lo reparte mitad y mitad y lo cierra.
     if (table === 'tasks' && r.kind === 'rodaje' && !this.db.tasks.find((t) => t.video_id === r.video_id && t.kind === 'storyboard')) {
       const v = this.db.videos.find((x) => x.id === r.video_id);
@@ -439,8 +449,10 @@ class DemoAPI {
       if (old.status !== 'pendiente') throw new Error('Esa propuesta ya se decidió');
       if (patch.status === 'retirada' && me.id !== old.proposed_by) throw new Error('Solo quien propuso puede retirarla');
       if ((patch.status === 'aprobada' || patch.status === 'rechazada') && me.id === old.proposed_by) throw new Error('La aprueba tu compañero');
+      if ((patch.status === 'aprobada' || patch.status === 'rechazada') && old.kind === 'apoyo' && me.id !== old.data.member) throw new Error('La acepta el socio al que le cambia');
       patch = Object.assign({}, patch, { decided_by: me.id, decided_at: new Date().toISOString() });
-      if (patch.status === 'aprobada') { const t = this.db.teams.find((x) => x.id === r.team_id); t.settings = Object.assign({}, t.settings || {}); t.settings[old.kind] = Object.assign({}, t.settings[old.kind] || {}, old.data); }
+      if (patch.status === 'aprobada' && old.kind === 'apoyo') { const tm = this.db.members.find((m) => m.id === old.data.member); if (tm) { const o2 = JSON.parse(JSON.stringify(tm)); tm.apoyo = !!old.data.apoyo; this.log(tm.team_id, null, 'members.update', { new: JSON.parse(JSON.stringify(tm)), old: o2 }); } }
+      else if (patch.status === 'aprobada') { const t = this.db.teams.find((x) => x.id === r.team_id); t.settings = Object.assign({}, t.settings || {}); t.settings[old.kind] = Object.assign({}, t.settings[old.kind] || {}, old.data); }
     }
     Object.assign(r, patch);
     this.log(r.team_id, this.projectOf(table, r), table + '.update', { new: r, old });

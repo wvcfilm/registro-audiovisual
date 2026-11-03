@@ -1,6 +1,6 @@
 // Estado de la app y operaciones del día a día.
 import { api, TABLES, isPractice, hasServer } from './api.js';
-import { setRules, DEFAULT_PCT, DEFAULT_RULES, at, addDays, payouts, attendanceStatus, memberStatus, videoState, limaDate, adminAbsent, preDueFor, meetingOf as rMeetingOf, rodajeOf, takeLimit, claimOf } from './rules.js';
+import { setRules, DEFAULT_PCT, DEFAULT_RULES, at, addDays, payouts, attendanceStatus, memberStatus, videoState, limaDate, adminAbsent, leaderAway, preDueFor, meetingOf as rMeetingOf, rodajeOf, takeLimit, claimOf } from './rules.js';
 
 export const S = {
   ready: false, session: null, teams: [], teamId: null, me: null, projectId: null,
@@ -225,7 +225,7 @@ export function checkIn(event) {
     const now = new Date().toISOString();
     const a = attOf(event.id, S.me.id);
     const patch = { claimed_at: now };
-    if (api.mode === 'demo' && (S.me.role === 'admin' || adminAbsent(event, ctx(event.project_id)))) patch.arrived_at = now;
+    if (api.mode === 'demo' && (S.me.role === 'admin' || leaderAway(event, ctx(event.project_id)))) patch.arrived_at = now;
     if (a) return api.update('attendance', a.id, patch);
     return api.insert('attendance', Object.assign({ team_id: S.teamId, event_id: event.id, member_id: S.me.id }, patch));
   }, S.me.role === 'admin' ? 'Llegada registrada' : 'Llegada enviada: el administrador la confirma');

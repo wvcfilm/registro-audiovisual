@@ -51,7 +51,9 @@ export const DEFAULT_PCT = { pre: 25, rod: 35, mon: 16, aca: 24 };
 // 1.4 · Entregas al límite (minutos del día): monh = hora del apoyo (21:00), self = entrega por su cuenta (08:00),
 // auto = pasa solo al administrador (12:00), fix = corregir cambios (17:00). El video final y la revisión vencen a las 23:59.
 // cli = días de apoyo propios de un cliente ({ "PerteneSer": 3 }).
-export const DEFAULT_RULES = { open: 15, punt: 10, tol: 45, pre: 1080, mon: 2, fin: 1, undo: 10, avr: 1080, avm: 24, take: 5, conf: 12, madr: 300, monh: 1260, self: 480, auto: 720, fix: 1020, cli: {} };
+export const DEFAULT_RULES = { open: 15, punt: 10, tol: 45, pre: 1080, mon: 2, fin: 1, undo: 10, avr: 1080, avm: 24, take: 5, conf: 12, madr: 300, monh: 1260, self: 480, auto: 720, fix: 1020, cli: {}, pmon: 720, pfin: 1080, prev: 1140, pfix: 1260 };
+// 1.5 · Socios sin apoyo (y el líder si hay alguno): montaje 12:00 (solo aviso), video final 18:00, revisión 19:00,
+// corrección 21:00; desde las 18:00 el otro lo toma directo hasta las 23:59.
 // Puntos de racha nuevos (1.3).
 export const PTS = { rescue: 3, claimFail: -4, noConfirm: -2, handoff: -3 };
 export const RULES = Object.assign({}, DEFAULT_RULES);
@@ -92,14 +94,37 @@ export function monDays(client) {
   const v = client && RULES.cli ? Number(RULES.cli[client]) : NaN;
   return v >= 2 ? v : Number(RULES.mon) || 2;
 }
+// 1.5 · Modo de edición de un video:
+// colab (lo edita un colaborador) · apoyo (socio con apoyo) · pareja (socio sin apoyo, o el líder si hay algún socio sin apoyo) · lider.
+// El apoyo queda fijado en el video cuando se graba (apoyo_fixed), así un cambio de etiqueta rige para lo que aún no se graba.
+export const isSocio = (m) => !!m && m.role === 'socio' && m.active !== false;
+export const apoyoOf = (video, owner) => video && video.apoyo_fixed != null ? !!video.apoyo_fixed : !!(owner && owner.apoyo);
+export const pairTeam = (ctx) => (ctx.members || []).some((m) => isSocio(m) && m.user_id && !m.apoyo);
+export function modeOf(video, ctx) {
+  if (jobOf(video, ctx)) return 'colab';
+  const owner = (ctx.members || []).find((m) => m.id === video.owner);
+  if (owner && owner.role === 'admin') return pairTeam(ctx) ? 'pareja' : 'lider';
+  return apoyoOf(video, owner) ? 'apoyo' : 'pareja';
+}
+// Quién puede tomar la edición de un video en modo pareja: el líder o un socio sin apoyo (nunca el dueño ni un socio con apoyo).
+export const canTakeEdit = (me, video) => !!me && me.id !== video.owner && (me.role === 'admin' || (me.role === 'socio' && !me.apoyo));
 export function deadlines(video, ownerMember, opts = {}) {
   const pub = video.publish_date;
   const collab = opts.collaborator;
   const eve = addDays(pub, -RULES.fin);
   const finalDue = collab ? at(addDays(pub, -1), '18:00') : at(eve, '23:59');
   let montajeDue = null, selfDue = null, autoDue = null, fixDue = null;
+  const mode = opts.mode || (collab ? 'colab' : apoyoOf(video, ownerMember) ? 'apoyo' : 'lider');
+  let ownDue = null, revDue = null;
   if (collab) montajeDue = at(addDays(pub, -3), '21:00');
-  else if (ownerMember && ownerMember.apoyo) {
+  else if (mode === 'pareja') {
+    montajeDue = at(eve, hm(RULES.pmon));
+    ownDue = at(eve, hm(RULES.pfin));
+    revDue = at(eve, hm(RULES.prev));
+    fixDue = at(eve, hm(RULES.pfix));
+    const pd = opts.rodaje ? preDueFor(opts.rodaje.starts_at) : (video.pre_due ? new Date(video.pre_due) : null);
+    return { preDue: pd, montajeDue, apoyoDue: null, selfDue: null, autoDue: null, fixDue, finalDue, ownDue, revDue, pair: true };
+  } else if (mode === 'apoyo') {
     // 1.4: con apoyo hasta N días antes a las 21:00 (o la fecha que se adelantó por un choque).
     montajeDue = video.apoyo_due ? new Date(video.apoyo_due) : at(addDays(pub, -monDays(opts.client)), hm(RULES.monh));
     selfDue = at(eve, hm(RULES.self));
@@ -110,6 +135,8 @@ export function deadlines(video, ownerMember, opts = {}) {
   return { preDue, montajeDue, apoyoDue: montajeDue, selfDue, autoDue, fixDue, finalDue };
 }
 const clientOf = (video, ctx) => { const p = (ctx.projects || []).find((x) => x.id === video.project_id); return p ? p.client : null; };
+// Plazos de un video con su modo de edición.
+export function dl(video, ctx) { const owner = (ctx.members || []).find((m) => m.id === video.owner); return deadlines(video, owner, { client: clientOf(video, ctx), mode: modeOf(video, ctx) }); }
 
 function taskOf(tasks, videoId, kind) {
   return tasks.find((t) => t.video_id === videoId && t.kind === kind && t.done_at && !t.void);
@@ -121,7 +148,8 @@ export function videoState(video, ctx, now = new Date()) {
   const { tasks, members } = ctx;
   const owner = members.find((m) => m.id === video.owner);
   const rodaje = rodajeOf(video, ctx);
-  const d = deadlines(video, owner, { rodaje, client: clientOf(video, ctx) });
+  const mode = modeOf(video, ctx);
+  const d = deadlines(video, owner, { rodaje, client: clientOf(video, ctx), mode });
   const g = taskOf(tasks, video.id, 'guion');
   const s = taskOf(tasks, video.id, 'storyboard');
   const r = taskOf(tasks, video.id, 'rodaje');
@@ -129,14 +157,16 @@ export function videoState(video, ctx, now = new Date()) {
   let ac = taskOf(tasks, video.id, 'acabado');
   const late = (t, due) => !!(t && due && new Date(t.done_at) > due);
   const post = postState(video, owner, d, mo, ac, ctx, now);
+  post.mode = mode;
   // Si el video pasó al administrador, lo que marcó el dueño ya no cuenta.
   const ownMo = post.handoff && mo && mo.done_by === video.owner ? mo : null;
   if (post.handoff) { if (mo && mo.done_by === video.owner) mo = null; if (ac && ac.done_by === video.owner) ac = null; }
+  // 1.5 · pareja: quien toma el video empieza de cero; lo del dueño ya no cuenta.
   // Entregado al cliente: final de apoyo hecho, entrega propia aprobada, o final normal.
   const delivered = !!ac && (!post.self || post.review === 'aprobada');
   // Quién tiene la entrega en sus manos (para "entrega vencida" y los puntos al reprogramar).
   const adm = (ctx.members || []).find((m) => m.role === 'admin' && m.active !== false);
-  const inCharge = post.colab ? post.job.member_id : (post.handoff || (post.apoyoPath && mo)) && adm ? adm.id : video.owner;
+  const inCharge = post.colab ? post.job.member_id : post.pair ? (post.handoff ? post.handoffTo : video.owner) : (post.handoff || (post.apoyoPath && mo)) && adm ? adm.id : video.owner;
   const overdue = !delivered && !!d.finalDue && now > d.finalDue && !!r;
   return {
     inCharge, overdue,
@@ -144,7 +174,7 @@ export function videoState(video, ctx, now = new Date()) {
     phase: post.phase,
     preLate: late(g, d.preDue) || late(s, d.preDue),
     montajeLate: post.apoyoPath ? false : late(mo, d.montajeDue) && !post.self,
-    finalLate: late(ac, d.finalDue),
+    finalLate: post.pair && ac && ac.done_by === video.owner ? late(ac, d.ownDue) : late(ac, d.finalDue),
     // Compatibilidad: "pasó al administrador" (antes 5.7).
     montajeMissed: post.handoff, reassigned: post.handoff || !!(mo && mo.done_by !== video.owner && !isCollabTask(mo, ctx) && owner && owner.apoyo),
     apoyo: !!(post.apoyoPath && ac && ac.done_by !== video.owner && !isCollabTask(ac, ctx)),
@@ -159,7 +189,8 @@ export function videoState(video, ctx, now = new Date()) {
 // aprobado · pasado (lo hace el administrador).
 export function reviewOf(ac, d, now = new Date()) {
   if (!ac || !ac.review) return null;
-  if (ac.review === 'pendiente' && d.finalDue && now > d.finalDue) return 'aprobada'; // no la revisó a tiempo: se aprueba sola
+  const rd = d.revDue && !ac.review_round ? d.revDue : d.finalDue; // pareja: la primera hasta las 19:00; la corrección hasta las 23:59
+  if (ac.review === 'pendiente' && rd && now > rd) return 'aprobada'; // no la revisó a tiempo: se aprueba sola
   return ac.review;
 }
 export const JOB_LIVE = ['invitado', 'activo', 'finalizado', 'cerrado'];
@@ -171,7 +202,8 @@ export function postState(video, owner, d, mo, ac, ctx, now = new Date()) {
   const out = { phase: 'normal', handoff: false, apoyoPath: false, self: false, review: null, handoffAt: null, handoffWhy: null, colab: false, job: null };
   const job = jobOf(video, ctx);
   if (job) { out.phase = 'colab'; out.colab = true; out.job = job; return out; }
-  if (!owner || !owner.apoyo || !d.apoyoDue) return out;
+  if (d.pair) return pairState(video, owner, d, mo, ac, ctx, now, out);
+  if (!owner || !apoyoOf(video, owner) || !d.apoyoDue) return out;
   // 1.4: si el video ya había pasado al administrador y luego se reprogramó, sigue siendo suyo.
   if (video.handoff && video.handoff.at) { out.handoff = true; out.phase = 'pasado'; out.handoffAt = new Date(video.handoff.at); out.handoffWhy = video.handoff.why || 'auto'; return out; }
   const ownMo = mo && mo.done_by === video.owner ? mo : null;
@@ -193,6 +225,34 @@ export function postState(video, owner, d, mo, ac, ctx, now = new Date()) {
   if (review) { out.phase = review === 'aprobada' ? 'aprobado' : review === 'pendiente' ? 'revision' : 'cambios'; return out; }
   out.phase = now <= d.apoyoDue ? 'abierto' : now <= d.selfDue ? 'solo' : 'riesgo';
   out.self = out.phase !== 'abierto';
+  return out;
+}
+
+// 1.5 · Edición entre socios sin apoyo (y los videos del líder cuando hay alguno).
+// Fases: p_mon (hasta las 12:00) · p_fin (hasta las 18:00) · p_tomar (desde las 18:00 se puede tomar) ·
+// revision · cambios · aprobado · entregado · pasado (lo tomó otro o pasó al líder).
+function pairState(video, owner, d, mo, ac, ctx, now, out) {
+  out.pair = true;
+  const adm = (ctx.members || []).find((m) => m.role === 'admin' && m.active !== false);
+  const hand = (at, why, to) => { out.handoff = true; out.phase = 'pasado'; out.handoffAt = at; out.handoffWhy = why; out.handoffTo = to; return out; };
+  if (video.handoff && video.handoff.at) return hand(new Date(video.handoff.at), video.handoff.why || 'auto', video.handoff.to || (adm && adm.id));
+  const claim = (ctx.claims || []).find((c) => c.video_id === video.id && c.kind === 'montaje' && (c.status || 'activa') === 'activa');
+  const otherMo = mo && mo.done_by !== video.owner && !isCollabTask(mo, ctx) ? mo : null;
+  if (otherMo) return hand(new Date(otherMo.done_at), 'tomado', otherMo.done_by);
+  if (claim) return hand(new Date(claim.created_at || now), 'tomado', claim.member_id);
+  const ownAc = ac && ac.done_by === video.owner ? ac : null;
+  const needsReview = !!(owner && owner.role !== 'admin');
+  if (ownAc && needsReview) {
+    const rv = reviewOf(ownAc, d, now);
+    out.review = rv; out.self = true;
+    if (rv === 'rechazada') return hand(new Date(ownAc.review_at || now), 'rechazo', adm && adm.id);
+    if (rv === 'cambios' && now > d.fixDue) return hand(d.fixDue, 'auto', adm && adm.id);
+    out.phase = rv === 'aprobada' ? 'aprobado' : rv === 'pendiente' ? 'revision' : 'cambios';
+    return out;
+  }
+  if (ownAc) { out.phase = 'entregado'; return out; }
+  out.self = needsReview;
+  out.phase = now <= d.montajeDue ? 'p_mon' : now <= d.ownDue ? 'p_fin' : 'p_tomar';
   return out;
 }
 
@@ -232,6 +292,11 @@ export function payouts(project, ctx, now = new Date()) {
       if (kind === 'acabado' && st.apoyo) to = v.owner;
       // 1.4: lo que marcó el dueño de un video que pasó al administrador no se paga.
       if (st.post.handoff && t.done_by === v.owner && (kind === 'montaje' || kind === 'acabado')) continue;
+      // 1.5 · pareja: montaje y final se pagan juntos, solo cuando el video se entrega (y se aprueba).
+      if ((kind === 'montaje' || kind === 'acabado') && st.post.pair && !st.delivered) {
+        if (kind === 'acabado' && t.done_by === v.owner) espera[v.owner] = (espera[v.owner] || 0) + R.montaje + R.acabado;
+        continue;
+      }
       // 1.4: "en espera" hasta que el final de apoyo esté hecho o la entrega propia esté aprobada.
       if ((kind === 'montaje' || kind === 'acabado') && t.done_by === v.owner && !st.delivered && (st.post.apoyoPath || st.post.self)) {
         if (kind === 'montaje') espera[v.owner] = (espera[v.owner] || 0) + R.montaje + R.acabado; // el video completo: montaje + final
@@ -241,7 +306,9 @@ export function payouts(project, ctx, now = new Date()) {
       const hire = t.hire_id ? (ctx.hires || []).find((h) => h.id === t.hire_id) : null;
       if (hire) {
         // Hecho por Guillermo: el % va a quien lo hizo con él; el resto sigue siendo del dueño del video.
-        const pct = Number(hire.pct || 80) / 100;
+        // 1.5: el 80/20 es solo para el socio con apoyo; cualquier otro que contrata cede el 100 %.
+        const hirer = (ctx.members || []).find((m) => m.id === hire.hired_by);
+        const pct = hirer && hirer.role === 'socio' && hirer.apoyo ? Number(hire.pct || 80) / 100 : 1;
         add(t.done_by, STAGE_OF[kind], value * pct);
         if (value * (1 - pct) > 1e-9) add(v.owner, STAGE_OF[kind], value * (1 - pct));
         guillermo[hire.hired_by] = guillermo[hire.hired_by] || { to: t.done_by, tasks: 0, amount: 0 };
@@ -267,9 +334,17 @@ export function payouts(project, ctx, now = new Date()) {
         }
       } else if (t.split) {
         // 1.3: grabado sin storyboard → su valor se reparte mitad y mitad; el centavo extra es del dueño del video.
-        const own = ceilCent(value / 2);
-        add(v.owner, STAGE_OF[kind], own);
-        add(t.split_with || other(ctx, v.owner), STAGE_OF[kind], value - own);
+        const ow = ctx.members.find((m) => m.id === v.owner);
+        const ps = (ctx.members || []).filter((m) => (m.role === 'admin' || m.role === 'socio') && m.active !== false);
+        if (ow && ow.role === 'socio' && apoyoOf(v, ow) || ps.length <= 2) {
+          const own = ceilCent(value / 2);
+          add(v.owner, STAGE_OF[kind], own);
+          add(t.split_with || other(ctx, v.owner), STAGE_OF[kind], value - own);
+        } else {
+          // 1.5: con socios sin apoyo, entre todos los socios del proyecto (el centavo extra al dueño).
+          const each = Math.floor(value / ps.length * 100) / 100;
+          ps.forEach((m) => add(m.id, STAGE_OF[kind], m.id === v.owner ? value - each * (ps.length - 1) : each));
+        }
       } else {
         add(to, STAGE_OF[kind], value);
       }
@@ -353,6 +428,13 @@ export function adminAbsent(event, ctx, now = new Date()) {
   const tol = Number(event.tolerance_min || 45);
   return now > new Date(new Date(event.starts_at).getTime() + tol * 60000) && !(a && a.arrived_at);
 }
+// 1.5: si cuando el socio marca "Llegué" el líder aún no llegó (o no irá), la llegada del socio vale sola.
+export function leaderAway(event, ctx, now = new Date()) {
+  const adm = (ctx.members || []).find((m) => m.role === 'admin' && m.active !== false);
+  if (!adm || adminAbsent(event, ctx, now)) return true;
+  const a = (ctx.attendance || []).find((x) => x.event_id === event.id && x.member_id === adm.id);
+  return !(a && a.arrived_at);
+}
 // Fin efectivo de una reunión: la solicitud o la finalización, o 6 horas después de empezar.
 export function meetingEnd(event) {
   const auto = new Date(new Date(event.starts_at).getTime() + 6 * 3600 * 1000);
@@ -422,7 +504,11 @@ export function streakEvents(memberId, ctx, now = new Date()) {
         ev.push({ at: t, pts: 1, why: `Punto de reunión · video ${v.num}` });
       }
     }
-    if (st.d.apoyoDue) {
+    if (st.post.pair) {
+      // 1.5: entrega a tiempo (18:00) +1; tarde −3; si te lo tomaron o pasó al líder −3.
+      if (st.post.handoff) ev.push({ at: st.post.handoffAt, pts: PTS.handoff, why: `Video ${v.num} pasó a otra persona` });
+      else if (st.ac && st.ac.done_by === memberId) ev.push({ at: new Date(st.ac.done_at), pts: st.finalLate ? PTS.handoff : 1, why: st.finalLate ? `Video ${v.num} entregado tarde` : `Video ${v.num} entregado a tiempo` });
+    } else if (st.d.apoyoDue) {
       // 1.4: montaje a tiempo para el apoyo +1; entrega propia aprobada 0; si pasó al administrador −3.
       if (st.post.handoff) ev.push({ at: st.post.handoffAt, pts: PTS.handoff, why: `Video ${v.num} pasó a otra persona` });
       else if (st.post.apoyoPath && st.mo && st.mo.done_by === memberId) ev.push({ at: new Date(st.mo.done_at), pts: 1, why: `Montaje del video ${v.num} a tiempo` });
@@ -487,7 +573,7 @@ export function deliveries(memberId, ctx, now = new Date()) {
     if (v.owner !== memberId) continue;
     const st = videoState(v, ctx, now);
     if (st.g && st.s && !st.g.hire_id && !st.s.hire_id) { total++; if (!st.preLate) onTime++; }
-    if (st.d.apoyoDue) {
+    if (st.d.apoyoDue || st.post.pair) {
       if (st.post.handoff) { total++; missed++; }
       else if (st.delivered) { total++; onTime++; }
     } else {
@@ -504,7 +590,7 @@ const PRE = { guion: 1, storyboard: 1 };
 // montaje que pasó al administrador (5.7) hasta el plazo del video final.
 export function takeLimit(video, kind, ctx) {
   if (PRE[kind]) { const r = rodajeOf(video, ctx); return r ? new Date(new Date(r.starts_at).getTime() - RULES.take * 3600 * 1000) : null; }
-  if (kind === 'montaje') { const owner = (ctx.members || []).find((m) => m.id === video.owner); return deadlines(video, owner, { client: clientOf(video, ctx) }).finalDue; }
+  if (kind === 'montaje') return dl(video, ctx).finalDue;
   return null;
 }
 // Compromiso vigente sobre una tarea (si el video se reprogramó, el compromiso anterior ya no cuenta).
@@ -564,6 +650,7 @@ export function canMark(video, kind, me, ctx, now = new Date(), opts = {}) {
     const cm = (ctx.members || []).find((m) => m.id === st.post.job.member_id);
     return { ok: false, colab: true, why: 'Lo edita ' + (cm ? String(cm.name).split(' ')[0] : 'el colaborador') };
   }
+  if ((kind === 'montaje' || kind === 'acabado') && st.post.pair) return canMarkPair(video, kind, me, ctx, now, st);
   if (kind === 'montaje') {
     if (!st.r) return { ok: false, why: 'Primero tiene que grabarse el video' };
     const P = st.post;
@@ -610,6 +697,31 @@ export function canMark(video, kind, me, ctx, now = new Date(), opts = {}) {
   return { ok: false, why: '' };
 }
 
+// 1.5 · Qué se puede marcar en la edición entre socios sin apoyo.
+function canMarkPair(video, kind, me, ctx, now, st) {
+  const P = st.post;
+  const isOwner = video.owner === me.id;
+  const owner = st.owner || {};
+  const nameOf = (id) => { const m = (ctx.members || []).find((x) => x.id === id); return m ? String(m.name).split(' ')[0] : 'tu compañero'; };
+  if (!st.r) return { ok: false, why: 'Primero tiene que grabarse el video' };
+  if (P.handoff) {
+    if (isOwner) return { ok: false, gone: true, why: 'Lo hará ' + nameOf(P.handoffTo) };
+    if (P.handoffTo !== me.id) return { ok: false, why: 'Lo hará ' + nameOf(P.handoffTo) };
+    if (kind === 'acabado' && !(st.mo && st.mo.done_by === me.id)) return { ok: false, why: 'Primero el montaje' };
+    return { ok: true, take: true, claimed: true, limit: st.d.finalDue, late: now > st.d.finalDue };
+  }
+  if (isOwner) {
+    if (kind === 'montaje') return { ok: true, due: st.d.montajeDue, late: now > st.d.ownDue };
+    if (!st.mo) return { ok: false, why: 'Primero tiene que estar el montaje' };
+    if (P.phase === 'revision') return { ok: false, review: true, why: 'Entregado · ' + adminName(ctx) + ' revisa tu video' };
+    if (P.phase === 'cambios') return { ok: true, fix: true, due: st.d.fixDue };
+    return { ok: true, self: P.self, due: st.d.ownDue, late: now > st.d.ownDue };
+  }
+  if (kind === 'acabado' && P.phase === 'revision' && me.role === 'admin') return { ok: false, toReview: true, why: 'Revisa la entrega' };
+  if (P.phase === 'p_tomar' && canTakeEdit(me, video)) return { ok: false, claim: true, limit: st.d.finalDue, why: 'Puedes tomar el video' };
+  return { ok: false, why: `Es de ${owner.name}` };
+}
+
 const adminName = (ctx) => { const a = (ctx.members || []).find((m) => m.role === 'admin' && m.active !== false); return a ? String(a.name).split(' ')[0] : 'el administrador'; };
 
 // 1.4 · Deshacer: 10 minutos, y nunca después del plazo de esa acción. El administrador puede desmarcar tareas siempre.
@@ -617,10 +729,10 @@ export function undoUntil(task, ctx) {
   const v = (ctx.videos || []).find((x) => x.id === task.video_id);
   const ten = new Date(new Date(task.done_at).getTime() + RULES.undo * 60000);
   if (!v) return ten;
-  const owner = (ctx.members || []).find((m) => m.id === v.owner);
-  const d = deadlines(v, owner, { client: clientOf(v, ctx) });
+  const d = dl(v, ctx);
   let lim = null;
-  if (task.kind === 'montaje' && task.done_by === v.owner && d.apoyoDue) lim = new Date(task.done_at) <= d.apoyoDue ? d.apoyoDue : d.autoDue;
+  if (d.pair && task.done_by === v.owner && (task.kind === 'montaje' || task.kind === 'acabado')) lim = task.kind === 'acabado' ? (task.review_round ? d.fixDue : d.ownDue) : d.finalDue;
+  else if (task.kind === 'montaje' && task.done_by === v.owner && d.apoyoDue) lim = new Date(task.done_at) <= d.apoyoDue ? d.apoyoDue : d.autoDue;
   else if (task.kind === 'acabado' && task.done_by === v.owner && d.apoyoDue) lim = task.review_round ? d.fixDue : d.autoDue;
   else if (task.kind === 'montaje' || task.kind === 'acabado') lim = d.finalDue;
   else if (task.kind === 'rodaje') lim = at(addDays(limaDate(task.done_at), 1), '00:00');
@@ -645,17 +757,16 @@ export function canUndoReview(task, me, ctx, now = new Date()) {
   if (!task || !task.review || task.review === 'pendiente' || !task.review_at || task.review_by !== me.id) return false;
   if (task.redelivered_at && new Date(task.redelivered_at) > new Date(task.review_at)) return false;
   const v = (ctx.videos || []).find((x) => x.id === task.video_id);
-  const owner = v && (ctx.members || []).find((m) => m.id === v.owner);
-  const d = v ? deadlines(v, owner, { client: clientOf(v, ctx) }) : {};
+  const d = v ? dl(v, ctx) : {};
   const ten = new Date(new Date(task.review_at).getTime() + RULES.undo * 60000);
-  return now <= ten && (!d.finalDue || now <= d.finalDue);
+  const lim = d.revDue || d.finalDue;
+  return now <= ten && (!lim || now <= lim || !!(d.pair && task.review === 'cambios' && now <= d.fixDue));
 }
 // La entrega corregida: 10 min y antes de las 17:00, si aún no la revisó.
 export function canUndoRedeliver(task, me, ctx, now = new Date()) {
   if (!task || task.review !== 'pendiente' || !task.redelivered_at || task.done_by !== me.id) return false;
   const v = (ctx.videos || []).find((x) => x.id === task.video_id);
-  const owner = v && (ctx.members || []).find((m) => m.id === v.owner);
-  const d = v ? deadlines(v, owner, { client: clientOf(v, ctx) }) : {};
+  const d = v ? dl(v, ctx) : {};
   return now <= new Date(new Date(task.redelivered_at).getTime() + RULES.undo * 60000) && (!d.fixDue || now <= d.fixDue);
 }
 // Llegada y otras decisiones con hora propia: 10 min.
