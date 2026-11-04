@@ -2299,3 +2299,400 @@ begin
     raise exception 'Las horas sin apoyo tienen que ir en orden: montaje, video final, revisión, corrección';
   end if;
 end $$;
+
+
+-- =====================================================================
+-- Versión 1.6: fechas de la semana (inicio del servicio, 1 día mínimo, sin 2 rodajes el mismo día),
+-- una reunión para varios rodajes, mover rodaje y reunión juntos, editar la fecha de inicio
+-- y correcciones del historial que se aplican de verdad (correct_record).
+-- =====================================================================
+alter table events add column if not exists rodaje_ids uuid[];
+update events set rodaje_ids = array[rodaje_id] where kind = 'reunion' and rodaje_id is not null and rodaje_ids is null;
+
+-- ---------- Historial: lo que cambia una corrección queda marcado con su número ----------
+create or replace function log_change() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  r jsonb := to_jsonb(coalesce(new, old));
+  t uuid := (r->>'team_id')::uuid;
+  p uuid := case when tg_table_name = 'projects' then (r->>'id')::uuid else (r->>'project_id')::uuid end;
+  fx text := nullif(current_setting('ra.fix', true), '');
+begin
+  if tg_table_name = 'attendance' then
+    select project_id into p from events where id = (r->>'event_id')::uuid;
+  end if;
+  insert into log (team_id, project_id, actor, type, data)
+  values (t, p, my_member(t), tg_table_name || '.' || lower(tg_op),
+          jsonb_build_object('new', case when tg_op <> 'DELETE' then to_jsonb(new) end,
+                             'old', case when tg_op <> 'INSERT' then to_jsonb(old) end)
+          || case when fx is null then '{}'::jsonb else jsonb_build_object('fix', fx::bigint) end);
+  return coalesce(new, old);
+end $$;
+
+-- ---------- Reglas de fechas (iguales a checkWeek / eventProblem en rules.js) ----------
+create or replace function meeting_rods(m events) returns uuid[] language sql immutable as $$
+  select case when coalesce(array_length(m.rodaje_ids, 1), 0) > 0 then m.rodaje_ids when m.rodaje_id is null then '{}'::uuid[] else array[m.rodaje_id] end
+$$;
+-- Reunión "viva": activa, sin finalizar y sin cerrarse sola (6 h).
+create or replace function live_meeting(m events) returns boolean language sql stable as $$
+  select m.kind = 'reunion' and m.status = 'activo' and m.ended_at is null and m.starts_at + interval '6 hours' > now()
+$$;
+
+create or replace function meeting_problem(mid uuid) returns text
+language plpgsql stable security definer set search_path = public as $$
+declare m events; f events; st date; d date;
+begin
+  select * into m from events where id = mid;
+  if m.id is null or not live_meeting(m) then return null; end if;
+  select start_date into st from projects where id = m.project_id;
+  d := lima_day(m.starts_at);
+  select * into f from events where id = any(meeting_rods(m)) and kind = 'rodaje' and status = 'activo' and project_id = m.project_id order by starts_at limit 1;
+  if f.id is null then return 'Primero agenda el rodaje'; end if;
+  if d < st then return 'La reunión no puede ser antes del inicio del servicio (' || to_char(st, 'DD/MM') || ')'; end if;
+  if d >= lima_day(f.starts_at) then return 'La reunión tiene que ser al menos 1 día antes del rodaje'; end if;
+  if m.starts_at >= lima_at(lima_day(f.starts_at) - 1, '00:00') + make_interval(mins => rule_int(m.team_id, 'pre', 1080)) then
+    return 'La reunión tiene que ser antes del plazo de preproducción (día antes del rodaje)';
+  end if;
+  if exists (select 1 from events r where r.project_id = m.project_id and r.kind = 'rodaje' and r.status = 'activo' and lima_day(r.starts_at) = d) then
+    return 'Ese día hay rodaje: la reunión va otro día';
+  end if;
+  if exists (select 1 from events o where o.id <> m.id and o.project_id = m.project_id and live_meeting(o) and meeting_rods(o) && meeting_rods(m)) then
+    return 'Ese rodaje ya tiene una reunión sin finalizar';
+  end if;
+  return null;
+end $$;
+
+create or replace function rodaje_problem(rid uuid) returns text
+language plpgsql stable security definer set search_path = public as $$
+declare r events; st date; d date; m events; pr text;
+begin
+  select * into r from events where id = rid;
+  if r.id is null or r.status <> 'activo' or r.kind <> 'rodaje' then return null; end if;
+  select start_date into st from projects where id = r.project_id;
+  d := lima_day(r.starts_at);
+  if d <= st then return 'El rodaje tiene que ser al menos 1 día después del inicio del servicio (' || to_char(st, 'DD/MM') || ')'; end if;
+  if exists (select 1 from events o where o.id <> r.id and o.project_id = r.project_id and o.kind = 'rodaje' and o.status = 'activo' and lima_day(o.starts_at) = d) then
+    return 'No se pueden programar dos rodajes el mismo día';
+  end if;
+  if exists (select 1 from events o where o.project_id = r.project_id and live_meeting(o) and lima_day(o.starts_at) = d) then
+    return 'Ese día hay una reunión: el rodaje va otro día';
+  end if;
+  for m in select * from events o where o.project_id = r.project_id and live_meeting(o) and r.id = any(meeting_rods(o)) loop
+    pr := meeting_problem(m.id);
+    if pr is not null then return pr; end if;
+  end loop;
+  return null;
+end $$;
+
+-- Se revisa al terminar cada operación (así se pueden mover rodaje y reunión juntos).
+create or replace function check_event_dates() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare e events; pr text;
+begin
+  select * into e from events where id = new.id;
+  if e.id is null or e.status <> 'activo' then return null; end if;
+  if tg_op = 'UPDATE' and e.starts_at is not distinct from old.starts_at and e.rodaje_ids is not distinct from old.rodaje_ids
+     and e.status is not distinct from old.status and e.ended_at is not distinct from old.ended_at then return null; end if;
+  pr := case when e.kind = 'rodaje' then rodaje_problem(e.id) else meeting_problem(e.id) end;
+  if pr is not null then raise exception '%', pr; end if;
+  return null;
+end $$;
+drop trigger if exists events_dates on events;
+create constraint trigger events_dates after insert or update on events deferrable initially deferred for each row execute function check_event_dates();
+
+-- ---------- Reuniones y rodajes (1.6): una reunión para varios rodajes ----------
+create or replace function guard_event() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare me uuid := my_member(new.team_id); mrole text; undo interval := make_interval(mins => rule_int(new.team_id, 'undo', 10));
+begin
+  if tg_op = 'UPDATE' and coalesce(current_setting('ra.fix', true), '') <> '' then return new; end if;  -- corrección del líder
+  select role into mrole from members where id = me;
+  if new.kind = 'reunion' and (tg_op = 'INSERT' or new.rodaje_ids is distinct from old.rodaje_ids or new.rodaje_id is distinct from old.rodaje_id) then
+    if coalesce(array_length(new.rodaje_ids, 1), 0) = 0 then new.rodaje_ids := case when new.rodaje_id is null then null else array[new.rodaje_id] end; end if;
+    if tg_op = 'INSERT' and new.rodaje_ids is null then raise exception 'Primero agenda el rodaje'; end if;
+    if new.rodaje_ids is not null then
+      new.rodaje_id := (select id from events where id = any(new.rodaje_ids) and kind = 'rodaje' order by (status = 'activo') desc, starts_at limit 1);
+    end if;
+  end if;
+  if tg_op = 'INSERT' then
+    new.status := 'activo'; new.ended_at := null; new.end_requested_at := null; new.ended_set_at := null; new.ended_by := null; new.canceled_at := null;
+    if new.kind = 'reunion' and new.rodaje_id is null then raise exception 'El rodaje no existe o fue cancelado'; end if;
+    return new;
+  end if;
+  if new.end_requested_at is distinct from old.end_requested_at and new.end_requested_at is not null then
+    new.end_requested_at := now(); new.end_requested_by := me;
+  end if;
+  if new.ended_at is distinct from old.ended_at and new.ended_at is not null and old.ended_at is null then
+    if mrole <> 'admin' and not admin_absent(new.id) then raise exception 'La reunión la finaliza el líder'; end if;
+    new.ended_at := coalesce(old.end_requested_at, new.end_requested_at, now());
+    new.ended_set_at := now(); new.ended_by := me;
+  end if;
+  if old.ended_at is not null and new.ended_at is null then
+    if old.ended_by is distinct from me or now() > coalesce(old.ended_set_at, old.ended_at) + undo then raise exception 'Solo se deshace en los primeros 10 minutos'; end if;
+    new.ended_set_at := null; new.ended_by := null;
+  end if;
+  if new.status is distinct from old.status then
+    if old.status = 'cancelado' and new.status = 'activo' then
+      if mrole <> 'admin' or old.canceled_at is null or now() > old.canceled_at + undo then raise exception 'Solo se deshace en los primeros 10 minutos'; end if;
+      new.canceled_at := null; new.cancel_note := null;
+    else
+      if new.status = 'cancelado' and mrole <> 'admin' then raise exception 'Solo el líder cancela'; end if;
+      if old.status <> 'activo' then raise exception 'Ya no está activo'; end if;
+      if new.status = 'cancelado' then new.canceled_at := now(); end if;
+    end if;
+  end if;
+  if new.starts_at is distinct from old.starts_at then
+    if exists (select 1 from attendance where event_id = new.id and (arrived_at is not null or claimed_at is not null)) then
+      raise exception 'Ya hay llegadas registradas: reprograma en vez de cambiar la hora';
+    end if;
+    if new.kind = 'reunion' and old.ended_at is not null then raise exception 'La reunión ya se finalizó: no se mueve'; end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists events_guard on events;
+create trigger events_guard before insert or update on events for each row execute function guard_event();
+
+-- Programar la semana de una vez: rodajes y reuniones (cada reunión dice qué rodajes prepara:
+-- un número = rodaje nuevo de esta misma llamada; un id = rodaje que ya existe).
+create or replace function plan_week(p uuid, rods jsonb, meets jsonb default '[]') returns uuid[]
+language plpgsql security definer set search_path = public as $$
+declare pr projects; ids uuid[] := '{}'; x jsonb; nid uuid; rr uuid[]; el jsonb; tol int;
+begin
+  select * into pr from projects where id = p;
+  if pr.id is null or not is_partner(pr.team_id) then raise exception 'Sin permiso'; end if;
+  if pr.status <> 'abierto' then raise exception 'El proyecto no está abierto'; end if;
+  tol := rule_int(pr.team_id, 'tol', 45);
+  for x in select * from jsonb_array_elements(coalesce(rods, '[]')) loop
+    if exists (select 1 from jsonb_array_elements_text(coalesce(x->'videos', '[]')) v where not exists (select 1 from videos where id = v::uuid and project_id = p)) then
+      raise exception 'Algún video no es de este proyecto';
+    end if;
+    insert into events (team_id, project_id, kind, starts_at, tolerance_min, video_ids)
+    values (pr.team_id, p, 'rodaje', (x->>'at')::timestamptz, tol,
+            coalesce((select array_agg(v::uuid) from jsonb_array_elements_text(coalesce(x->'videos', '[]')) v), '{}')) returning id into nid;
+    ids := ids || nid;
+  end loop;
+  for x in select * from jsonb_array_elements(coalesce(meets, '[]')) loop
+    rr := '{}';
+    for el in select * from jsonb_array_elements(x->'rods') loop
+      if jsonb_typeof(el) = 'number' then rr := rr || ids[(el::text)::int + 1];
+      else
+        if not exists (select 1 from events where id = (el #>> '{}')::uuid and project_id = p and kind = 'rodaje' and status = 'activo') then raise exception 'El rodaje no existe o fue cancelado'; end if;
+        rr := rr || (el #>> '{}')::uuid;
+      end if;
+    end loop;
+    if coalesce(array_length(rr, 1), 0) = 0 then raise exception 'Elige qué rodajes prepara la reunión'; end if;
+    insert into events (team_id, project_id, kind, starts_at, tolerance_min, video_ids, rodaje_ids)
+    values (pr.team_id, p, 'reunion', (x->>'at')::timestamptz, tol,
+            coalesce((select array_agg(v) from (select distinct unnest(video_ids) v from events where id = any(rr)) q), '{}'), rr);
+  end loop;
+  set constraints events_dates immediate;
+  return ids;
+end $$;
+
+-- Cambiar fecha u hora; si es un rodaje con reunión, las dos juntas.
+create or replace function move_event(e uuid, new_at timestamptz, m uuid default null, m_at timestamptz default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare ev events; mt events;
+begin
+  select * into ev from events where id = e;
+  if ev.id is null or not is_partner(ev.team_id) then raise exception 'Sin permiso'; end if;
+  if ev.status <> 'activo' then raise exception 'Ya no está activo'; end if;
+  update events set starts_at = new_at where id = e and starts_at is distinct from new_at;
+  if m is not null then
+    select * into mt from events where id = m;
+    if mt.id is null or mt.kind <> 'reunion' or not (e = any(meeting_rods(mt))) then raise exception 'Esa reunión no es de este rodaje'; end if;
+    update events set starts_at = m_at where id = m and starts_at is distinct from m_at;
+  end if;
+  set constraints events_dates immediate;
+end $$;
+
+-- Reprogramar el rodaje completo: rodaje nuevo con los mismos videos; sus reuniones apuntan al nuevo.
+create or replace function reprogram_day(e uuid, new_at timestamptz, nota text default null) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare ev events; nid uuid;
+begin
+  select * into ev from events where id = e;
+  if ev.id is null or not is_partner(ev.team_id) then raise exception 'Sin permiso'; end if;
+  if ev.kind <> 'rodaje' or ev.status <> 'activo' then raise exception 'Ese rodaje ya no está activo'; end if;
+  update events set status = 'reprogramado', cancel_note = nota where id = e;
+  insert into events (team_id, project_id, kind, starts_at, tolerance_min, video_ids, note)
+  values (ev.team_id, ev.project_id, 'rodaje', new_at, ev.tolerance_min, ev.video_ids, 'Reprogramado') returning id into nid;
+  update events set replaced_by = nid where id = e;
+  update events set rodaje_ids = array_replace(meeting_rods(events), e, nid) where kind = 'reunion' and e = any(meeting_rods(events));
+  set constraints events_dates immediate;
+  return nid;
+end $$;
+
+-- ---------- Fecha de inicio del servicio: solo el líder, sin dejar nada antes ----------
+create or replace function guard_project() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.start_date is distinct from old.start_date then
+    if not is_admin(new.team_id) then raise exception 'La fecha de inicio la cambia el líder'; end if;
+    if exists (select 1 from events where project_id = new.id and status = 'activo' and kind = 'rodaje' and lima_day(starts_at) <= new.start_date) then
+      raise exception 'Hay un rodaje que quedaría antes de la nueva fecha de inicio (el rodaje va al menos 1 día después)';
+    end if;
+    if exists (select 1 from events where project_id = new.id and status = 'activo' and kind = 'reunion' and lima_day(starts_at) < new.start_date) then
+      raise exception 'Hay una reunión que quedaría antes de la nueva fecha de inicio';
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists projects_guard on projects;
+create trigger projects_guard before update on projects for each row execute function guard_project();
+
+-- ---------- Asistencia: igual que la 1.5, más la corrección del líder ----------
+create or replace function guard_attendance() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare me uuid := my_member(new.team_id); mrole text; ev events; undo interval := make_interval(mins => rule_int(new.team_id, 'undo', 10));
+begin
+  if coalesce(current_setting('ra.fix', true), '') <> '' then return new; end if;  -- 1.6: corrección del líder (correct_record)
+  select role into mrole from members where id = me;
+  select * into ev from events where id = new.event_id;
+  if new.rsvp is distinct from (case when tg_op = 'INSERT' then null else old.rsvp end) then
+    if new.member_id <> me then raise exception 'Solo puedes confirmar tu propia asistencia'; end if;
+    if now() > confirm_due(ev.id) then raise exception 'Venció el plazo para confirmar'; end if;
+    new.rsvp_at := now();
+  end if;
+  if tg_op = 'UPDATE' and old.arrived_at is not null and new.arrived_at is null then
+    if new.member_id <> me and not (mrole = 'admin' and old.confirmed_by = me and now() <= coalesce(old.confirmed_at, old.arrived_at) + undo) then
+      raise exception 'Solo se deshace en los primeros 10 minutos';
+    end if;
+    if new.member_id = me and now() > coalesce(old.claimed_at, old.arrived_at) + undo then raise exception 'Solo se deshace en los primeros 10 minutos'; end if;
+    new.confirmed_by := null; new.confirmed_at := null;
+  end if;
+  if tg_op = 'UPDATE' and old.claimed_at is not null and new.claimed_at is null then
+    if new.member_id <> me or now() > old.claimed_at + undo then raise exception 'Solo se deshace en los primeros 10 minutos'; end if;
+    if new.arrived_at is not null and new.member_id <> me then raise exception 'Primero deshaz la confirmación'; end if;
+    new.arrived_at := null;
+  end if;
+  if tg_op = 'UPDATE' and (old.notice->>'decision') is not null and (new.notice is not null and (new.notice->>'decision') is null) then
+    if new.member_id = me or now() > (old.notice->>'decided_at')::timestamptz + undo then raise exception 'La respuesta solo se deshace en los primeros 10 minutos'; end if;
+  end if;
+  if new.claimed_at is not null and (tg_op = 'INSERT' or old.claimed_at is distinct from new.claimed_at) then
+    if new.member_id <> me then raise exception 'Solo puedes registrar tu propia llegada'; end if;
+    if now() < ev.starts_at - make_interval(mins => rule_int(new.team_id, 'open', 15)) then raise exception 'El registro se abre 15 minutos antes'; end if;
+    new.claimed_at := now();
+    if mrole = 'admin' or leader_away(new.event_id) then new.arrived_at := new.claimed_at; end if;
+  end if;
+  if new.arrived_at is not null and (tg_op = 'INSERT' or new.arrived_at is distinct from old.arrived_at) then
+    if mrole = 'admin' and new.member_id <> me then
+      if new.claimed_at is null or new.arrived_at is distinct from new.claimed_at then new.arrived_at := now(); end if;
+      new.confirmed_by := me; new.confirmed_at := now();
+    elsif new.member_id = me and (mrole = 'admin' or leader_away(new.event_id)) then
+      new.arrived_at := coalesce(new.claimed_at, now());
+    else
+      raise exception 'Tu llegada la confirma el líder';
+    end if;
+  end if;
+  if new.notice ? 'sent_at' and (new.notice->>'sent_at') is not null
+     and (tg_op = 'INSERT' or (old.notice->>'sent_at') is distinct from (new.notice->>'sent_at')) then
+    if new.member_id <> me then raise exception 'Solo puedes enviar tu propio aviso'; end if;
+    new.notice := jsonb_set(new.notice, '{sent_at}', to_jsonb(now()));
+  end if;
+  if tg_op = 'UPDATE' and (old.notice->>'sent_at') is not null and (new.notice is null or (new.notice->>'sent_at') is null) then
+    if new.member_id <> me then raise exception 'Solo puedes cambiar tu propio aviso'; end if;
+    if now() > confirm_due(ev.id) then raise exception 'Venció el plazo para cambiar tu respuesta'; end if;
+  end if;
+  if tg_op = 'UPDATE' and (new.notice->>'decision') is not null and (old.notice->>'decision') is distinct from (new.notice->>'decision') then
+    if new.member_id = me then raise exception 'El aviso lo responde tu compañero'; end if;
+    new.notice := jsonb_set(new.notice, '{decided_at}', to_jsonb(now()));
+  end if;
+  return new;
+end $$;
+
+
+-- ---------- Corregir un registro (6.1): lo aplica el líder, revisa la cadena y queda en el historial ----------
+-- Tipos: unmark (desmarcar) · who (cambiar quién lo hizo) · video (cambiar a qué video) · time (cambiar la hora)
+--        arrival (cambiar la hora de llegada, o null = no llegó) · rsvp (quitar la confirmación) · reopen (reabrir la reunión)
+create or replace function later_step(t tasks) returns text
+language sql stable security definer set search_path = public as $$
+  select case
+    when t.kind in ('guion', 'storyboard') and exists (select 1 from tasks x where x.video_id = t.video_id and x.kind = 'rodaje') then 'el video ya se grabó'
+    when t.kind = 'rodaje' and exists (select 1 from tasks x where x.video_id = t.video_id and x.kind in ('montaje', 'acabado') and not x.void) then 'el video ya tiene edición'
+    when t.kind = 'montaje' and exists (select 1 from tasks x where x.video_id = t.video_id and x.kind = 'acabado' and not x.void) then 'el video final ya se entregó'
+    else null end
+$$;
+
+create or replace function correct_record(l bigint, tipo text, args jsonb default '{}', motivo text default null, req uuid default null) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare lg log; me uuid; pr projects; t tasks; a attendance; ev events; tv videos; who uuid; nl bigint; pre text; rf events;
+begin
+  select * into lg from log where id = l;
+  if lg.id is null or not is_admin(lg.team_id) then raise exception 'Solo el líder corrige'; end if;
+  me := my_member(lg.team_id);
+  if coalesce(trim(motivo), '') = '' then raise exception 'Escribe el motivo'; end if;
+  if exists (select 1 from log where team_id = lg.team_id and type = 'correction' and (data->>'ref')::bigint = l) then raise exception 'Ese registro ya se corrigió'; end if;
+  select * into pr from projects where id = lg.project_id;
+  if pr.settlement ? 'paid_at' and (pr.settlement->>'paid_at') is not null then
+    raise exception 'El proyecto ya se pagó: anota el ajuste como nota en el siguiente proyecto';
+  end if;
+  perform set_config('ra.fix', l::text, true);
+  if tipo in ('unmark', 'who', 'video', 'time') then
+    if lg.type <> 'tasks.insert' then raise exception 'Ese registro no es una tarea'; end if;
+    select * into t from tasks where id = (lg.data->'new'->>'id')::uuid;
+    if t.id is null then raise exception 'Esa tarea ya no existe (se desmarcó o se corrigió)'; end if;
+    if t.void then raise exception 'Esa tarea ya no cuenta'; end if;
+    if t.split then raise exception 'El storyboard repartido va con el rodaje: corrige el rodaje'; end if;
+    who := t.done_by;
+    if tipo = 'unmark' then
+      pre := later_step(t);
+      if pre is not null then raise exception 'No se puede desmarcar: %. Cambia quién lo hizo o la hora.', pre; end if;
+      delete from tasks where id = t.id;
+    elsif tipo = 'who' then
+      if t.hire_id is not null then raise exception 'Lo hizo Guillermo: corrige la contratación'; end if;
+      if not exists (select 1 from members where id = (args->>'member')::uuid and team_id = lg.team_id and active and role in ('admin', 'socio')) then raise exception 'Elige a un socio'; end if;
+      if (args->>'member')::uuid = t.done_by then raise exception 'Ya figura a su nombre'; end if;
+      update tasks set done_by = (args->>'member')::uuid where id = t.id;
+    elsif tipo = 'video' then
+      if t.kind = 'rodaje' then raise exception 'El rodaje no se cambia de video: desmárcalo'; end if;
+      pre := later_step(t);
+      if pre is not null then raise exception 'No se puede cambiar de video: %', pre; end if;
+      select * into tv from videos where id = (args->>'video')::uuid and project_id = t.project_id;
+      if tv.id is null or tv.id = t.video_id then raise exception 'Elige otro video del proyecto'; end if;
+      if exists (select 1 from tasks where video_id = tv.id and kind = t.kind and not void) then raise exception 'Ese video ya tiene % marcado', t.kind; end if;
+      if t.kind = 'montaje' and not exists (select 1 from tasks where video_id = tv.id and kind = 'rodaje') then raise exception 'Ese video aún no se graba'; end if;
+      if t.kind = 'acabado' and not exists (select 1 from tasks where video_id = tv.id and kind = 'montaje' and not void) then raise exception 'Ese video aún no tiene montaje'; end if;
+      update tasks set video_id = tv.id where id = t.id;
+    else
+      if (args->>'at') is null or (args->>'at')::timestamptz > now() then raise exception 'Elige una hora que ya pasó'; end if;
+      update tasks set done_at = (args->>'at')::timestamptz where id = t.id;
+    end if;
+  elsif tipo in ('arrival', 'rsvp') then
+    if lg.type not like 'attendance.%' then raise exception 'Ese registro no es de asistencia'; end if;
+    select * into a from attendance where id = (lg.data->'new'->>'id')::uuid;
+    if a.id is null then raise exception 'Ese registro ya no existe'; end if;
+    who := a.member_id;
+    if tipo = 'rsvp' then
+      if a.rsvp is null then raise exception 'No hay confirmación que quitar'; end if;
+      update attendance set rsvp = null, rsvp_at = null where id = a.id;
+    elsif (args->>'at') is null then
+      update attendance set arrived_at = null, claimed_at = null, confirmed_by = null, confirmed_at = null where id = a.id;
+    else
+      if (args->>'at')::timestamptz > now() then raise exception 'Elige una hora que ya pasó'; end if;
+      update attendance set arrived_at = (args->>'at')::timestamptz, claimed_at = coalesce(claimed_at, (args->>'at')::timestamptz), confirmed_by = me, confirmed_at = now() where id = a.id;
+    end if;
+  elsif tipo = 'reopen' then
+    if lg.type <> 'events.update' then raise exception 'Ese registro no es una reunión'; end if;
+    select * into ev from events where id = (lg.data->'new'->>'id')::uuid;
+    if ev.id is null or ev.kind <> 'reunion' or ev.ended_at is null then raise exception 'Esa reunión no está finalizada'; end if;
+    if ev.starts_at + interval '6 hours' <= now() then raise exception 'La reunión ya se cerró sola (6 horas después de empezar)'; end if;
+    select * into rf from events where id = any(meeting_rods(ev)) and status = 'activo' order by starts_at limit 1;
+    if rf.id is null or rf.starts_at <= now() then raise exception 'Su rodaje ya pasó'; end if;
+    update events set ended_at = null, ended_set_at = null, ended_by = null, end_requested_at = null, end_requested_by = null where id = ev.id;
+    set constraints events_dates immediate;
+  else
+    raise exception 'Tipo de corrección desconocido';
+  end if;
+  if pr.settlement ? 'sent_at' and (pr.settlement->>'sent_at') is not null then
+    update projects set settlement = (settlement - 'sent_at' - 'confirmed_at' - 'amounts') || jsonb_build_object('reopened_at', now(), 'reopen_note', motivo) where id = pr.id;
+  end if;
+  perform set_config('ra.fix', '', true);
+  insert into log (team_id, project_id, actor, type, data)
+  values (lg.team_id, lg.project_id, me, 'correction', jsonb_build_object('ref', l, 'kind', tipo, 'args', args, 'motivo', motivo, 'member', who, 'text', coalesce(args->>'text', ''), 'req', req))
+  returning id into nl;
+  if req is not null then update corrections set status = 'aprobada', decided_by = me, decided_at = now() where id = req and status = 'pendiente'; end if;
+  return nl;
+end $$;
+
+grant execute on function plan_week, move_event, reprogram_day, correct_record, meeting_problem, rodaje_problem to authenticated;

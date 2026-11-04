@@ -786,3 +786,132 @@ export function band(due, now = new Date()) {
   if (d <= addDays(today, 2)) return 1;
   return 2;
 }
+
+// ================= 1.6 · Fechas de la semana =================
+// Días entre dos fechas 'YYYY-MM-DD' (b − a).
+export const daysBetween = (a, b) => Math.round((Date.parse(b + 'T12:00:00Z') - Date.parse(a + 'T12:00:00Z')) / 864e5);
+export const MSG_ONE_DAY = 'Con un solo día, la preproducción se puede entregar, pero no con la calidad que merece.';
+// Rodajes de una reunión (1.6: una reunión puede preparar varios rodajes).
+export const meetRods = (m) => (m && m.rodaje_ids && m.rodaje_ids.length ? m.rodaje_ids : m && m.rodaje_id ? [m.rodaje_id] : []);
+export const meetHas = (m, rodId) => meetRods(m).indexOf(rodId) !== -1;
+// Revisa una semana antes de guardarla, con las mismas reglas que la base (rodajeProblem / meetingProblem).
+// rodajes [{date, time, id?}] · meetings [{date, time, rods: [índice del rodaje nuevo o id de uno que ya existe], id?}]
+// events: los del proyecto (los que se están moviendo se reemplazan por id). Devuelve
+// { errors: {r0: '…', m0: '…'}, warns: {m0: '…'}, info: {m0: '…'}, join: bool, ok }.
+export function checkWeek({ project, events = [], rodajes = [], meetings = [], now = new Date() }) {
+  const errors = {}, warns = {}, info = {};
+  const today = limaDate(now);
+  const pid = project ? project.id : 'p';
+  const rid = (r, i) => r.id || 'nuevo-r' + i;
+  const mine = new Set(rodajes.map((r) => r.id).concat(meetings.map((m) => m.id)).filter(Boolean));
+  const evs = events.filter((e) => !mine.has(e.id));
+  rodajes.forEach((r, i) => { if (r.date) evs.push(Object.assign({}, events.find((e) => e.id === r.id) || {}, { id: rid(r, i), project_id: pid, kind: 'rodaje', status: 'activo', starts_at: at(r.date, r.time || '10:00').toISOString() })); });
+  meetings.forEach((m, j) => {
+    if (!m.date) return;
+    const rods = (m.rods || []).map((x) => (typeof x === 'number' ? rid(rodajes[x] || {}, x) : x));
+    evs.push(Object.assign({}, events.find((e) => e.id === m.id) || {}, { id: m.id || 'nuevo-m' + j, project_id: pid, kind: 'reunion', status: 'activo', ended_at: null, starts_at: at(m.date, m.time || '10:00').toISOString(), rodaje_ids: rods, rodaje_id: rods[0] }));
+  });
+  const mids = new Set(meetings.map((m, j) => m.id || 'nuevo-m' + j));
+  rodajes.forEach((r, i) => {
+    const k = 'r' + i;
+    if (!r.date) { errors[k] = 'Elige la fecha del rodaje.'; return; }
+    const t = at(r.date, r.time || '10:00');
+    if (t <= now) { errors[k] = r.date < today ? `El ${fmtDay(r.date)} ya pasó.` : 'Esa hora ya pasó.'; return; }
+    const e = evs.find((x) => x.id === rid(r, i));
+    const p = rodajeProblem(e, evs.filter((x) => !mids.has(x.id)), project, now);
+    if (p) errors[k] = p;
+    else if (evs.some((x) => x.kind === 'reunion' && (x.status || 'activo') === 'activo' && !String(x.id).startsWith('nuevo-') && limaDate(x.starts_at) === r.date && !liveMeeting(x, now))) warns[k] = `Ya hay una reunión el ${fmtDay(r.date)}.`;
+  });
+  meetings.forEach((m, j) => {
+    const k = 'm' + j;
+    if (!m.date) { errors[k] = 'Elige la fecha de la reunión.'; return; }
+    const t = at(m.date, m.time || '10:00');
+    if (t <= now) { errors[k] = m.date < today ? `El ${fmtDay(m.date)} ya pasó.` : 'Esa hora ya pasó.'; return; }
+    const e = evs.find((x) => x.id === (m.id || 'nuevo-m' + j));
+    const p = meetingProblem(e, evs, project, now);
+    const f = firstRodaje(e, evs);
+    if (p) errors[k] = p;
+    else if (f) {
+      const gap = daysBetween(m.date, limaDate(f.starts_at));
+      if (gap === 1) warns[k] = MSG_ONE_DAY;
+      else info[k] = meetRods(e).map((id) => evs.find((x) => x.id === id)).filter(Boolean).sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at))
+        .map((r, n, all) => (all.length > 1 ? `Rodaje del ${fmtDay(limaDate(r.starts_at))}: ` : 'Guion y storyboard hasta el ') + `${fmtDay(addDays(limaDate(r.starts_at), -1))}, ${hm(RULES.pre)}`).join(' · ');
+      if (!warns[k] && evs.some((x) => x.id !== e.id && x.kind === 'reunion' && (x.status || 'activo') === 'activo' && limaDate(x.starts_at) === m.date)) warns[k] = `Ya hay una reunión el ${fmtDay(m.date)}.`;
+    }
+  });
+  // Una reunión por rodaje con rodajes en días seguidos: el plazo de la segunda tanda cae el día del primer rodaje.
+  let join = false;
+  meetings.forEach((m, j) => {
+    if (!errors['m' + j]) return;
+    const e = evs.find((x) => x.id === (m.id || 'nuevo-m' + j));
+    const f = e && firstRodaje(e, evs);
+    if (f && evs.some((r) => r.kind === 'rodaje' && (r.status || 'activo') === 'activo' && r.id !== f.id && limaDate(r.starts_at) === addDays(limaDate(f.starts_at), -1))) {
+      join = meetings.length > 1;
+      if (join) errors['m' + j] = `No hay día libre para la segunda reunión: su plazo vence el ${fmtDay(addDays(limaDate(f.starts_at), -1))} a las ${hm(RULES.pre)}, día del otro rodaje. Elige un día antes o prepáralos juntos.`;
+    }
+  });
+  return { errors, warns, info, join, ok: !Object.keys(errors).length };
+}
+// Días que el calendario apaga o marca para un campo de la semana (kind 'rodaje' | 'reunion').
+export function dayStatus(date, kind, opts) {
+  const { project, now = new Date() } = opts;
+  const today = limaDate(now);
+  const st = project && project.start_date ? String(project.start_date).slice(0, 10) : null;
+  if (date < today) return { off: true, why: `El ${fmtDay(date)} ya pasó` };
+  if (kind === 'rodaje' && st && date <= st) return { off: true, why: `El rodaje va desde el ${fmtDay(addDays(st, 1))}: el servicio empieza el ${fmtDay(st)}` };
+  if (kind === 'reunion' && st && date < st) return { off: true, why: `Antes del inicio del servicio (${fmtDay(st)})` };
+  const r = checkWeek(Object.assign({}, opts, kind === 'rodaje'
+    ? { rodajes: opts.rodajes.map((x, i) => (i === opts.idx ? Object.assign({}, x, { date }) : x)), meetings: [] }
+    : { meetings: opts.meetings.map((x, i) => (i === opts.idx ? Object.assign({}, x, { date, time: x.time && at(date, x.time) > now ? x.time : '09:00' }) : x)).filter((x, i) => i === opts.idx) }));
+  const k = (kind === 'rodaje' ? 'r' : 'm') + opts.idx;
+  if (r.errors[k]) return { off: true, why: r.errors[k] };
+  return { off: false, tight: r.warns[k] === MSG_ONE_DAY, why: r.warns[k] || r.info[k] || '' };
+}
+// Al cambiar la fecha de un rodaje: ¿cómo queda su reunión abierta? ('ok' | 'warn' | 'block')
+export function meetingFit(meetingStart, rodajeStart) {
+  const md = limaDate(meetingStart), rd = limaDate(rodajeStart);
+  const gap = daysBetween(md, rd);
+  if (gap < 1 || new Date(meetingStart) >= preDueFor(rodajeStart)) return 'block';
+  return gap === 1 ? 'warn' : 'ok';
+}
+// ---- Lo mismo que revisa la base al guardar (meeting_problem / rodaje_problem en schema.sql) ----
+const evOn = (e) => (e.status || 'activo') === 'activo';
+export const liveMeeting = (m, now = new Date()) => !!m && m.kind === 'reunion' && evOn(m) && !m.ended_at && new Date(m.starts_at).getTime() + 6 * 3600e3 > now.getTime();
+export function firstRodaje(m, events) {
+  return meetRods(m).map((id) => events.find((e) => e.id === id)).filter((r) => r && r.kind === 'rodaje' && evOn(r) && r.project_id === m.project_id)
+    .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at))[0] || null;
+}
+export function meetingProblem(m, events, project, now = new Date()) {
+  if (!liveMeeting(m, now)) return null;
+  const st = project && project.start_date ? String(project.start_date).slice(0, 10) : null;
+  const d = limaDate(m.starts_at);
+  const f = firstRodaje(m, events);
+  if (!f) return 'Primero agenda el rodaje';
+  if (st && d < st) return `La reunión no puede ser antes del inicio del servicio (${fmtDay(st)})`;
+  if (d >= limaDate(f.starts_at)) return 'La reunión tiene que ser al menos 1 día antes del rodaje';
+  if (new Date(m.starts_at) >= preDueFor(f.starts_at)) return `La reunión tiene que ser antes de las ${hm(RULES.pre)} del ${fmtDay(addDays(limaDate(f.starts_at), -1))} (plazo de preproducción)`;
+  if (events.some((r) => r.project_id === m.project_id && r.kind === 'rodaje' && evOn(r) && limaDate(r.starts_at) === d)) return `El ${fmtDay(d)} hay rodaje: la reunión va otro día`;
+  const mine = meetRods(m);
+  if (events.some((o) => o.id !== m.id && o.project_id === m.project_id && liveMeeting(o, now) && meetRods(o).some((id) => mine.indexOf(id) !== -1))) return 'Ese rodaje ya tiene una reunión sin finalizar';
+  return null;
+}
+export function rodajeProblem(r, events, project, now = new Date()) {
+  if (!r || r.kind !== 'rodaje' || !evOn(r)) return null;
+  const st = project && project.start_date ? String(project.start_date).slice(0, 10) : null;
+  const d = limaDate(r.starts_at);
+  if (st && d <= st) return `El rodaje tiene que ser desde el ${fmtDay(addDays(st, 1))}: el servicio empieza el ${fmtDay(st)}`;
+  if (events.some((o) => o.id !== r.id && o.project_id === r.project_id && o.kind === 'rodaje' && evOn(o) && limaDate(o.starts_at) === d)) return 'No se pueden programar dos rodajes el mismo día';
+  if (events.some((o) => o.project_id === r.project_id && liveMeeting(o, now) && limaDate(o.starts_at) === d)) return `El ${fmtDay(d)} hay una reunión: el rodaje va otro día`;
+  for (const m of events.filter((o) => o.project_id === r.project_id && liveMeeting(o, now) && meetHas(o, r.id))) { const p = meetingProblem(m, events, project, now); if (p) return p; }
+  return null;
+}
+export const eventProblem = (e, events, project, now = new Date()) => (e.kind === 'rodaje' ? rodajeProblem(e, events, project, now) : meetingProblem(e, events, project, now));
+
+// ---- 1.6 · Corrección del historial: qué depende de una tarea ----
+export function laterStep(t, tasks) {
+  const has = (k) => tasks.some((x) => x.video_id === t.video_id && x.kind === k && !x.void);
+  if ((t.kind === 'guion' || t.kind === 'storyboard') && has('rodaje')) return 'el video ya se grabó';
+  if (t.kind === 'rodaje' && (has('montaje') || has('acabado'))) return 'el video ya tiene edición';
+  if (t.kind === 'montaje' && has('acabado')) return 'el video final ya se entregó';
+  return null;
+}
