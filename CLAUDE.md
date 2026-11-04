@@ -72,7 +72,7 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 2. Probar: `node --test tests/*.test.js` y la app en modo práctica (Playwright con `python3 -m http.server`, viewport 390×844).
 3. Si cambió la base: agregar la sección al final de `supabase/schema.sql` y que Williams lo pegue **completo** en Supabase → SQL Editor → Run (si sale aviso de "operación destructiva", es normal: reemplaza reglas internas, no borra datos).
 4. `git commit` y `git push` a `main`. Avisar a Williams que cierre y abra la app (en Equipo debe verse la versión).
-5. Reiniciar datos de prueba (deja equipo e integrantes): `truncate corrections, tasks, hires, attendance, events, videos, projects, log restart identity;` (`delete from …` ya no sirve: lo bloquean los guards).
+5. Reiniciar datos de prueba (deja equipo e integrantes): `truncate corrections, claims, job_items, jobs, tasks, hires, attendance, events, videos, projects, log restart identity;` (`delete from …` ya no sirve: lo bloquean los guards).
 
 ## 4. Reglas del acuerdo (así están programadas)
 
