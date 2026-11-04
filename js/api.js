@@ -125,6 +125,7 @@ class DemoAPI {
   log(teamId, projectId, type, data, actor) {
     const n = (data && data.new) || {};
     const when = this.seeding ? (n.done_at || n.arrived_at || n.created_at || new Date().toISOString()) : new Date().toISOString();
+    if (this.fix && data && typeof data === 'object') data = Object.assign({}, data, { fix: this.fix });
     this.db.log.push({ id: ++this.logId, team_id: teamId, project_id: projectId || null, at: when, actor: actor !== undefined ? actor : (this.me(teamId) || {}).id || null, type, data });
   }
   async rpc(fn, a) {
@@ -240,7 +241,143 @@ class DemoAPI {
       this.log(v.team_id, v.project_id, 'video.reprogramado', { video: v.num, to: dst.starts_at });
       this.persist(); return null;
     }
+    // 1.6 · semana, mover juntos, reprogramar el día y corregir (igual que la base)
+    if (fn === 'plan_week') return this.tx(async () => {
+      const pr = this.db.projects.find((x) => x.id === a.p);
+      if (!pr || !this.partner(pr.team_id)) throw new Error('Sin permiso');
+      if (pr.status !== 'abierto') throw new Error('El proyecto no está abierto');
+      const tol = Number(((this.db.teams.find((t) => t.id === pr.team_id) || {}).settings || {}).rules && this.db.teams.find((t) => t.id === pr.team_id).settings.rules.tol) || 45;
+      const ids = [];
+      for (const r of a.rods || []) {
+        if ((r.videos || []).some((id) => !this.db.videos.find((v) => v.id === id && v.project_id === pr.id))) throw new Error('Algún video no es de este proyecto');
+        ids.push((await this.insert('events', { team_id: pr.team_id, project_id: pr.id, kind: 'rodaje', starts_at: r.at, tolerance_min: tol, video_ids: (r.videos || []).slice() }, true)).id);
+      }
+      for (const m of a.meets || []) {
+        const rr = (m.rods || []).map((x) => (typeof x === 'number' ? ids[x] : x));
+        if (!rr.length) throw new Error('Elige qué rodajes prepara la reunión');
+        for (const id of rr) if (!this.db.events.find((e) => e.id === id && e.project_id === pr.id && e.kind === 'rodaje' && (e.status || 'activo') === 'activo')) throw new Error('El rodaje no existe o fue cancelado');
+        const vids = [...new Set(this.db.events.filter((e) => rr.indexOf(e.id) !== -1).flatMap((e) => e.video_ids || []))];
+        await this.insert('events', { team_id: pr.team_id, project_id: pr.id, kind: 'reunion', starts_at: m.at, tolerance_min: tol, video_ids: vids, rodaje_ids: rr }, true);
+      }
+      this.checkEvents(pr.id, this.db.events.filter((e) => e.project_id === pr.id).map((e) => e.id));
+      return ids;
+    });
+    if (fn === 'move_event') return this.tx(async () => {
+      const ev = this.db.events.find((x) => x.id === a.e);
+      if (!ev || !this.partner(ev.team_id)) throw new Error('Sin permiso');
+      if ((ev.status || 'activo') !== 'activo') throw new Error('Ya no está activo');
+      if (ev.starts_at !== a.new_at) await this.update('events', ev.id, { starts_at: a.new_at }, true);
+      if (a.m) {
+        const m = this.db.events.find((x) => x.id === a.m);
+        if (!m || m.kind !== 'reunion' || !R.meetHas(m, ev.id)) throw new Error('Esa reunión no es de este rodaje');
+        if (m.starts_at !== a.m_at) await this.update('events', m.id, { starts_at: a.m_at }, true);
+      }
+      this.checkEvents(ev.project_id, [ev.id].concat(a.m ? [a.m] : []));
+      return null;
+    });
+    if (fn === 'reprogram_day') return this.tx(async () => {
+      const ev = this.db.events.find((x) => x.id === a.e);
+      if (!ev || !this.partner(ev.team_id)) throw new Error('Sin permiso');
+      if (ev.kind !== 'rodaje' || (ev.status || 'activo') !== 'activo') throw new Error('Ese rodaje ya no está activo');
+      await this.update('events', ev.id, { status: 'reprogramado', cancel_note: a.nota || null }, true);
+      const nu = await this.insert('events', { team_id: ev.team_id, project_id: ev.project_id, kind: 'rodaje', starts_at: a.new_at, tolerance_min: ev.tolerance_min || 45, video_ids: ev.video_ids, note: 'Reprogramado' }, true);
+      await this.update('events', ev.id, { replaced_by: nu.id }, true);
+      for (const m of this.db.events.filter((x) => x.kind === 'reunion' && R.meetHas(x, ev.id))) await this.update('events', m.id, { rodaje_ids: R.meetRods(m).map((id) => (id === ev.id ? nu.id : id)) }, true);
+      this.checkEvents(ev.project_id, this.db.events.filter((e) => e.project_id === ev.project_id).map((e) => e.id));
+      return nu.id;
+    });
+    if (fn === 'correct_record') return this.tx(() => this.correct(a));
     throw new Error('Función desconocida: ' + fn);
+  }
+  // ---------- 1.6 ----------
+  // Todo o nada (como una transacción de la base).
+  async tx(fn) {
+    const snap = JSON.stringify(this.db), lid = this.logId;
+    try { const r = await fn(); this.persist(); return r; } catch (e) { this.db = JSON.parse(snap); this.logId = lid; this.fix = null; throw e; }
+  }
+  checkEvents(projectId, ids) {
+    if (this.seeding) return;
+    const evs = this.db.events.filter((e) => e.project_id === projectId);
+    const pr = this.db.projects.find((p) => p.id === projectId);
+    for (const id of ids) { const e = evs.find((x) => x.id === id); const p = e && R.eventProblem(e, evs, pr, new Date()); if (p) throw new Error(p); }
+  }
+  async correct(a) {
+    const lg = this.db.log.find((x) => x.id === Number(a.l));
+    if (!lg) throw new Error('Ese registro no existe');
+    const me = this.me(lg.team_id);
+    if (!me || me.role !== 'admin') throw new Error('Solo el líder corrige');
+    if (!String(a.motivo || '').trim()) throw new Error('Escribe el motivo');
+    if (this.db.log.some((x) => x.type === 'correction' && Number(x.data.ref) === lg.id)) throw new Error('Ese registro ya se corrigió');
+    const pr = this.db.projects.find((p) => p.id === lg.project_id);
+    if (pr && pr.settlement && pr.settlement.paid_at) throw new Error('El proyecto ya se pagó: anota el ajuste como nota en el siguiente proyecto');
+    const args = a.args || {};
+    const tipo = a.tipo;
+    const nw = (lg.data && lg.data.new) || {};
+    let who = null;
+    this.fix = lg.id;
+    if (['unmark', 'who', 'video', 'time'].indexOf(tipo) !== -1) {
+      if (lg.type !== 'tasks.insert') throw new Error('Ese registro no es una tarea');
+      const t = this.db.tasks.find((x) => x.id === nw.id);
+      if (!t) throw new Error('Esa tarea ya no existe (se desmarcó o se corrigió)');
+      if (t.void) throw new Error('Esa tarea ya no cuenta');
+      if (t.split) throw new Error('El storyboard repartido va con el rodaje: corrige el rodaje');
+      who = t.done_by;
+      const pv = this.db.tasks.filter((x) => x.video_id === t.video_id);
+      if (tipo === 'unmark') {
+        const l = R.laterStep(t, pv); if (l) throw new Error(`No se puede desmarcar: ${l}. Cambia quién lo hizo o la hora.`);
+        await this.remove('tasks', t.id);
+      } else if (tipo === 'who') {
+        if (t.hire_id) throw new Error('Lo hizo Guillermo: corrige la contratación');
+        const m = this.db.members.find((x) => x.id === args.member && x.team_id === lg.team_id && x.active && (x.role === 'admin' || x.role === 'socio'));
+        if (!m) throw new Error('Elige a un socio');
+        if (m.id === t.done_by) throw new Error('Ya figura a su nombre');
+        await this.update('tasks', t.id, { done_by: m.id });
+      } else if (tipo === 'video') {
+        if (t.kind === 'rodaje') throw new Error('El rodaje no se cambia de video: desmárcalo');
+        const l = R.laterStep(t, pv); if (l) throw new Error('No se puede cambiar de video: ' + l);
+        const tv = this.db.videos.find((x) => x.id === args.video && x.project_id === t.project_id);
+        if (!tv || tv.id === t.video_id) throw new Error('Elige otro video del proyecto');
+        const has = (k) => this.db.tasks.some((x) => x.video_id === tv.id && x.kind === k && !x.void);
+        if (has(t.kind)) throw new Error(`Ese video ya tiene ${t.kind} marcado`);
+        if (t.kind === 'montaje' && !has('rodaje')) throw new Error('Ese video aún no se graba');
+        if (t.kind === 'acabado' && !has('montaje')) throw new Error('Ese video aún no tiene montaje');
+        await this.update('tasks', t.id, { video_id: tv.id });
+      } else {
+        if (!args.at || new Date(args.at) > new Date()) throw new Error('Elige una hora que ya pasó');
+        await this.update('tasks', t.id, { done_at: new Date(args.at).toISOString() });
+      }
+    } else if (tipo === 'arrival' || tipo === 'rsvp') {
+      if (!/^attendance\./.test(lg.type)) throw new Error('Ese registro no es de asistencia');
+      const at = this.db.attendance.find((x) => x.id === nw.id);
+      if (!at) throw new Error('Ese registro ya no existe');
+      who = at.member_id;
+      if (tipo === 'rsvp') { if (!at.rsvp) throw new Error('No hay confirmación que quitar'); await this.update('attendance', at.id, { rsvp: null, rsvp_at: null }); }
+      else if (!args.at) await this.update('attendance', at.id, { arrived_at: null, claimed_at: null, confirmed_by: null, confirmed_at: null });
+      else {
+        if (new Date(args.at) > new Date()) throw new Error('Elige una hora que ya pasó');
+        const iso = new Date(args.at).toISOString();
+        await this.update('attendance', at.id, { arrived_at: iso, claimed_at: at.claimed_at || iso, confirmed_by: me.id, confirmed_at: new Date().toISOString() });
+      }
+    } else if (tipo === 'reopen') {
+      if (lg.type !== 'events.update') throw new Error('Ese registro no es una reunión');
+      const ev = this.db.events.find((x) => x.id === nw.id);
+      if (!ev || ev.kind !== 'reunion' || !ev.ended_at) throw new Error('Esa reunión no está finalizada');
+      if (new Date(ev.starts_at).getTime() + 6 * 3600e3 <= Date.now()) throw new Error('La reunión ya se cerró sola (6 horas después de empezar)');
+      const rf = R.firstRodaje(ev, this.db.events);
+      if (!rf || new Date(rf.starts_at) <= new Date()) throw new Error('Su rodaje ya pasó');
+      await this.update('events', ev.id, { ended_at: null, ended_set_at: null, ended_by: null, end_requested_at: null, end_requested_by: null }, true);
+      this.fix = null;
+      this.checkEvents(ev.project_id, [ev.id]);
+      this.fix = lg.id;
+    } else throw new Error('Tipo de corrección desconocido');
+    if (pr && pr.settlement && pr.settlement.sent_at) {
+      const se = Object.assign({}, pr.settlement); delete se.sent_at; delete se.confirmed_at; delete se.amounts;
+      await this.update('projects', pr.id, { settlement: Object.assign(se, { reopened_at: new Date().toISOString(), reopen_note: a.motivo }) });
+    }
+    this.fix = null;
+    this.log(lg.team_id, lg.project_id, 'correction', { ref: lg.id, kind: tipo, args, motivo: a.motivo, member: who, text: args.text || '', req: a.req || null }, me.id);
+    if (a.req) { const c = this.db.corrections.find((x) => x.id === a.req && x.status === 'pendiente'); if (c) await this.update('corrections', c.id, { status: 'aprobada', decided_by: me.id, decided_at: new Date().toISOString() }); }
+    return this.logId;
   }
   // ---------- 1.4: reprogramar la entrega y colaborador externo (igual que la base) ----------
   reprogram(a) {
@@ -366,8 +503,19 @@ class DemoAPI {
     if (table === 'attendance') { const e = this.db.events.find((x) => x.id === row.event_id); return e ? e.project_id : null; }
     return row.project_id || null;
   }
-  async insert(table, row) {
+  async insert(table, row, inner) {
+    if (table === 'events' && !inner && !this.seeding) return this.tx(async () => { const r = await this.insert(table, row, true); this.checkEvents(r.project_id, [r.id]); return r; });
     if (!this.partner(row.team_id)) throw new Error('Sin permiso');
+    if (table === 'events') {
+      row = Object.assign({}, row, { status: 'activo', ended_at: row.ended_at && this.seeding ? row.ended_at : null });
+      if (row.kind === 'reunion') {
+        const rr = R.meetRods(row);
+        if (!rr.length) throw new Error('Primero agenda el rodaje');
+        const f = rr.map((id) => this.db.events.find((e) => e.id === id)).filter(Boolean).sort((x, y) => new Date(x.starts_at) - new Date(y.starts_at))[0];
+        if (!f) throw new Error('El rodaje no existe o fue cancelado');
+        row.rodaje_ids = rr; row.rodaje_id = f.id;
+      }
+    }
     if (table === 'log') { const r = Object.assign({ id: ++this.logId, at: new Date().toISOString() }, row); this.db.log.push(r); this.persist(); return r; }
     if (table === 'tasks' && this.db.tasks.find((t) => t.video_id === row.video_id && t.kind === row.kind && !t.void)) throw new Error('Esa tarea ya está marcada');
     let voidOwn = null;
@@ -430,11 +578,33 @@ class DemoAPI {
     }
     this.persist(); return JSON.parse(JSON.stringify(r));
   }
-  async update(table, id, patch) {
+  async update(table, id, patch, inner) {
     const r = this.db[table].find((x) => x.id === id);
     if (!r) throw new Error('No encontrado');
     const me = this.me(r.team_id);
     if (!me) throw new Error('Sin permiso');
+    if (table === 'events' && !inner && !this.seeding) return this.tx(async () => {
+      const x = await this.update(table, id, patch, true);
+      if (['starts_at', 'status', 'ended_at', 'rodaje_ids'].some((k) => k in patch)) this.checkEvents(x.project_id, [x.id]);
+      return x;
+    });
+    if (table === 'events' && !this.fix) {
+      if ('starts_at' in patch && patch.starts_at !== r.starts_at) {
+        if (this.db.attendance.some((a) => a.event_id === r.id && (a.arrived_at || a.claimed_at))) throw new Error('Ya hay llegadas registradas: reprograma en vez de cambiar la hora');
+        if (r.kind === 'reunion' && r.ended_at) throw new Error('La reunión ya se finalizó: no se mueve');
+      }
+      if (patch.status === 'cancelado' && me.role !== 'admin') throw new Error('Solo el líder cancela');
+    }
+    if (table === 'events' && patch.rodaje_ids) {
+      const f = patch.rodaje_ids.map((x) => this.db.events.find((e) => e.id === x)).filter(Boolean).sort((x, y) => ((y.status || 'activo') === 'activo') - ((x.status || 'activo') === 'activo') || new Date(x.starts_at) - new Date(y.starts_at))[0];
+      patch = Object.assign({}, patch, { rodaje_id: f ? f.id : r.rodaje_id });
+    }
+    if (table === 'projects' && 'start_date' in patch && patch.start_date !== r.start_date) {
+      if (me.role !== 'admin') throw new Error('La fecha de inicio la cambia el líder');
+      const evs = this.db.events.filter((e) => e.project_id === r.id && (e.status || 'activo') === 'activo');
+      if (evs.some((e) => e.kind === 'rodaje' && R.limaDate(e.starts_at) <= patch.start_date)) throw new Error('Hay un rodaje que quedaría antes de la nueva fecha de inicio (el rodaje va al menos 1 día después)');
+      if (evs.some((e) => e.kind === 'reunion' && R.limaDate(e.starts_at) < patch.start_date)) throw new Error('Hay una reunión que quedaría antes de la nueva fecha de inicio');
+    }
     if (table === 'tasks' && me.role !== 'admin') throw new Error('Solo el líder corrige tareas');
     if (table === 'jobs' && patch.status && patch.status !== r.status) {
       const ok = (r.status === 'propuesto' && (patch.status === 'invitado' || patch.status === 'rechazado') && me.id !== r.proposed_by)

@@ -1,6 +1,6 @@
 // Estado de la app y operaciones del día a día.
 import { api, TABLES, isPractice, hasServer } from './api.js';
-import { setRules, DEFAULT_PCT, DEFAULT_RULES, at, addDays, payouts, attendanceStatus, memberStatus, videoState, limaDate, adminAbsent, leaderAway, preDueFor, meetingOf as rMeetingOf, rodajeOf, takeLimit, claimOf } from './rules.js';
+import { setRules, DEFAULT_PCT, DEFAULT_RULES, at, addDays, payouts, attendanceStatus, memberStatus, videoState, limaDate, adminAbsent, leaderAway, preDueFor, meetingOf as rMeetingOf, rodajeOf, takeLimit, claimOf, checkWeek, meetHas } from './rules.js';
 
 export const S = {
   ready: false, session: null, teams: [], teamId: null, me: null, projectId: null,
@@ -181,28 +181,22 @@ export async function createProject(p) {
   return r;
 }
 
-// Programar semana: primero el rodaje, luego su reunión de preproducción (antes del plazo).
-export function planWeek(w) {
+// 1.6 · Programar la semana de una vez (uno o más rodajes y sus reuniones), con las reglas de fechas.
+// w = { rodajes: [{date, time, videos?}], meetings: [{date, time, rods: [índice o id]}] }
+export function planWeek(w, msg) {
   return run(async () => {
-    const rStart = at(w.rodaje_date, w.rodaje_time);
-    const mStart = at(w.meeting_date, w.meeting_time);
-    if (mStart >= preDueFor(rStart)) throw new Error('La reunión tiene que ser antes del plazo de preproducción (día antes del rodaje, 18:00)');
-    const rod = await api.insert('events', { team_id: S.teamId, project_id: S.projectId, kind: 'rodaje', status: 'activo', starts_at: rStart.toISOString(), tolerance_min: rulesTol(), video_ids: [] });
-    await api.insert('events', { team_id: S.teamId, project_id: S.projectId, kind: 'reunion', status: 'activo', rodaje_id: rod.id, starts_at: mStart.toISOString(), tolerance_min: rulesTol(), video_ids: [] });
-    return rod;
-  }, 'Semana programada');
+    const chk = checkWeek({ project: project(), events: S.data.events.filter((e) => e.project_id === S.projectId), rodajes: w.rodajes, meetings: w.meetings || [] });
+    if (!chk.ok) throw new Error(Object.values(chk.errors)[0]);
+    const ids = await api.rpc('plan_week', { p: S.projectId, rods: w.rodajes.map((r) => ({ at: at(r.date, r.time).toISOString(), videos: r.videos || [] })), meets: (w.meetings || []).map((m) => ({ at: at(m.date, m.time).toISOString(), rods: m.rods })) });
+    return ids;
+  }, msg === undefined ? 'Semana programada' : msg);
 }
-export function extraMeeting(rodaje, date, time) {
-  return run(async () => {
-    const open = S.data.events.find((e) => e.kind === 'reunion' && e.rodaje_id === rodaje.id && (!e.status || e.status === 'activo') && !e.ended_at);
-    if (open) throw new Error('Ese rodaje ya tiene una reunión sin finalizar');
-    const mStart = at(date, time);
-    if (mStart >= preDueFor(rodaje.starts_at)) throw new Error('Tiene que ser antes del plazo de preproducción');
-    return api.insert('events', { team_id: S.teamId, project_id: rodaje.project_id, kind: 'reunion', status: 'activo', rodaje_id: rodaje.id, starts_at: mStart.toISOString(), tolerance_min: rulesTol(), video_ids: rodaje.video_ids });
-  }, 'Reunión agendada');
-}
-// Reparto de la reunión: crea los videos y los asigna al rodaje y a la reunión de esa semana.
-export function reparto(rodaje, videos) {
+export const extraMeeting = (rodIds, date, time) => planWeek({ rodajes: [], meetings: [{ date, time, rods: rodIds }] }, 'Reunión agendada');
+export const newRodaje = (videoIds, date, time) => planWeek({ rodajes: [{ date, time, videos: videoIds }], meetings: [] }, 'Rodaje programado').then((ids) => ids && ids[0]);
+// Reuniones activas que preparan un rodaje (1.6: una reunión puede preparar varios).
+export const meetingsOf = (rodId) => S.data.events.filter((e) => e.kind === 'reunion' && (!e.status || e.status === 'activo') && meetHas(e, rodId));
+// Reparto: crea los videos de un rodaje y los suma a ese rodaje y a sus reuniones.
+export function reparto(rodaje, videos, msg) {
   return run(async () => {
     const p = project();
     let num = S.data.videos.filter((v) => v.project_id === p.id).reduce((m, v) => Math.max(m, v.num), 0);
@@ -210,8 +204,14 @@ export function reparto(rodaje, videos) {
     for (const v of videos) { num++; ids.push((await api.insert('videos', Object.assign({ team_id: S.teamId, project_id: p.id, num, publish_date: v.publish_date, owner: v.owner }, v.title ? { title: v.title } : {}, v.apoyo_due ? { apoyo_due: v.apoyo_due } : {}))).id); }
     const all = rodaje.video_ids.concat(ids);
     await api.update('events', rodaje.id, { video_ids: all });
-    for (const m of S.data.events.filter((e) => e.kind === 'reunion' && e.rodaje_id === rodaje.id && (!e.status || e.status === 'activo'))) await api.update('events', m.id, { video_ids: all });
-  }, 'Reparto guardado');
+    rodaje.video_ids = all;
+    for (const m of meetingsOf(rodaje.id)) await api.update('events', m.id, { video_ids: [...new Set((m.video_ids || []).concat(ids))] });
+  }, msg === undefined ? 'Reparto guardado' : msg);
+}
+// Reparto de varias tandas (una por rodaje) de una vez.
+export async function repartoTandas(tandas) {
+  for (const t of tandas) await reparto(t.rodaje, t.videos, null);
+  toast('Reparto guardado');
 }
 export function endMeeting(e) {
   if (S.me.role === 'admin' || adminAbsent(e, ctx(e.project_id))) return run(() => api.update('events', e.id, { ended_at: new Date().toISOString(), ended_set_at: new Date().toISOString(), ended_by: S.me.id }), 'Reunión finalizada');
@@ -220,16 +220,17 @@ export function endMeeting(e) {
 export const confirmEnd = (e) => run(() => api.update('events', e.id, { ended_at: e.end_requested_at || new Date().toISOString(), ended_set_at: new Date().toISOString(), ended_by: S.me.id }), 'Reunión finalizada');
 export const cancelEvent = (e, note) => run(() => api.update('events', e.id, { status: 'cancelado', cancel_note: note || null, canceled_at: new Date().toISOString() }), 'Cancelado');
 export const deleteEvent = (e) => run(() => api.remove('events', e.id), 'Borrado');
-export const moveEvent = (e, date, time) => run(() => api.update('events', e.id, { starts_at: at(date, time).toISOString() }), 'Fecha cambiada');
-// Reprogramar el rodaje completo: nuevo rodaje con los mismos videos; el anterior queda como "reprogramado".
+// 1.6 · Cambiar fecha u hora; si es un rodaje con reunión, las dos juntas (m = {e, date, time}).
+export const moveEvent = (e, date, time, m) => run(() => api.rpc('move_event', { e: e.id, new_at: at(date, time).toISOString(), m: m ? m.e.id : null, m_at: m ? at(m.date, m.time).toISOString() : null }), m ? 'Rodaje y reunión movidos' : 'Fecha cambiada');
+// Reprogramar el rodaje completo: rodaje nuevo con los mismos videos; el anterior queda como "reprogramado".
 export function reprogramDay(e, date, time, note) {
-  return run(async () => {
-    const nu = await api.insert('events', { team_id: S.teamId, project_id: e.project_id, kind: 'rodaje', status: 'activo', starts_at: at(date, time).toISOString(), tolerance_min: e.tolerance_min || 45, video_ids: e.video_ids, note: 'Reprogramado' });
-    await api.update('events', e.id, { status: 'reprogramado', replaced_by: nu.id, cancel_note: note || null });
-    for (const m of S.data.events.filter((x) => x.kind === 'reunion' && x.rodaje_id === e.id)) await api.update('events', m.id, { rodaje_id: nu.id });
-    return nu;
-  }, 'Rodaje reprogramado');
+  return run(async () => ({ id: await api.rpc('reprogram_day', { e: e.id, new_at: at(date, time).toISOString(), nota: note || null }) }), 'Rodaje reprogramado');
 }
+// 1.6 · Fecha de inicio del servicio (solo el líder; nada puede quedar antes).
+export const setStartDate = (p, date) => run(() => api.update('projects', p.id, { start_date: date }), 'Fecha de inicio cambiada');
+// 1.6 · Corregir un registro del historial (lo aplica el líder; req = pedido del socio que se aprueba).
+export const correctRecord = (logId, tipo, args, motivo, req) => run(() => api.rpc('correct_record', { l: logId, tipo, args: args || {}, motivo, req: req || null }), 'Corregido · queda registrado');
+export const observeCorrection = (logId, text) => run(() => api.insert('log', { team_id: S.teamId, project_id: S.projectId, actor: S.me.id, type: 'correction.obs', data: { ref: logId, text } }), 'Observación enviada');
 export const deleteProject = (p) => run(() => api.remove('projects', p.id), 'Proyecto borrado');
 export const archiveProject = (p, on) => run(() => api.update('projects', p.id, { status: on ? 'archivado' : 'abierto' }), on ? 'Proyecto archivado' : 'Proyecto reabierto');
 export const undoOwn = (taskId) => run(() => api.remove('tasks', taskId), 'Deshecho');
@@ -307,10 +308,10 @@ export function recordVideos(event, videoIds) {
 
 export function reprogram(event, videoIds, date, time) {
   return run(async () => {
-    const starts = at(date, time).toISOString();
-    let target = S.data.events.find((e) => e.kind === 'rodaje' && e.project_id === event.project_id && e.starts_at === starts);
+    // 1.6: si ese día ya hay un rodaje activo del proyecto, los videos se suman a ese (no hay 2 rodajes el mismo día).
+    let target = S.data.events.find((e) => e.kind === 'rodaje' && e.project_id === event.project_id && (!e.status || e.status === 'activo') && e.id !== event.id && limaDate(e.starts_at) === date);
     if (target) await api.update('events', target.id, { video_ids: Array.from(new Set(target.video_ids.concat(videoIds))) });
-    else await api.insert('events', { team_id: S.teamId, project_id: event.project_id, kind: 'rodaje', starts_at: starts, tolerance_min: rulesTol(), video_ids: videoIds });
+    else await api.rpc('plan_week', { p: event.project_id, rods: [{ at: at(date, time).toISOString(), videos: videoIds }], meets: [] });
     await api.update('events', event.id, { video_ids: event.video_ids.filter((id) => videoIds.indexOf(id) === -1) });
   }, 'Videos reprogramados');
 }
@@ -328,7 +329,6 @@ export const hireOpen = (eventId) => S.data.hires.find((h) => h.event_id === eve
 // Reunión en la que se repartió un video (para saber si ahí trabajó Guillermo).
 export const meetingOf = (videoId) => { const v = S.data.videos.find((x) => x.id === videoId); return v ? rMeetingOf(v, ctx(v.project_id)) : null; };
 // Rodaje nuevo para videos que se quedaron sin rodaje (por ejemplo, si se canceló).
-export const newRodaje = (projectId, videoIds, date, time) => run(() => api.insert('events', { team_id: S.teamId, project_id: projectId, kind: 'rodaje', status: 'activo', starts_at: at(date, time).toISOString(), tolerance_min: rulesTol(), video_ids: videoIds }), 'Rodaje programado');
 
 // ---------- Cierre del proyecto (6.2 y liquidación) ----------
 export function sendSettlement(p) {
@@ -411,8 +411,8 @@ export function setPhone(memberId, phone) {
 export const waLink = (m, text) => m && m.phone ? `https://wa.me/51${m.phone}?text=${encodeURIComponent(text || '')}` : `https://wa.me/?text=${encodeURIComponent(text || '')}`;
 
 // Reparto dentro de la reunión: crea los videos (tema y dueño) del rodaje de esa reunión.
-export function repartoReunion(meeting, rows) {
-  const rod = S.data.events.find((e) => e.id === meeting.rodaje_id);
+export function repartoReunion(meeting, rows, rodId) {
+  const rod = S.data.events.find((e) => e.id === (rodId || meeting.rodaje_id));
   if (!rod) return Promise.reject(new Error('La reunión no tiene rodaje'));
   return reparto(rod, rows);
 }

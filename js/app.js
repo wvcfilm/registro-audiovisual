@@ -2,8 +2,9 @@ import * as st from './store.js';
 import { S } from './store.js';
 import * as R from './rules.js';
 import { seedDemo } from './demo.js';
+import { openDate, openTime, roundTime, quickDays, pickerOpen } from './pickers.js';
 
-export const VERSION = '1.5';
+export const VERSION = '1.6';
 const $app = document.getElementById('app');
 const $toast = document.getElementById('toast');
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -12,7 +13,7 @@ const ROLE = { admin: 'Socio · Líder de proyecto', socio: 'Socio', colaborador
 const LN = () => first(st.admin() || { name: 'el líder' });
 const COLOR = { admin: ['#FFB547', '#1A1203'], socio: ['#8AB4FF', '#0B1530'], colaborador: ['#FF8A65', '#1A0E08'] };
 let sheetHtml = null;
-let ui = { scope: 'p', histF: 'all' };
+let ui = { scope: 'p', histF: 'all', pk: {}, fv: {} };
 
 const ini = (name) => { const w = String(name || '?').trim().split(/\s+/); return (w[0][0] + (w[1] ? w[1][0] : '')).toUpperCase(); };
 const av = (m, size = 34) => { const c = COLOR[m.role] || ['#22242C', '#C9C9D1']; return `<span class="av" style="width:${size}px;height:${size}px;background:${c[0]};color:${c[1]}">${esc(ini(m.name))}</span>`; };
@@ -43,6 +44,8 @@ Object.assign(icon, {
   moon: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
   shield: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg>',
   clock: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  x: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  up: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>',
   chev: '<svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
   plus: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
   palette: '<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18c1.7 0 2-1.3 1.3-2.4-.7-1.2 0-2.6 1.4-2.6H17a4 4 0 0 0 4-4 9 9 0 0 0-9-9z"/><circle cx="7.5" cy="11" r="1"/><circle cx="12" cy="7.5" r="1"/><circle cx="16.5" cy="11" r="1"/></svg>',
@@ -166,10 +169,13 @@ function pending(now = new Date()) {
       const s = st.eventStatus(e, me.id, now);
       const nums = e.video_ids.map((id) => (c.videos.find((v) => v.id === id) || {}).num).filter(Boolean).sort((a, b) => a - b);
       const vtxt = nums.length ? (nums.length === 1 ? 'video ' + nums[0] : 'videos ' + nums.slice(0, -1).join(', ') + ' y ' + nums[nums.length - 1]) : 'sin videos aún';
-      if (s.k === 'pendiente' && start - now < 7 * 864e5) out.push({ type: 'event', event: e, due: start, title: (isR ? 'Rodaje · ' : 'Reunión · ') + vtxt, sub: `${R.fmtWhen(e.starts_at)} · tolerancia hasta ${R.limaTime(new Date(start.getTime() + e.tolerance_min * 60000))}`, repro: isR && wasReprogrammed(e), kind: isR ? 'rodaje' : 'reunion' });
+      // 1.6: la reunión y el rodaje se quedan en su día hasta que terminan (no solo hasta marcar la llegada).
+      const lv = liveOf(e, now);
+      if (['pendiente', 'puntual', 'tarde', 'por_confirmar'].indexOf(s.k) !== -1 && start - now < 7 * 864e5 && lv.k !== 'done' && lv.k !== 'absent') out.push({ type: 'event', event: e, due: start, live: lv, urgent: lv.k === 'late' || (s.k === 'pendiente' && R.canCheckIn(e, now)), title: (isR ? 'Rodaje · ' : 'Reunión · ') + vtxt, sub: s.k === 'pendiente' ? `${R.fmtWhen(e.starts_at)} · tolerancia hasta ${R.limaTime(new Date(start.getTime() + e.tolerance_min * 60000))}` : `${R.fmtWhen(e.starts_at)} · ${s.k === 'por_confirmar' ? 'llegada por confirmar' : 'llegaste ' + (s.k === 'puntual' ? 'puntual' : 'con tardanza')}`, repro: isR && wasReprogrammed(e), kind: isR ? 'rodaje' : 'reunion' });
       if (isR && !e.video_ids.length && me.role !== 'colaborador') {
-        const mt = S.data.events.find((x) => x.kind === 'reunion' && x.rodaje_id === e.id && active(x));
-        out.push({ type: 'reparto', event: e, due: mt ? new Date(mt.starts_at) : start, title: 'Repartir los videos', sub: `Rodaje del ${R.fmtWhen(e.starts_at)} · se decide en la reunión`, kind: 'reunion' });
+        const mt = st.meetingsOf(e.id).sort(byStart).pop();
+        const f = mt && R.firstRodaje(mt, S.data.events);
+        if (!(f && f.id !== e.id && !(f.video_ids || []).length)) out.push({ type: 'reparto', event: e, due: mt ? new Date(mt.starts_at) : start, title: 'Repartir los videos', sub: `Rodaje del ${R.fmtWhen(e.starts_at)} · se decide en la reunión`, kind: 'reunion' });
       }
       if (me.role === 'admin') {
         for (const a of c.attendance.filter((x) => x.event_id === e.id && x.claimed_at && !x.arrived_at && x.member_id !== me.id)) out.push({ type: 'claim', event: e, att: a, due: new Date(a.claimed_at), title: `Llegada de ${first(st.member(a.member_id))}`, sub: `Marcó a las ${R.limaTime(a.claimed_at)} · ${isR ? 'rodaje' : 'reunión'}`, urgent: true, kind: isR ? 'rodaje' : 'reunion' });
@@ -208,6 +214,31 @@ function pending(now = new Date()) {
   return out.sort((a, b) => a.band - b.band || (b.urgent ? 1 : 0) - (a.urgent ? 1 : 0) || a.rank - b.rank || (a.due || Infinity) - (b.due || Infinity));
 }
 
+// 1.6 · Estado en vivo de una reunión o un rodaje (punto que parpadea).
+// k: later · soon (EN 45 MIN, desde 2 h antes, el mismo día) · live (EN CURSO / RODANDO) · late (TARDE · 12 MIN) · done · absent
+const minTxt = (m) => (m >= 60 ? Math.floor(m / 60) + ' H' + (m % 60 ? ' ' + (m % 60) + ' MIN' : '') : m + ' MIN');
+function eventDone(e, now = new Date()) {
+  if (!active(e)) return true;
+  if (e.kind === 'reunion') return !!e.ended_at || now >= R.meetingEnd(e);
+  const ids = e.video_ids || [];
+  return ids.length ? ids.every((id) => S.data.tasks.some((t) => t.video_id === id && t.kind === 'rodaje')) : R.limaDate(now) > R.limaDate(e.starts_at);
+}
+function liveOf(e, now = new Date(), memberId = S.me.id) {
+  if (eventDone(e, now)) return { k: 'done' };
+  const start = new Date(e.starts_at);
+  const isR = e.kind === 'rodaje';
+  if (now < start) {
+    const m = Math.ceil((start - now) / 60000);
+    if (R.limaDate(now) === R.limaDate(e.starts_at) && m <= 120) return { k: 'soon', t: 'EN ' + minTxt(m), tone: 'g' };
+    return { k: 'later' };
+  }
+  const s = memberId ? st.eventStatus(e, memberId, now) : { k: 'puntual' };
+  if (s.k === 'pendiente') return { k: 'late', t: 'TARDE · ' + minTxt(Math.max(1, Math.floor((now - start) / 60000))), tone: 'r' };
+  if (s.k === 'ausente') return { k: 'absent' };
+  return { k: 'live', t: isR ? 'RODANDO' : 'EN CURSO', tone: 'g' };
+}
+const livePill = (lv, extra = '') => (lv && lv.t ? `<span class="lvp ${lv.tone}${extra}"><i></i>${lv.t}</span>` : '');
+
 // Ícono de etapa: lápiz (preproducción), cámara (rodaje), tijera (posproducción), estrella (final).
 function stageOf(x) {
   if (x.type === 'review' || x.type === 'fix') return 'post';
@@ -226,6 +257,7 @@ function stageIc(k, size = 18) {
 }
 function rowBtn(x, now) {
   const ev = x.event;
+  if (x.mini) return `<button class="tbtn t-ghost" data-act="toHero" aria-label="Ver arriba">${icon.up}Arriba</button>`;
   if (x.type === 'task') {
     const cm = x.cm;
     if (cm.claim) return `<button class="tbtn t-take" data-act="claim" data-v="${x.video.id}" data-k="${x.kind}">Tomar</button>`;
@@ -236,7 +268,8 @@ function rowBtn(x, now) {
     return `<span class="tbtn t-lock">${icon.lock}${lockTxt}</span>`;
   }
   if (x.type === 'event') {
-    if (R.canCheckIn(ev, now)) return `<button class="tbtn t-arr" data-act="checkin" data-e="${ev.id}">Llegué</button>`;
+    if (st.eventStatus(ev, S.me.id, now).k === 'pendiente' && R.canCheckIn(ev, now)) return `<button class="tbtn ${x.live && x.live.k === 'late' ? 't-late' : 't-arr'}" data-act="checkin" data-e="${ev.id}">Llegué</button>`;
+    if (x.live && x.live.k === 'live') return `<a class="tbtn t-ghost" href="#/e/${ev.id}">${ev.kind === 'rodaje' ? 'Abrir' : 'Entrar'}</a>`;
     return `<span class="tbtn t-lock">${icon.lock}${R.limaDate(now) === R.limaDate(ev.starts_at) ? R.limaTime(new Date(new Date(ev.starts_at).getTime() - R.RULES.open * 60000)) : dowShort(ev.starts_at)}</span>`;
   }
   if (x.type === 'review') return `<button class="tbtn t-take" data-act="review" data-v="${x.video.id}" data-k="ask">Revisar</button>`;
@@ -262,13 +295,14 @@ function dueLine(x, now) {
   if (x.type === 'task' && x.cm.claimed) return `<span class="due-l u0">Entrégalo antes de ${R.fmtWhen(x.cm.limit)}</span>`;
   if (x.type === 'task' && !x.cm.ok && x.cm.why) return `<span class="due-l">${esc(x.cm.why)}</span>`;
   if (!x.due) return '';
+  if (x.type === 'event' && x.live && x.live.t) return `<span class="due-l">${livePill(x.live)}</span>`;
   return `<span class="due-l u${x.band}">${x.type === 'event' ? '' : 'Entrega: '}${R.fmtWhen(x.due)} · ${countdown(x.due, now)}</span>`;
 }
 function pendItem(x, now = new Date(), i = 0) {
   const k = stageOf(x);
-  return `<div class="trow" style="animation-delay:${(i * 0.04).toFixed(2)}s">
+  return `<div class="trow${x.live && x.live.k === 'late' && !x.mini ? ' late' : ''}${x.mini ? ' mini' : ''}" style="animation-delay:${(i * 0.04).toFixed(2)}s">
     <a class="tic tint-${k}" href="${rowHref(x)}" aria-label="Ver detalle">${stageIc(k)}</a>
-    <a class="ttx" href="${rowHref(x)}"><b${x.type === 'task' && (x.cm.gone || (!x.cm.ok && !x.cm.claim)) ? ' class="dim"' : ''}>${x.title}${x.repro ? ' <em class="tag-red">Reprogramado</em>' : ''}</b><span>${x.sub || ''}</span>${dueLine(x, now)}</a>
+    <a class="ttx" ${x.mini ? 'data-act="toHero" href="#/"' : `href="${rowHref(x)}"`}><b${x.type === 'task' && (x.cm.gone || (!x.cm.ok && !x.cm.claim)) ? ' class="dim"' : ''}>${x.title}${x.repro ? ' <em class="tag-red">Reprogramado</em>' : ''}</b><span>${x.sub || ''}</span>${dueLine(x, now)}</a>
     ${rowBtn(x, now)}</div>`;
 }
 const DOW = ['DOM', 'LUN', 'MAR', 'MIÉ', 'JUE', 'VIE', 'SÁB'];
@@ -538,13 +572,11 @@ function rsvpLabel(e, m, c, now) {
 function heroOf(items, now) {
   const me = S.me, c = st.ctx();
   const evs = c.events.filter(active).sort(byStart);
-  // 1. Llegada (desde 15 min antes) y, ya marcada, el botón para entrar
+  // 1. Llegada (desde 15 min antes; en rojo si vas tarde)
   for (const e of evs) {
     const s = st.eventStatus(e, me.id, now);
-    const start = new Date(e.starts_at);
-    if (s.k === 'pendiente' && R.canCheckIn(e, now)) return { kind: 'arr', event: e };
-    const live = e.kind === 'reunion' ? R.meetingOpen(e, now) : R.limaDate(now) === R.limaDate(start) && now >= new Date(start.getTime() - R.RULES.open * 60000) && e.video_ids.some((id) => !S.data.tasks.find((t) => t.video_id === id && t.kind === 'rodaje'));
-    if (live && ['puntual', 'tarde', 'por_confirmar'].indexOf(s.k) !== -1) return { kind: 'in', event: e, s };
+    // 1.6: al marcar la llegada la reunión o el rodaje salen del aviso grande (se quedan en su día).
+    if (s.k === 'pendiente' && R.canCheckIn(e, now) && !eventDone(e, now)) return { kind: 'arr', event: e, live: liveOf(e, now) };
   }
   // 2. Confirmaciones que solo puede dar el administrador
   for (const t of ['claim', 'endreq', 'review', 'fix']) { const f = items.find((x) => x.type === t); if (f) return { kind: 'item', item: f }; }
@@ -573,7 +605,7 @@ function heroCard(h, now) {
   const me = S.me;
   if (h.kind === 'item') return heroItemCard(h.item, now);
   const card = (tone, when, ic, title, sub, body) => `<section class="hero ${tone}">
-    <div class="row" style="gap:8px"><span class="hdot"></span><span class="lbl hwhen">${when}</span></div>
+    <div class="row" style="gap:8px">${/class="lvp/.test(when) ? when : `<span class="hdot"></span><span class="lbl hwhen">${when}</span>`}</div>
     <div class="row" style="gap:12px;align-items:flex-start"><span class="tic big tint-${ic === 'miss' ? 'post' : ic}">${stageIc(ic === 'miss' ? 'post' : ic, 20)}</span>
       <div style="flex:1;min-width:0"><b class="num" style="font-size:20px;line-height:1.2;display:block">${title}</b>${sub ? `<p class="sub" style="margin:4px 0 0">${sub}</p>` : ''}</div></div>${body}</section>`;
   if (h.kind === 'take' || h.kind === 'task') {
@@ -593,13 +625,10 @@ function heroCard(h, now) {
   const go = (primary) => `<a class="hb ${primary ? 'x-amber' : 'x-ghost'}" href="#/e/${e.id}" style="font-size:15px">${goTxt(e)}${arrow}</a>`;
   if (h.kind === 'arr') {
     const punt = R.limaTime(new Date(start.getTime() + R.RULES.punt * 60000));
-    return card('h-urg', (start <= now ? 'Empezó a las ' : 'Empieza a las ') + R.limaTime(start), ic, T.t, (e.kind === 'reunion' && T.vt ? T.vt.charAt(0).toUpperCase() + T.vt.slice(1) + ' · ' : '') + 'puntual hasta ' + punt,
-      `<button class="hb x-green" data-act="checkin" data-e="${e.id}">${pinIc}Llegué</button>${go(false)}`);
-  }
-  if (h.kind === 'in') {
-    const a = st.attOf(e.id, me.id);
-    const t = a && a.arrived_at ? `Llegaste ${R.limaTime(a.arrived_at)} · ${h.s.k === 'puntual' ? 'puntual' : 'con tardanza'}` : `Marcaste ${R.limaTime(a.claimed_at)} · ${first(st.admin() || { name: 'el líder' })} la confirma`;
-    return card('h-ok', e.kind === 'rodaje' ? 'Rodaje en curso' : 'Reunión en curso', ic, T.t, '', `<div class="okrow">${icon.check}${t}</div>${go(true)}`);
+    const late = h.live && h.live.k === 'late';
+    const tolEnd = R.limaTime(new Date(start.getTime() + e.tolerance_min * 60000));
+    return card(late ? 'h-late' : 'h-urg', late ? livePill(h.live) + `<span class="hwt">Empezó a las ${R.limaTime(start)}</span>` : h.live && h.live.t ? livePill(h.live) + `<span class="hwt">${R.limaTime(start)}</span>` : (start <= now ? 'Empezó a las ' : 'Empieza a las ') + R.limaTime(start), ic, T.t, (e.kind === 'reunion' && T.vt ? T.vt.charAt(0).toUpperCase() + T.vt.slice(1) + ' · ' : '') + (late ? 'tardanza hasta las ' + tolEnd + ' · después cuenta como falta' : 'puntual hasta ' + punt),
+      `<button class="hb ${late ? 'x-red' : 'x-green'}" data-act="checkin" data-e="${e.id}">${pinIc}Llegué</button>${go(false)}`);
   }
   if (h.kind === 'conf') {
     const o = otherPartner();
@@ -749,7 +778,8 @@ function vHome() {
   // Los videos de un rodaje aún no habilitado se representan con el rodaje mismo.
   items = items.filter((x) => !(x.type === 'task' && x.kind === 'rodaje' && !x.cm.ok));
   const hero = heroOf(items, now);
-  const rest = items.filter((x) => !hero || (x !== hero.item && !(hero.event && x.type === 'event' && x.event === hero.event)));
+  // 1.6: lo del aviso grande también va en su día, minimizado (tocarlo lleva arriba).
+  const rest = items.map((x) => (hero && (x === hero.item || (hero.event && x.type === 'event' && x.event === hero.event)) ? Object.assign({}, x, { mini: true }) : x));
   const today = R.limaDate(now);
   const idx = (x) => { if (!x.due || x.urgent) return 0; const d = dayDiff(today, R.limaDate(x.due)); return d < 0 ? 0 : d > 4 ? 5 : d; };
   const days = [[], [], [], [], [], []];
@@ -760,7 +790,11 @@ function vHome() {
   const pendCount = items.length;
   html += `<div class="between" style="margin-top:2px;align-items:baseline"><p class="num" style="margin:0;font-size:20px;font-weight:700">Tus actividades</p><span class="muted">${pendCount ? pendCount + (pendCount === 1 ? ' pendiente' : ' pendientes') : 'Todo al día'}</span></div>`;
   html += teamMsgs(now).concat(handoffMsgs(now)).map(msgCard).join('');
-  if (hero) html += heroCard(hero, now);
+  // 1.6: cuando el líder corrige algo tuyo, te sale aquí (no urgente) y puedes hacer una observación.
+  let seen = []; try { seen = JSON.parse(localStorage.getItem('ra-seen-corr') || '[]'); } catch (e) { /* */ }
+  html += S.data.log.filter((l) => l.type === 'correction' && l.data && (l.data.member === me.id || (l.data.args || {}).member === me.id) && l.actor !== me.id && seen.indexOf(l.id) === -1 && (!l.project_id || l.project_id === p.id) && !S.data.log.some((y) => y.type === 'correction.obs' && y.actor === me.id && Number((y.data || {}).ref) === l.id) && now - new Date(l.at) < 14 * 864e5)
+    .map((l) => `<section class="msgcard corrn"><span class="tic" style="background:#2A1212">${icon.pen('#FF8A7A', 18)}</span><div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:8px"><p><b>${first(st.member(l.actor))} corrigió:</b> ${esc(l.data.text || '')}${l.data.motivo ? ' · ' + esc(l.data.motivo) : ''}</p><div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn sm b-ghost" data-act="obsCorr" data-id="${l.id}">Hacer una observación</button><button class="btn sm b-ghost" data-act="histOpen" data-id="${l.data.ref}">Ver rastro</button><button class="linkbtn" data-act="seenCorr" data-id="${l.id}" style="align-self:center">Entendido</button></div></div></section>`).join('');
+  if (hero) html += `<div id="hero">${heroCard(hero, now)}</div>`;
   const sq = Array.from({ length: nDays }, (_, i) => {
     const d = R.addDays(today, i);
     const list = days[i];
@@ -868,7 +902,7 @@ function weekRodaje(c, now) {
   const rods = c.events.filter((e) => e.kind === 'rodaje' && active(e)).sort(byStart);
   return rods.find((e) => R.limaDate(e.starts_at) >= today) || null;
 }
-function meetingFor(rod) { return rod ? S.data.events.filter((x) => x.kind === 'reunion' && x.rodaje_id === rod.id && active(x)).sort(byStart).pop() || null : null; }
+function meetingFor(rod) { return rod ? st.meetingsOf(rod.id).sort(byStart).pop() || null : null; }
 // Avatares con su respuesta (✓ va · ✗ no va · G Guillermo).
 function whoMini(e, c) {
   return st.partners().map((m) => {
@@ -887,18 +921,21 @@ function confCard(e, now, bare) {
   const start = new Date(e.starts_at);
   const open = (ui.evOpen || {})[e.id];
   const started = now >= new Date(start.getTime() - R.RULES.open * 60000);
-  const rod = isR ? null : S.data.events.find((x) => x.id === e.rodaje_id);
+  const rods = isR ? [] : R.meetRods(e).map(evById).filter((r) => r && active(r)).sort(byStart);
   const title = isR ? `Rodaje · ${R.limaTime(start)}` : `Reunión · ${R.fmtDay(R.limaDate(start))}, ${R.limaTime(start)}`;
-  const sub = isR ? evTitle(e, c).vt || 'Sin videos aún' : rod ? 'Para el rodaje del ' + R.fmtDay(R.limaDate(rod.starts_at)) : '';
+  const sub = isR ? evTitle(e, c).vt || 'Sin videos aún' : rods.length ? 'Para ' + (rods.length > 1 ? 'los rodajes del ' + rods.map((r) => R.fmtDay(R.limaDate(r.starts_at)).replace(/ \w+$/, '')).join(' y ') : 'el rodaje del ' + R.fmtDay(R.limaDate(rods[0].starts_at))) : '';
   const ic = stageIc(isR ? 'prod' : 'pre', 20);
-  const go = (primary) => `<a class="hb ${primary ? 'x-amber' : 'x-ghost'}" href="#/e/${e.id}" style="font-size:15px">${goTxt(e)}${arrow}</a>`;
+  // 1.6: punto en vivo; si vas tarde, toda la tarjeta y el botón en rojo (al entrar vuelve a sus colores).
+  const lv = isPartner(me) ? liveOf(e, now) : { k: 'later' };
+  const lateNow = lv.k === 'late';
+  const go = (primary) => `<a class="hb ${lateNow ? 'x-red pulseR' : primary ? 'x-amber' : 'x-ghost'}" href="#/e/${e.id}" style="font-size:15px">${goTxt(e)}${arrow}</a>`;
   const o = otherPartner();
   const ask = isPartner(me) && rs.open && (!rs.k || open === 'ask');
   // Minimizada: ya respondió (o ya no hay nada que responder) y no la abrió.
   if (!ask && !rs.missed && !open && !started && !bare) {
     return `<button class="evmin ${cls}" data-act="evToggle" data-e="${e.id}" aria-expanded="false">${calTile(e.starts_at, cls)}
       <span style="flex:1;min-width:0"><b style="display:block;font-size:14px">${title}</b><span class="muted" style="display:block;margin-top:2px">${sub}</span></span>
-      <span class="row" style="gap:4px">${whoMini(e, c)}</span>${icon.down}</button>`;
+      ${lv.t ? livePill(lv) : `<span class="row" style="gap:4px">${whoMini(e, c)}</span>`}${icon.down}</button>`;
   }
   let body = '';
   if (ask) {
@@ -918,10 +955,10 @@ function confCard(e, now, bare) {
       <div class="row" style="gap:8px"><span style="flex:1">${go(k === 'voy' || started)}</span>${rs.open && isPartner(me) ? `<button class="btn sm b-ghost" data-act="rsvpChange" data-e="${e.id}" style="min-height:52px">Cambiar</button>` : ''}</div>
       ${rs.open ? `<p class="muted" style="margin:0;font-weight:600">Puedes cambiar hasta ${R.fmtWhen(rs.due)}</p>` : ''}`;
   }
-  if (bare) return `<section class="evcard ${rs.missed && !rs.k ? 'late' : cls}">${body}</section>`;
-  return `<section class="evcard ${rs.missed && !rs.k ? 'late' : cls}">
+  if (bare) return `<section class="evcard ${(rs.missed && !rs.k) || lateNow ? 'late' : cls}">${body}</section>`;
+  return `<section class="evcard ${(rs.missed && !rs.k) || lateNow ? 'late' : cls}">
     <div class="row" style="gap:12px">${calTile(e.starts_at, cls)}<div style="flex:1;min-width:0"><b style="display:block;font-size:15px">${title}</b><span class="muted" style="display:block;margin-top:2px">${sub}</span></div>
-    ${open && !ask ? `<button class="ibtn" data-act="evToggle" data-e="${e.id}" aria-label="Minimizar" style="transform:rotate(180deg)">${icon.down}</button>` : ''}</div>${body}</section>`;
+    ${livePill(lv)}${open && !ask ? `<button class="ibtn" data-act="evToggle" data-e="${e.id}" aria-label="Minimizar" style="transform:rotate(180deg)">${icon.down}</button>` : ''}</div>${body}</section>`;
 }
 // Línea de avance de un video: guion, storyboard, cámara, tijera, estrella.
 function vTrack(v, c, now) {
@@ -938,6 +975,38 @@ function vTrack(v, c, now) {
     const svg = (ic === 'pre' ? icon.pen(col, 14) : ic === 'prod' ? icon.cam(col, 14) : ic === 'post' ? icon.cut(col, 14) : icon.star(col, 14));
     return `<div style="flex:${i < 4 ? 1 : 0}"><span class="tc" style="background:${bg};border-color:${ring};border-style:${done || miss || isCur ? 'solid' : 'dashed'}">${svg}</span>${i < 4 ? `<span class="tl" style="background:${done ? '#2F6B4F' : '#2C2F38'}"></span>` : ''}</div>`;
   }).join('')}</div>`;
+}
+// ---------- 1.6 · Ver otras semanas (EtapasR): un botón con dos sentidos, abajo ----------
+// Semana de lunes a domingo (Lima): número de semanas desde el lunes de esta semana.
+function mondayOf(d) { const w = new Date(d + 'T12:00:00-05:00').getUTCDay(); return R.addDays(d, -((w + 6) % 7)); }
+const weekOf = (iso, now = new Date()) => Math.round(dayDiff(mondayOf(R.limaDate(now)), mondayOf(R.limaDate(iso))) / 7);
+const WKNAME = (o) => (o === 0 ? 'Esta semana' : o === -1 ? 'Semana pasada' : o === 1 ? 'Próxima semana' : o > 1 ? `En ${o} semanas` : `Hace ${-o} semanas`);
+function weekRange(o, now = new Date()) { const m = R.addDays(mondayOf(R.limaDate(now)), o * 7), su = R.addDays(m, 6); const f = (d) => Number(d.slice(8, 10)) + ' ' + R.fmtDay(d).split(' ').pop(); return (m.slice(5, 7) === su.slice(5, 7) ? Number(m.slice(8, 10)) : f(m)) + ' – ' + f(su); }
+const navEvents = (tab, c) => c.events.filter((e) => e.kind === (tab === 'pre' ? 'reunion' : 'rodaje') && (active(e) || e.status === 'cancelado'));
+function weekNav(tab, off, c, now) {
+  const offs = [...new Set(navEvents(tab, c).map((e) => weekOf(e.starts_at, now)))];
+  const nL = offs.filter((o) => o < off).length, nR = offs.filter((o) => o > off).length;
+  const lo = Math.min(-1, ...offs), hi = Math.max(1, ...offs);
+  return `<div class="wnav"><div class="wnbar"><button type="button" class="wna" data-act="wkNav" data-d="-1" aria-label="Semana anterior" ${off <= lo ? 'disabled' : ''}>${icon.back.replace('width="18" height="18"', 'width="20" height="20"')}${nL ? `<span class="wnb l">${nL}</span>` : ''}</button>
+    <div class="wnt"><b class="num" style="color:${off === 0 ? 'var(--tx)' : off < 0 ? 'var(--tx3)' : '#A9C7FF'}">${off === 0 ? 'Ver otras semanas' : WKNAME(off)}</b><span>${off === 0 ? 'Pasadas ← · → futuras' : weekRange(off, now)}</span></div>
+    <button type="button" class="wna" data-act="wkNav" data-d="1" aria-label="Semana siguiente" ${off >= hi ? 'disabled' : ''}>${icon.chev.replace('class="chev" ', '')}${nR ? `<span class="wnb r">${nR}</span>` : ''}</button></div>
+    ${off !== 0 ? '<button type="button" class="wnhome" data-act="wkNav" data-d="0">Volver a esta semana</button>' : ''}</div>`;
+}
+function otherWeek(tab, off, c, now) {
+  const evs = navEvents(tab, c).filter((e) => weekOf(e.starts_at, now) === off).sort(byStart);
+  const offs = [...new Set(navEvents(tab, c).map((e) => weekOf(e.starts_at, now)))];
+  let html = `<div class="between" style="align-items:baseline"><b class="num" style="font-size:20px;color:${off < 0 ? 'var(--tx3)' : '#A9C7FF'}">${WKNAME(off)}</b><span class="muted">${weekRange(off, now)}</span></div>`;
+  if (!evs.length) return html + `<section class="wnempty"><b class="num">Nada programado esta semana</b><span>${offs.some((o) => o > off) && off > 0 ? 'Más adelante hay algo programado: usa la flecha →' : offs.some((o) => o < off) && off < 0 ? 'Antes hubo actividad: usa la flecha ←' : offs.some((o) => o > off) ? 'Más adelante hay algo programado: usa la flecha →' : 'Usa "Programar semana" para agregar un rodaje.'}</span></section>`;
+  return html + evs.map((e) => {
+    const past = eventDone(e, now) || new Date(e.starts_at) < now;
+    const vs = e.video_ids.map((id) => c.videos.find((v) => v.id === id)).filter(Boolean).sort((a, b) => a.num - b.num);
+    const shot = vs.filter((v) => R.videoState(v, c, now).r).length;
+    const chip = !active(e) ? ['Cancelada', 'mute'] : tab === 'pre' ? (e.ended_at || (past && now >= R.meetingEnd(e)) ? ['✓ Finalizada', 'ok'] : past ? ['En curso', 'ok'] : ['Programada', 'blue']) : past ? [`✓ ${shot} de ${vs.length} grabados`, shot === vs.length && vs.length ? 'ok' : 'warn'] : ['Programado', 'blue'];
+    if (tab === 'rod' && !active(e)) chip[0] = 'Cancelado';
+    const ttl = `${R.fmtDay(R.limaDate(e.starts_at)).replace(/^./, (x) => x.toUpperCase())}, ${R.limaTime(e.starts_at)}${vs.length ? ' · ' + evTitle(e, c).vt : ''}`;
+    const rows = vs.length ? vs.map((v) => vrow(v, c, now, tab === 'pre' ? 'pre' : 'rod')).join('') : `<p class="muted" style="margin:0 2px">${tab === 'pre' ? 'Los videos se reparten en la reunión.' : 'Sin videos aún · se reparten en la reunión.'}</p>`;
+    return `<section class="wnweek${past ? ' past' : ''}"><a class="wnhd" href="#/e/${e.id}"><span class="tic tint-${tab === 'pre' ? 'pre' : 'prod'}">${stageIc(tab === 'pre' ? 'pre' : 'prod', 17)}</span><b>${ttl}</b><span class="gchip wnc ${chip[1]}">${chip[0]}</span></a>${rows}</section>`;
+  }).join('');
 }
 function vEtapas() {
   const p = st.project();
@@ -958,42 +1027,40 @@ function vEtapas() {
   }).join('')}</div>`;
   html += `<div class="legend wrapl"><span><i class="vs vs-ok mini">${icon.tick}</i>Hecho</span><span><i class="vs vs-late mini"></i>Tarde</span><span><i class="vs vs-p mini"></i>Pendiente</span><span>${st.partners().map((m) => { const col = COLOR[m.role]; return `<i class="vins mini" style="background:${col[0]};color:${col[1]}">${esc(ini(m.name)).charAt(0)}</i>`; }).join('')}de quién es</span></div>`;
   const rod = weekRodaje(c, now);
-  const pastBtn = (t, n, href, k) => `<${href ? `a href="${href}"` : `button data-act="pastToggle" data-k="${k}"`} class="pastbtn">${icon.hist.replace('width="22" height="22"', 'width="18" height="18"')}${t}<span class="cnt">${n}</span>${icon.chev}</${href ? 'a' : 'button'}>`;
-  if (tab === 'pre') {
+  const off = (ui.wkOff || {})[tab] || 0;
+  if (tab !== 'post' && off !== 0) html += otherWeek(tab, off, c, now);
+  else if (tab === 'pre') {
     const nextMt = c.events.filter((e) => e.kind === 'reunion' && active(e) && !e.ended_at && R.meetingEnd(e) > now).sort(byStart)[0];
     const mt = nextMt || meetingFor(rod);
-    const rodM = mt ? S.data.events.find((x) => x.id === mt.rodaje_id) || rod : rod;
-    html += `<div class="between" style="align-items:baseline"><b class="num" style="font-size:20px">Esta semana</b><span class="muted">${rodM ? evTitle(rodM, c).vt.replace(/^v/, 'V') : ''}</span></div>`;
+    const mRods = mt ? R.meetRods(mt).map(evById).filter((r) => r && active(r)).sort(byStart) : [];
+    const rodM = mRods[0] || rod;
+    html += `<div class="between" style="align-items:baseline"><b class="num" style="font-size:20px">Esta semana</b><span class="muted">${mt && mt.video_ids.length ? evTitle(mt, c).vt.replace(/^v/, 'V') : rodM ? evTitle(rodM, c).vt.replace(/^v/, 'V') : ''}</span></div>`;
     if (!rodM) html += `<div class="card"><p class="empty">${isPartner(S.me) && open ? 'No hay rodaje programado. Usa "Programar semana": primero el rodaje, luego la reunión.' : 'No hay nada programado esta semana.'}</p></div>`;
     else if (!mt) html += `<div class="card"><p class="empty">Este rodaje todavía no tiene reunión de preproducción.</p></div>`;
     else {
       html += confCard(mt, now);
-      const vs = vOf(mt.video_ids.length ? mt.video_ids : rodM.video_ids);
-      html += `<div class="slots">${vs.length ? vs.map((v) => { const s = R.videoState(v, c, now); const done = s.g && s.s; const miss = !done && s.d.preDue && now > s.d.preDue; return `<a class="slot ${done ? 'ok' : miss ? 'miss' : 'p'}" href="#/v/${v.id}"><small>VIDEO</small><b>${v.num}</b></a>`; }).join('') : Array.from({ length: Math.min(4, Math.max(left, 0)) }, (_, i) => `<span class="slot empty"><small>VIDEO</small><b>${c.videos.length + i + 1}</b></span>`).join('')}</div>`;
+      const vs = vOf(mt.video_ids.length ? mt.video_ids : mRods.flatMap((r) => r.video_ids));
+      const nEmpty = Math.min(mRods.length > 1 ? mRods.length * 3 : 4, Math.max(left, 0));
+      html += `<div class="slots">${vs.length ? vs.map((v) => { const s = R.videoState(v, c, now); const done = s.g && s.s; const miss = !done && s.d.preDue && now > s.d.preDue; return `<a class="slot ${done ? 'ok' : miss ? 'miss' : 'p'}" href="#/v/${v.id}"><small>VIDEO</small><b>${v.num}</b></a>`; }).join('') : Array.from({ length: nEmpty }, (_, i) => `<span class="slot empty"><small>VIDEO</small><b>${c.videos.length + i + 1}</b></span>`).join('')}</div>`;
       const faltan = c.videos.filter((v) => { const s = R.videoState(v, c, now); return !s.r && !(s.g && s.s) && s.d.preDue && now > s.d.preDue; });
       html += faltan.map((v) => vrow(v, c, now, 'pre')).join('');
     }
-    const pastM = c.events.filter((e) => e.kind === 'reunion' && (!mt || e.id !== mt.id) && (e.ended_at || !active(e) || new Date(e.starts_at) < now)).sort(byStart).reverse();
-    if (pastM.length) {
-      html += pastBtn('Reuniones pasadas', pastM.length, null, 'pre');
-      if ((ui.past || {}).pre) html += pastM.map((e) => `<section class="vgroup dim"><div class="vghead"><span class="tic tint-pre">${stageIc('pre', 17)}</span><div style="flex:1;min-width:0"><b class="num" style="font-size:15px">${R.fmtDay(R.limaDate(e.starts_at))} · ${evTitle(e, c).vt}</b></div><a href="#/e/${e.id}" class="gchip g-done" style="text-decoration:none">${e.ended_at ? 'Finalizada' : !active(e) ? 'Cancelada' : 'Pasó'}</a></div>${vOf(e.video_ids).map((v) => vrow(v, c, now, 'pre')).join('')}</section>`).join('');
-    }
   } else if (tab === 'rod') {
-    html += `<div class="between" style="align-items:baseline"><b class="num" style="font-size:20px">Esta semana</b><span class="muted">${rod ? R.fmtWhen(rod.starts_at) : ''}</span></div>`;
+    // 1.6: todos los rodajes de la semana del próximo rodaje (por ejemplo jue y vie).
+    const rods = rod ? c.events.filter((e) => e.kind === 'rodaje' && active(e) && weekOf(e.starts_at) === weekOf(rod.starts_at) && (e.id === rod.id || !eventDone(e, now))).sort(byStart) : [];
+    html += `<div class="between" style="align-items:baseline"><b class="num" style="font-size:20px">Esta semana</b><span class="muted">${rods.length > 1 ? rods.length + ' rodajes' : rod ? R.fmtWhen(rod.starts_at) : ''}</span></div>`;
     if (!rod) html += `<div class="card"><p class="empty">No hay rodaje programado.</p></div>`;
-    else {
-      html += confCard(rod, now);
-      if (!(ui.evOpen || {})[rod.id] && !R.rsvpState(rod, S.me.id, c, now).missed) html += `<a class="hb x-amber" href="#/e/${rod.id}" style="font-size:15px">Abrir rodaje${arrow}</a>`;
-      html += vOf(rod.video_ids).map((v) => { const o = st.member(v.owner); const col = COLOR[o.role] || ['#22242C', '#C9C9D1']; const s = R.videoState(v, c, now); const miss = !s.g || (s.d.preDue && now > s.d.preDue && !s.s);
+    for (const r of rods) {
+      html += confCard(r, now);
+      const lateR = isPartner(S.me) && liveOf(r, now).k === 'late';
+      if (lateR || (!(ui.evOpen || {})[r.id] && !R.rsvpState(r, S.me.id, c, now).missed)) html += `<a class="hb ${lateR ? 'x-red pulseR' : 'x-amber'}" href="#/e/${r.id}" style="font-size:15px">Abrir rodaje${rods.length > 1 ? ' del ' + R.fmtDay(R.limaDate(r.starts_at)).replace(/ \w+$/, '') : ''}${arrow}</a>`;
+      html += vOf(r.video_ids).map((v) => { const o = st.member(v.owner); const col = COLOR[o.role] || ['#22242C', '#C9C9D1']; const s = R.videoState(v, c, now); const miss = !s.g || (s.d.preDue && now > s.d.preDue && !s.s);
         return `<a class="vcard13${miss ? ' miss' : ''}" href="#/v/${v.id}" style="text-decoration:none;color:inherit"><div class="vhead"><span class="vnum"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span class="vins" style="background:${col[0]};color:${col[1]}">${esc(ini(o.name)).charAt(0)}</span></span><span class="ttl"><p>${v.title ? esc(v.title) : 'Video ' + v.num}</p></span>${icon.chev}</div>${vTrack(v, c, now)}</a>`; }).join('');
     }
-    const pastR = c.events.filter((e) => e.kind === 'rodaje' && (!rod || e.id !== rod.id) && R.limaDate(e.starts_at) < R.limaDate(now)).length;
     const loose = c.videos.filter((v) => !R.rodajeOf(v, c) && !R.videoState(v, c, now).r);
     if (loose.length) html += `<section class="vgroup"><div class="vghead"><span class="tic tint-prod">${stageIc('prod', 17)}</span><div style="flex:1"><b class="num" style="font-size:16px">Videos sin rodaje</b><p class="muted" style="margin:1px 0 0">Se cancelaron o reprogramaron</p></div></div>${loose.map((v) => vrow(v, c, now, 'rod')).join('')}${open && isPartner(S.me) ? `<button class="btn sm x-amber" data-act="newRod" style="align-self:stretch">Programar rodaje para estos videos</button>` : ''}</section>`;
-    if (pastR) html += pastBtn('Rodajes pasados', pastR, '#/rodajes');
-  } else {
-    html += vPost(c, now);
-  }
+  } else html += vPost(c, now);
+  if (tab !== 'post') html += weekNav(tab, off, c, now);
   return html;
 }
 // Posproducción (O): montaje y video final por video, con el apoyo y el "Tomar" del 5.7.
@@ -1048,53 +1115,216 @@ function attChip(s) {
   return `<span class="chip ${K[s.k] || 'c-mute'}">${s.label}</span>`;
 }
 
-// ---------- Programar semana: rodaje → reunión → reparto ----------
+// ==================================================================
+// 1.6 · Campos de fecha y hora (calendario propio y ruedas de hora)
+// ==================================================================
+const IC_CAL = (c = '#8B8B94') => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>`;
+const IC_CLK = (c = '#FFB547') => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>`;
+const ACC_C = { amber: '#FFB547', blue: '#8AB4FF', mint: '#6EE7B7' };
+// key: único en la pantalla · name: campo del formulario · cfg: { label, title, sub, accent, day, dots, okText, quick, onSet, cls }
+function fDate(key, name, value, cfg = {}) {
+  ui.pk[key] = Object.assign({ kind: 'date' }, cfg);
+  const v = ui.fv[key] != null ? ui.fv[key] : value || '';
+  return `<span class="pkf">${cfg.label ? `<span>${cfg.label}</span>` : ''}<input type="hidden" name="${name}" value="${esc(v)}" data-pkv="${key}"><button type="button" class="fld${v ? '' : ' ph'}${cfg.cls ? ' ' + cfg.cls : ''}" data-act="pick" data-pk="${key}" aria-label="${esc((cfg.title || 'Fecha') + (v ? ': ' + R.fmtDay(v) : ''))}">${IC_CAL(cfg.ic)}<b>${v ? R.fmtDay(v) : 'Elegir fecha'}</b></button></span>`;
+}
+function fTime(key, name, value, cfg = {}) {
+  ui.pk[key] = Object.assign({ kind: 'time' }, cfg);
+  const v = ui.fv[key] != null ? ui.fv[key] : roundTime(value || '10:00');
+  return `<span class="pkf">${cfg.label ? `<span>${cfg.label}</span>` : ''}<input type="hidden" name="${name}" value="${esc(v)}" data-pkv="${key}"><button type="button" class="fld${cfg.cls ? ' ' + cfg.cls : ''}" data-act="pick" data-pk="${key}" aria-label="${esc((cfg.title || 'Hora') + ': ' + v)}">${IC_CLK(ACC_C[cfg.accent] || '#FFB547')}<b>${esc(v)}</b></button></span>`;
+}
+// Puntos del calendario: ámbar = rodaje, verde = reunión (del proyecto).
+function evDots(projectId) {
+  const evs = S.data.events.filter((e) => e.project_id === projectId && active(e));
+  return (d) => ({ rod: evs.some((e) => e.kind === 'rodaje' && R.limaDate(e.starts_at) === d), meet: evs.some((e) => e.kind === 'reunion' && R.limaDate(e.starts_at) === d) });
+}
+function pickField(el) {
+  const key = el.dataset.pk;
+  const cfg = ui.pk[key] || {};
+  const inp = document.querySelector(`[data-pkv="${key}"]`);
+  const cur = inp ? inp.value : '';
+  const done = (v) => {
+    if (cfg.onSet) { cfg.onSet(v); render(); return; }
+    ui.fv[key] = v;
+    if (inp) { inp.value = v; inp.dispatchEvent(new Event('change', { bubbles: true })); }
+    const b = el.querySelector('b'); if (b) b.textContent = cfg.kind === 'time' ? v : R.fmtDay(v);
+    el.classList.remove('ph');
+    if (cfg.after) cfg.after(v);
+  };
+  if (cfg.kind === 'time') openTime({ value: cur || '10:00', title: cfg.title || 'Hora', sub: cfg.sub || '', accent: cfg.accent, onDone: done });
+  else openDate({ value: cur, title: cfg.title || 'Fecha', sub: cfg.sub || '', accent: cfg.accent, day: cfg.day, dots: cfg.dots, okText: cfg.okText, quick: cfg.quick, onDone: done });
+}
+// Línea de alerta de fechas (roja con 1 día o si no se puede; gris si hay tiempo).
+const dateAlert = (tone, t, sub, extra = '') => `<div class="dal ${tone}"><i></i><div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:8px"><p>${t}${sub ? `<small>${sub}</small>` : ''}</p>${extra}</div></div>`;
+function weekAlert(chk, keys) {
+  const err = keys.map((k) => chk.errors[k]).find(Boolean);
+  if (err) return dateAlert('bad', esc(err), 'Elige otra fecha u hora.', chk.join ? `<button class="hb x-blue" data-act="wkJoin" style="min-height:44px;align-self:flex-start;width:auto;font-size:14px">Prepararlos juntos en una reunión</button>` : '');
+  const w = keys.map((k) => chk.warns[k]).find((x) => x === R.MSG_ONE_DAY);
+  const inf = keys.map((k) => chk.info[k]).filter(Boolean).join(' · ');
+  const other = keys.map((k) => chk.warns[k]).filter((x) => x && x !== R.MSG_ONE_DAY);
+  if (w) return dateAlert('bad', esc(w), 'Puedes programarlo igual.' + (other.length ? ' ' + esc(other.join(' ')) : ''));
+  return dateAlert('ok', 'Hay tiempo para preparar la preproducción.', other.length ? esc(other.join(' ')) : '');
+}
+
+// ---------- Programar semana (1.6 · SemanaDobleA): rodajes → reunión(es) ----------
+function nextSlot(now) { const m = Number(R.limaTime(now).slice(0, 2)) * 60 + Number(R.limaTime(now).slice(3, 5)); const n = Math.ceil((m + 30) / 60) * 60; return n >= 1440 ? '23:55' : R.hm(n); }
+function wkInit() {
+  const p = st.project();
+  const now = new Date(), today = R.limaDate(now);
+  const evs = S.data.events.filter((e) => e.project_id === p.id && active(e));
+  const start = String(p.start_date).slice(0, 10);
+  const firstTime = !evs.some((e) => e.kind === 'reunion');
+  let md = firstTime ? (start > today ? start : today) : R.addDays(today, 1);
+  let rd = R.addDays(md, 2);
+  const busy = (d) => evs.some((e) => R.limaDate(e.starts_at) === d);
+  while (busy(rd)) rd = R.addDays(rd, 1);
+  while (busy(md) && md < R.addDays(rd, -1)) md = R.addDays(md, 1);
+  ui.wk = { pid: p.id, day: today, rods: [{ d: rd, t: '10:00' }], one: true, meets: [{ d: md, t: md === today ? nextSlot(now) : '10:00' }], tag: firstTime ? (md === start ? 'Prellenada con el inicio del servicio · puedes cambiarla' : 'Prellenada con hoy (el servicio ya empezó) · puedes cambiarla') : '' };
+}
+// Rodajes en orden de fecha (con su reunión, si es una por rodaje).
+function wkSort() {
+  const w = ui.wk;
+  const pairs = w.rods.map((r, i) => [r, w.meets[i]]).sort((a, b) => (a[0].d + a[0].t < b[0].d + b[0].t ? -1 : 1));
+  w.rods = pairs.map((x) => x[0]);
+  if (!w.one) w.meets = pairs.map((x) => x[1] || w.meets[0]);
+}
+function wkInput() {
+  const w = ui.wk;
+  return { rodajes: w.rods.map((r) => ({ date: r.d, time: r.t })), meetings: w.one ? [{ date: w.meets[0].d, time: w.meets[0].t, rods: w.rods.map((_, i) => i) }] : w.rods.map((r, i) => ({ date: (w.meets[i] || w.meets[0]).d, time: (w.meets[i] || w.meets[0]).t, rods: [i] })) };
+}
 function vWeek(rodId) {
   if (rodId) return vReparto(rodId);
-  const today = R.limaDate(new Date());
-  const rd = R.addDays(today, 3);
+  const p = st.project();
+  if (!p) return `${backTo('#/videos', 'Etapas')}<p class="empty">Elige un proyecto.</p>`;
+  if (!ui.wk || ui.wk.pid !== p.id || ui.wk.day !== R.limaDate(new Date())) wkInit();
+  const w = ui.wk;
+  const events = S.data.events.filter((e) => e.project_id === p.id);
+  const inp = wkInput();
+  const chk = R.checkWeek({ project: p, events, rodajes: inp.rodajes, meetings: inp.meetings });
+  const dots = evDots(p.id);
+  const dayFor = (kind, idx) => (d) => {
+    const o = wkInput();
+    if (kind === 'reunion' && !w.one) o.meetings = o.meetings.map((m, j) => (j === idx ? m : Object.assign({}, m, { date: '' })));
+    return R.dayStatus(d, kind, { project: p, events, rodajes: o.rodajes, meetings: o.meetings, idx });
+  };
+  const rodRows = w.rods.map((r, i) => {
+    const err = chk.errors['r' + i];
+    const sub = err ? `<p class="small" style="margin:0 0 0 34px;font-weight:600;color:#FF9B8F">${esc(err)}</p>` : `<p class="small" style="margin:0 0 0 34px;font-weight:600;color:var(--tx4)">Guion y storyboard hasta el ${R.fmtDay(R.addDays(r.d, -1))}, ${R.hm(R.RULES.pre)}</p>`;
+    return `<div style="display:flex;flex-direction:column;gap:6px"><div class="row" style="gap:8px"><span class="wkn">${i + 1}</span>
+      <span style="flex:1.4;min-width:0">${fDate('wk-rd' + i, 'rd' + i, r.d, { title: 'Fecha del rodaje', sub: 'Empieza el ' + R.fmtDay(String(p.start_date).slice(0, 10)), accent: 'amber', ic: '#FFB547', cls: err ? 'bad' : '', day: dayFor('rodaje', i), dots, quick: quickDays(R.addDays(R.limaDate(new Date()), 1), 3, (d) => !dayFor('rodaje', i)(d).off), onSet: (v) => { w.rods[i].d = v; wkSort(); } })}</span>
+      <span style="flex:1;min-width:0">${fTime('wk-rt' + i, 'rt' + i, r.t, { title: 'Hora del rodaje', sub: R.fmtDay(r.d), accent: 'amber', onSet: (v) => { w.rods[i].t = v; } })}</span>
+      ${w.rods.length > 1 ? `<button type="button" class="wkx" data-act="wkDel" data-i="${i}" aria-label="Quitar este rodaje">${icon.x}</button>` : ''}</div>${sub}</div>`;
+  }).join('');
+  const meets = inp.meetings.map((m, j) => {
+    const k = 'm' + j;
+    const tone = chk.errors[k] ? '#5C2420' : chk.warns[k] === R.MSG_ONE_DAY ? '#FF6B5B' : 'var(--line)';
+    const rodsTxt = m.rods.map((ri) => R.fmtDay(w.rods[ri].d).replace(/ \w+$/, '')).map((t) => t.charAt(0).toUpperCase() + t.slice(1));
+    const mm = w.one ? w.meets[0] : (w.meets[j] || w.meets[0]);
+    return `<div class="wkm" style="border-color:${tone}"><div class="between" style="align-items:center"><span class="small" style="font-weight:700;color:#A9C7FF">${w.one && w.rods.length > 1 ? 'Prepara los ' + w.rods.length + ' rodajes' : 'Para el rodaje del ' + rodsTxt[0]}</span>${w.one && w.rods.length > 1 ? `<span class="row" style="gap:4px">${rodsTxt.map((t) => `<span class="wkc">${esc(t)}</span>`).join('')}</span>` : ''}</div>
+      <div class="row" style="gap:8px"><span style="flex:1.4;min-width:0">${fDate('wk-md' + j, 'md' + j, mm.d, { title: 'Fecha de la reunión', sub: 'Para el rodaje del ' + rodsTxt[0], accent: 'blue', ic: '#8AB4FF', cls: chk.errors[k] ? 'bad' : chk.warns[k] === R.MSG_ONE_DAY ? 'warn' : '', day: dayFor('reunion', j), dots, onSet: (v) => { (w.one ? w.meets[0] : w.meets[j]).d = v; w.tag = ''; } })}</span>
+      <span style="flex:1;min-width:0">${fTime('wk-mt' + j, 'mt' + j, mm.t, { title: 'Hora de la reunión', sub: R.fmtDay(mm.d), accent: 'blue', cls: chk.errors[k] && /18:00|plazo|hora/.test(chk.errors[k]) ? 'bad' : '', onSet: (v) => { (w.one ? w.meets[0] : w.meets[j]).t = v; } })}</span></div>
+      ${!w.one || j === 0 ? '' : ''}${chk.errors[k] && !w.one ? `<p class="small" style="margin:0;font-weight:600;color:#FF9B8F">${esc(chk.errors[k])}</p>` : `<p class="small" style="margin:0;font-weight:600;color:var(--tx4);line-height:1.45">${esc(chk.info[k] || (chk.warns[k] && chk.warns[k] !== R.MSG_ONE_DAY ? chk.warns[k] : ''))}</p>`}</div>`;
+  }).join('');
+  const keys = w.rods.map((_, i) => 'r' + i).concat(inp.meetings.map((_, j) => 'm' + j));
   return `${backTo('#/videos', 'Etapas')}
-  <h1>Programar semana</h1><p class="sub">Primero el rodaje. Luego la reunión de preproducción, que tiene que ser antes del plazo: el día anterior al rodaje, 18:00. Los videos se reparten en la reunión.</p>
-  <form data-form="plan" class="card">
-    <p class="lbl" style="color:#FFB547">1 · Rodaje</p>
-    <div class="grid2"><label class="field"><span>Fecha</span><input class="in" type="date" name="rd" value="${rd}" required></label><label class="field"><span>Hora</span><input class="in" type="time" name="rt" value="10:00" required></label></div>
-    <p class="lbl" style="color:#A9C7FF">2 · Reunión de preproducción</p>
-    <div class="grid2"><label class="field"><span>Fecha</span><input class="in" type="date" name="md" value="${R.addDays(rd, -2)}" required></label><label class="field"><span>Hora</span><input class="in" type="time" name="mt" value="10:00" required></label></div>
-    <p class="muted" style="margin:0">Guiones y storyboards vencen el día antes del rodaje a las 18:00. Si alguien no entrega los suyos, su compañero puede tomarlos. Una reunión por rodaje: otra solo después de finalizar la primera.</p>
-    <button class="btn b-amber">Programar</button>
-  </form>`;
+  <div><h1>Programar semana</h1><p class="sub">${esc(p.client)} · ${esc(p.name)} · empieza el ${R.fmtDay(String(p.start_date).slice(0, 10))}${S.me.role === 'admin' ? ` · <button type="button" class="linkbtn" data-act="editStart" style="font-size:13px">Editar</button>` : ''}</p></div>
+  <section class="card"><div class="row" style="gap:10px"><span class="wki" style="background:#2A2416">${icon.cam('#FFB547', 18)}</span><p class="lbl" style="color:#FFB547;flex:1">1 · ${w.rods.length > 1 ? 'Rodajes de la semana' : 'Rodaje'}</p>${w.rods.length > 1 ? `<span class="small" style="font-weight:700;color:#FFC978">${w.rods.length} días</span>` : ''}</div>
+    ${rodRows}
+    ${w.rods.length < 4 ? `<button type="button" class="wkadd" data-act="wkAdd">${icon.plus}Agregar otro día de rodaje</button>` : ''}</section>
+  <section class="card"><div class="row" style="gap:10px"><span class="wki" style="background:#18233A">${icon.pen('#8AB4FF', 18)}</span><p class="lbl" style="color:#A9C7FF;flex:1">2 · Reunión de preproducción</p></div>
+    ${w.rods.length > 1 ? `<div class="seg" role="group" aria-label="Reuniones"><button type="button" class="${w.one ? 'on' : ''}" data-act="wkOne" data-k="1" aria-pressed="${w.one}">Una para todos</button><button type="button" class="${w.one ? '' : 'on'}" data-act="wkOne" data-k="0" aria-pressed="${!w.one}">Una por rodaje</button></div>` : ''}
+    ${meets}
+    ${w.tag ? `<span class="wktag">${esc(w.tag)}</span>` : ''}</section>
+  ${weekAlert(chk, keys)}
+  <button type="button" class="hb ${chk.ok ? 'x-amber' : 'x-off'}" data-act="wkSave" ${chk.ok ? '' : 'disabled'}>Programar</button>
+  <p class="muted" style="margin:0">Los videos se reparten en la reunión. Cada rodaje conserva su plazo: guion y storyboard hasta el día anterior a las ${R.hm(R.RULES.pre)}.${w.rods.length > 1 && w.one ? ' La reunión tiene que ser antes del plazo del primero.' : ''}</p>`;
 }
-function vReparto(rodId) {
-  const rod = S.data.events.find((e) => e.id === rodId);
-  if (!rod) return `<p class="empty">Rodaje no encontrado.</p>`;
-  const p = projOf(rod.project_id);
+
+// ---------- Reparto por tandas (1.6 · RepartoDobleA): un bloque por rodaje, 1 a 6 videos ----------
+function repKey(mt, rods) { return (mt ? mt.id : '') + ':' + rods.map((r) => r.id).join(','); }
+function repInit(key, rods, p) {
   const ps = st.partners();
   const adm = ps.find((m) => m.role === 'admin') || S.me;
   const soc = ps.find((m) => m.role === 'socio');
-  const c = st.ctx(p.id);
-  const left = p.videos_total - c.videos.length;
-  const n = Math.min(4, left);
-  const pubBase = R.addDays(R.limaDate(rod.starts_at), 5);
-  const mt = S.data.events.find((e) => e.kind === 'reunion' && e.rodaje_id === rod.id && active(e));
-  const h = mt ? st.hireFor(mt.id) : null;
-  const rows = Array.from({ length: n }, (_, i) => {
-    const owner = soc ? (i < Math.ceil(n / 2) ? adm.id : soc.id) : adm.id;
-    return `<div class="row" style="gap:8px"><span class="chip c-mute" style="min-width:34px;justify-content:center">${c.videos.length + i + 1}</span>
-      <input class="in" type="date" name="pub${i}" value="${R.addDays(pubBase, Math.floor(i / 2) * 2)}" style="flex:1;min-width:0">
-      <select class="in" name="own${i}" style="flex:1;min-width:0">${ps.map((m) => `<option value="${m.id}" ${m.id === owner ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div>
-      <input class="in" name="tit${i}" placeholder="Tema del video ${c.videos.length + i + 1} (opcional)" maxlength="80" style="margin:-4px 0 6px">`;
-  }).join('');
-  return `${backTo('#/videos', 'Etapas')}
-  <h1>Repartir videos</h1><p class="sub">Rodaje del ${R.fmtWhen(rod.starts_at)}${mt ? ' · reunión del ' + R.fmtWhen(mt.starts_at) : ''}. Quedan ${left} videos por repartir (por defecto 2 y 2).</p>
-  ${h ? `<div class="banner bn-fm"><div><b>Guillermo trabaja por ${esc(st.member(h.hired_by).name)} en esta reunión</b><p>Asigna sus videos y luego marca sus guiones y storyboards "con Guillermo". Recibes ${gp(h) < 1 ? 'el ' + gTxt(h) : 'el total'} de esa preproducción.</p></div></div>` : ''}
-  <form data-form="reparto" class="card"><input type="hidden" name="r" value="${rod.id}"><input type="hidden" name="n" value="${n}">
-    <p class="lbl">Videos · fecha de publicación y dueño</p>
-    ${rows || '<p class="empty">Ya se repartieron todos los videos.</p>'}
-    <p class="muted" style="margin:0">Guion y storyboard: hasta ${R.fmtWhen(R.preDueFor(rod.starts_at))}. Montaje: 2 días antes de publicar (si recibe apoyo) · final: 1 día antes, a las 21:00.</p>
-    <button class="btn b-amber" ${n ? '' : 'disabled'}>Guardar reparto</button>
-  </form>`;
+  const left = p.videos_total - S.data.videos.filter((v) => v.project_id === p.id).length;
+  let rest = left;
+  const tandas = rods.map((r, ti) => {
+    const n = Math.max(0, Math.min(rods.length > 1 ? 3 : 4, rest)); rest -= n;
+    return { rod: r.id, rows: Array.from({ length: n }, () => ({})) };
+  });
+  ui.rep = { key, tandas, left };
+  repDefaults(ps, adm, soc);
 }
-
+// Dueños alternados para que la semana quede pareja (jue W, W, S · vie S, S, W) y publicación por defecto.
+function repDefaults(ps, adm, soc) {
+  ui.rep.tandas.forEach((t, ti) => {
+    const r = evById(t.rod);
+    const n = t.rows.length, half = Math.ceil(n / 2);
+    const A = ti % 2 === 0 ? adm : soc || adm, B = ti % 2 === 0 ? soc || adm : adm;
+    t.rows.forEach((row, i) => {
+      if (!row.ownSet) row.owner = (i < half ? A : B).id;
+      if (!row.pubSet) row.pub = R.addDays(R.addDays(R.limaDate(r.starts_at), 5), Math.floor(i / 2) * 2);
+      if (row.title == null) row.title = '';
+    });
+  });
+}
+function repartoView(mt, rods, p) {
+  const key = repKey(mt, rods);
+  if (!ui.rep || ui.rep.key !== key) repInit(key, rods, p);
+  const ps = st.partners();
+  const adm = ps.find((m) => m.role === 'admin') || S.me;
+  const soc = ps.find((m) => m.role === 'socio');
+  const left = p.videos_total - S.data.videos.filter((v) => v.project_id === p.id).length;
+  if (left <= 0) return `<div class="card"><p class="empty">Ya se repartieron todos los videos del proyecto.</p></div>`;
+  const used = ui.rep.tandas.reduce((a, t) => a + t.rows.length, 0);
+  let num = S.data.videos.filter((v) => v.project_id === p.id).reduce((m, v) => Math.max(m, v.num), 0);
+  const h = mt ? st.hireFor(mt.id) : null;
+  const blocks = ui.rep.tandas.map((t, ti) => {
+    const r = evById(t.rod);
+    const rd = R.limaDate(r.starts_at);
+    const rows = t.rows.map((row, i) => {
+      num++;
+      const o = st.member(row.owner);
+      const col = COLOR[o.role] || ['#22242C', '#C9C9D1'];
+      return `<div class="rpv"><div class="row" style="gap:10px"><span class="vbox rpn"><small>VIDEO</small><b class="num">${num}</b></span>
+        <button type="button" class="rpo${o.role === 'admin' ? ' w' : ' s'}" data-act="repOwn" data-t="${ti}" data-i="${i}" aria-label="Cambiar dueño del video ${num}"><span class="av" style="width:30px;height:30px;font-size:12px;background:${col[0]};color:${col[1]}">${esc(ini(o.name))}</span>${first(o)}<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8B8B94" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 16 3 12l4-4M17 8l4 4-4 4M3 12h18"/></svg></button>
+        <span style="margin-left:auto">${repPub(ti, i, row, rd, p)}</span></div>
+        <input class="tema" data-rept="${ti}:${i}" value="${esc(row.title)}" placeholder="Tema del video ${num} (opcional)" maxlength="80" aria-label="Tema del video ${num}"></div>`;
+    }).join('');
+    return `<section class="rpt"><div class="row" style="gap:12px">${calTile(r.starts_at, 'rod')}<div style="flex:1;min-width:0"><b class="num" style="font-size:16px;display:block">Rodaje · ${R.fmtWhen(r.starts_at)}</b><p class="muted" style="margin:2px 0 0;font-weight:600">Guion y storyboard hasta el ${R.fmtWhen(R.preDueFor(r.starts_at))}</p></div></div>
+      <div class="rpc"><span>Videos este día</span><span class="row" style="gap:10px"><button type="button" class="rpb" data-act="repN" data-t="${ti}" data-d="-1" aria-label="Un video menos" ${t.rows.length <= 1 ? 'disabled' : ''}>−</button><b class="num" style="min-width:22px;text-align:center;font-size:22px">${t.rows.length}</b><button type="button" class="rpb" data-act="repN" data-t="${ti}" data-d="1" aria-label="Un video más" ${t.rows.length >= 6 || used >= left ? 'disabled' : ''}>+</button></span></div>
+      ${rows}</section>`;
+  }).join('');
+  const per = {}; ui.rep.tandas.forEach((t) => t.rows.forEach((r) => { per[r.owner] = (per[r.owner] || 0) + 1; }));
+  const counts = ps.map((m) => per[m.id] || 0);
+  const even = Math.max(...counts) - Math.min(...counts) <= 1;
+  const bal = ps.length < 2 ? '' : even ? (counts[0] === counts[1] ? `La semana queda pareja: ${counts[0]} y ${counts[1]}.` : `Casi pareja: ${counts.join(' y ')} (el total es impar).`) : `${ps.map((m, k) => first(m) + ' ' + counts[k]).join(' · ')}: toca un dueño para emparejar.`;
+  return `${h ? banner('fm', `Guillermo trabaja por ${esc(st.member(h.hired_by).name)}`, 'Cubre todas las tandas de esta reunión: asigna sus videos y marca sus guiones y storyboards "con Guillermo".') : ''}
+    ${blocks}
+    <section class="rps"><p class="lbl" style="color:var(--mint)">En esta reunión</p><div class="row" style="gap:8px;align-items:baseline"><b class="num" style="font-size:30px">${used}</b><span class="small" style="font-weight:600;font-size:14px;color:var(--g-fg)">guiones y ${used} storyboards</span></div>
+      <div class="row" style="gap:8px">${ps.map((m, k) => `<span class="rpw">${av(m, 26)}<b>${counts[k]} ${counts[k] === 1 ? 'video' : 'videos'}</b></span>`).join('')}</div>
+      ${bal ? `<p class="small" style="margin:0;font-weight:600;line-height:1.45;color:${even ? '#9FD9BF' : '#FFC978'}">${bal}</p>` : ''}
+      <p class="muted" style="margin:0">Quedan ${left - used} de ${p.videos_total} videos del proyecto después de este reparto.</p></section>
+    <button type="button" class="hb x-green" data-act="repSave">${icon.check}Confirmar reparto</button>`;
+}
+function repPub(ti, i, row, rd, p) {
+  return fDate(`rp-${ti}-${i}`, `pub${ti}_${i}`, row.pub, { title: 'Publicación', sub: 'Después del rodaje del ' + R.fmtDay(rd), accent: 'amber', ic: '#FFD9A0', cls: 'rpp',
+    day: (d) => (d <= rd ? { off: true, why: 'La publicación va después del rodaje (' + R.fmtDay(rd) + ')' } : {}),
+    okText: (d) => `Publica el ${R.fmtDay(d)} · ${R.daysBetween(rd, d)} ${R.daysBetween(rd, d) === 1 ? 'día' : 'días'} después del rodaje.`,
+    onSet: (v) => { row.pub = v; row.pubSet = true; } });
+}
+// Rodajes de una reunión que aún no tienen videos.
+function emptyRods(mt) { return R.meetRods(mt).map(evById).filter((r) => r && active(r) && !(r.video_ids || []).length).sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at)); }
+function vReparto(rodId) {
+  const rod = evById(rodId);
+  if (!rod) return `${backTo('#/videos', 'Etapas')}<p class="empty">Rodaje no encontrado.</p>`;
+  const p = projOf(rod.project_id);
+  const mt = st.meetingsOf(rod.id).sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at))[0] || null;
+  const rods = mt ? emptyRods(mt) : [rod];
+  const list = rods.length ? rods : [rod];
+  return `${backTo(mt ? '#/e/' + mt.id : '#/videos', mt ? 'Reunión · ' + R.fmtDay(R.limaDate(mt.starts_at)) : 'Etapas')}
+  <div><h1>Repartir videos</h1><p class="sub">${list.length > 1 ? `Una reunión para ${list.length} rodajes` : 'Rodaje del ' + R.fmtWhen(rod.starts_at)} · quedan ${p.videos_total - S.data.videos.filter((v) => v.project_id === p.id).length} videos del proyecto</p></div>
+  ${repartoView(mt, list, p)}`;
+}
 // ---------- Detalle de video ----------
 function vVideo(id) {
   const v = S.data.videos.find((x) => x.id === id);
@@ -1690,7 +1920,7 @@ function eventExtras(e, now) {
     if (me.role === 'admin' && now < start) tools.push(`<button class="btn b-ghost" data-act="tol" data-e="${e.id}">Cambiar tolerancia (${e.tolerance_min} min)</button>`);
     if (me.role === 'admin' && !e.video_ids.length && !atts.length && !S.data.hires.some((h) => h.event_id === e.id)) tools.push(`<button class="btn b-red" data-act="delEv" data-e="${e.id}">Borrar ${isRod ? 'rodaje' : 'reunión'}</button>`);
     else if (me.role === 'admin') tools.push(`<button class="btn b-red" data-act="cancelEv" data-e="${e.id}">Cancelar ${isRod ? 'rodaje' : 'reunión'}</button>`);
-    if (!isRod && e.ended_at) { const rod = S.data.events.find((x) => x.id === e.rodaje_id); if (rod && active(rod) && now < R.preDueFor(rod.starts_at) && !S.data.events.some((x) => x.kind === 'reunion' && x.rodaje_id === rod.id && active(x) && !x.ended_at)) tools.push(`<button class="btn b-ghost" data-act="extraMeet" data-r="${rod.id}">Agendar otra reunión para este rodaje</button>`); }
+    if (!isRod && (e.ended_at || !R.liveMeeting(e, now))) { const rods = R.meetRods(e).map(evById).filter((r) => r && active(r) && now < R.preDueFor(r.starts_at)); if (rods.length && !S.data.events.some((x) => x.id !== e.id && R.liveMeeting(x, now) && R.meetRods(x).some((id) => rods.some((r) => r.id === id)))) tools.push(`<button class="btn b-ghost" data-act="extraMeet" data-m="${e.id}">Agendar otra reunión para ${rods.length > 1 ? 'estos rodajes' : 'este rodaje'}</button>`); }
     if (tools.length) html += `<p class="lbl" style="margin-top:6px">Opciones</p>` + tools.join('');
   }
   return html;
@@ -1732,10 +1962,12 @@ function vMeeting(e) {
   const c = st.ctx(e.project_id);
   const p = projOf(e.project_id);
   const open = p && p.status === 'abierto';
-  const rod = S.data.events.find((x) => x.id === e.rodaje_id);
+  const mRods = R.meetRods(e).map(evById).filter((r) => r && active(r)).sort(byStart);
+  const rod = mRods[0] || S.data.events.find((x) => x.id === e.rodaje_id);
   const vids = e.video_ids.map((vid) => c.videos.find((v) => v.id === vid)).filter(Boolean).sort((a, b) => a.num - b.num);
   const start = new Date(e.starts_at);
   const live = R.meetingOpen(e, now);
+  const lv = isPartner(me) && active(e) ? liveOf(e, now) : { k: 'later' };
   const preDue = rod ? R.preDueFor(rod.starts_at) : null;
   const late = preDue && now > preDue;
   const done = vids.reduce((a, v) => { const s = R.videoState(v, c, now); return a + (s.g ? 1 : 0) + (s.s ? 1 : 0); }, 0);
@@ -1746,8 +1978,8 @@ function vMeeting(e) {
   const stTxt = !active(e) ? (e.status === 'cancelado' ? 'CANCELADA' : 'REPROGRAMADA') : e.ended_at ? 'FINALIZADA ' + R.limaTime(e.ended_at) : live ? 'EN CURSO' : now < start ? 'PROGRAMADA' : 'FINALIZADA';
   const stC = live ? '#6EE7B7' : 'var(--tx4)';
   let html = `${backTo('#/videos', 'Etapas')}${statusBanners(e)}`;
-  html += `<section class="mhead${late && done < total ? ' late' : ''}"><div class="row" style="gap:14px">${calTile(e.starts_at, 'pre')}<div style="flex:1;min-width:0"><b class="num" style="font-size:17px;display:block">Reunión de preproducción</b><p class="sub" style="margin:3px 0 0">${R.limaTime(start)}${rod ? ' · para el rodaje del ' + R.fmtDay(R.limaDate(rod.starts_at)) : ''}</p></div>
-    <span class="row" style="gap:6px;font-size:11px;font-weight:700;color:${stC};white-space:nowrap"><span class="hdot" style="background:${stC};animation:${live ? 'pulse 1.6s ease-in-out infinite' : 'none'}"></span>${stTxt}</span></div>
+  html += `<section class="mhead${(late && done < total) || lv.k === 'late' ? ' late' : ''}"><div class="row" style="gap:14px">${calTile(e.starts_at, 'pre')}<div style="flex:1;min-width:0"><b class="num" style="font-size:17px;display:block">Reunión de preproducción</b><p class="sub" style="margin:3px 0 0">${R.limaTime(start)}${mRods.length > 1 ? ' · para los rodajes del ' + mRods.map((r) => R.fmtDay(R.limaDate(r.starts_at)).replace(/ \w+$/, '')).join(' y ') : rod ? ' · para el rodaje del ' + R.fmtDay(R.limaDate(rod.starts_at)) : ''}</p></div>
+    ${lv.t ? livePill(lv) : `<span class="row" style="gap:6px;font-size:11px;font-weight:700;color:${stC};white-space:nowrap"><span class="hdot" style="background:${stC};animation:${live ? 'pulse 1.6s ease-in-out infinite' : 'none'}"></span>${stTxt}</span>`}</div>
     ${arrivalsRow(e, now)}
     ${vids.length ? `<div style="display:flex;flex-direction:column;gap:8px;padding-top:12px;border-top:1px solid #1F2A24"><div class="between"><b class="small" style="font-size:13px;color:${late && done < total ? 'var(--r-fg2)' : 'var(--g-fg)'}">Entregables</b><b class="num" style="font-size:15px">${done}<span class="muted" style="font-size:15px"> / ${total}</span></b></div>
       <div class="ebar"><i style="width:${total ? Math.round(done / total * 100) : 0}%"></i></div>
@@ -1755,16 +1987,22 @@ function vMeeting(e) {
   html += adminConfirm(e) + myArrival(e, now);
   if (active(e) && now < start && R.rsvpState(e, me.id, c, now).open && !R.rsvpState(e, me.id, c, now).k) html += confCard(e, now, true);
   html += teamMsgs(now).filter((t) => vids.some((v) => t.indexOf('video ' + v.num + ' ') !== -1)).map(msgCard).join('');
-  if (!vids.length && active(e) && open && rod && isPartner(me)) html += repartoForm(e, rod);
+  const toSplit = emptyRods(e);
+  if (toSplit.length && active(e) && open && isPartner(me)) html += `<div class="between" style="align-items:center"><b class="num" style="font-size:19px">Reparte los videos</b>${toSplit.length > 1 ? `<span class="muted">${toSplit.length} rodajes</span>` : ''}</div>` + repartoView(e, toSplit, p);
   else if (!vids.length) html += `<div class="card"><p class="empty">Los videos se reparten en la reunión.</p></div>`;
+  const tandaOf = (v) => mRods.find((r) => (r.video_ids || []).indexOf(v.id) !== -1);
+  let lastT = null;
   html += vids.map((v, i) => {
     const o = st.member(v.owner);
     const col = COLOR[o.role] || ['#22242C', '#C9C9D1'];
     const s = R.videoState(v, c, now);
-    const miss = late && !(s.g && s.s);
+    const miss = s.d.preDue && now > s.d.preDue && !(s.g && s.s);
+    const tr = mRods.length > 1 ? tandaOf(v) : null;
+    const head = tr && tr !== lastT ? `<p class="lbl" style="margin:6px 2px -2px;color:#FFC978">${R.fmtDay(R.limaDate(tr.starts_at)).replace(/^./, (x) => x.toUpperCase())} · ${tr.video_ids.length} ${tr.video_ids.length === 1 ? 'video' : 'videos'} · hasta ${R.fmtWhen(R.preDueFor(tr.starts_at))}</p>` : '';
+    if (tr) lastT = tr;
     const bonus = bonusOf(v);
     const undoT = ['guion', 'storyboard'].map((k) => s[KEY[k]]).filter((t) => t && t.done_by === me.id && !t.split && R.canUndo(t, me, c, now));
-    return `<section class="vcard13${miss ? ' miss' : bonus ? ' good' : ''}" style="animation-delay:${(i * 0.05).toFixed(2)}s"><div class="vhead"><a class="vnum" href="#/v/${v.id}" style="text-decoration:none;color:inherit" aria-label="Detalle del video ${v.num}"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span class="vins" style="background:${col[0]};color:${col[1]}">${esc(ini(o.name)).charAt(0)}</span></a><span class="ttl"><p>${v.title ? esc(v.title) : 'Sin tema'}</p></span>${bonus ? `<span class="chip13" style="background:#2A2010;border:1px solid #6B4A1A;color:#FFD9A0">${icon.flame('#FFB547', 12)}+1 reunión</span>` : ''}</div>
+    return head + `<section class="vcard13${miss ? ' miss' : bonus ? ' good' : ''}" style="animation-delay:${(i * 0.05).toFixed(2)}s"><div class="vhead"><a class="vnum" href="#/v/${v.id}" style="text-decoration:none;color:inherit" aria-label="Detalle del video ${v.num}"><span class="vbox"><small>VIDEO</small><b class="num">${v.num}</b></span><span class="vins" style="background:${col[0]};color:${col[1]}">${esc(ini(o.name)).charAt(0)}</span></a><span class="ttl"><p>${v.title ? esc(v.title) : 'Sin tema'}</p></span>${bonus ? `<span class="chip13" style="background:#2A2010;border:1px solid #6B4A1A;color:#FFD9A0">${icon.flame('#FFB547', 12)}+1 reunión</span>` : ''}</div>
       <div class="tiles">${preTile(v, 'guion', c, now, e)}${preTile(v, 'storyboard', c, now, e)}</div>
       ${undoT.length ? `<div class="row" style="justify-content:flex-end;gap:12px;margin-top:-6px">${undoT.map((t) => `<button class="linkbtn" data-act="undo" data-id="${t.id}">Deshacer ${t.kind}</button>`).join('')}</div>` : ''}</section>`;
   }).join('');
@@ -1775,30 +2013,6 @@ function vMeeting(e) {
   }
   html += eventExtras(e, now);
   return html;
-}
-// Reparto dentro de la reunión: tema y dueño de cada video (2 y 2 por defecto).
-function repartoForm(mt, rod) {
-  const p = projOf(rod.project_id);
-  const ps = st.partners();
-  const adm = ps.find((m) => m.role === 'admin') || S.me;
-  const soc = ps.find((m) => m.role === 'socio');
-  const c = st.ctx(p.id);
-  const left = p.videos_total - c.videos.length;
-  const n = Math.min(4, left);
-  if (!n) return `<div class="card"><p class="empty">Ya se repartieron todos los videos del proyecto.</p></div>`;
-  const pubBase = R.addDays(R.limaDate(rod.starts_at), 5);
-  const h = st.hireFor(mt.id);
-  const rows = Array.from({ length: n }, (_, i) => {
-    const owner = soc ? (i < Math.ceil(n / 2) ? adm.id : soc.id) : adm.id;
-    const num = c.videos.length + i + 1;
-    return `<section class="vcard13" style="animation-delay:${(i * 0.05).toFixed(2)}s"><div class="vhead"><span class="vnum"><span class="vbox"><small>VIDEO</small><b class="num">${num}</b></span></span><input class="tema" name="tit${i}" placeholder="Tema del video" maxlength="80" aria-label="Tema del video ${num}"></div>
-      <div class="row" role="radiogroup" aria-label="Quién hace el video ${num}" style="gap:8px">${ps.map((m) => { const k = m.role === 'admin' ? 'W' : 'S'; return `<label class="own${m.id === owner ? ' on-' + k : ''}" data-k="${k}"><input type="radio" class="hide" name="own${i}" value="${m.id}" ${m.id === owner ? 'checked' : ''}>${av(m, 22)}${esc(first(m))}</label>`; }).join('')}</div>
-      <label class="row small" style="gap:8px;color:var(--tx3)">Publica <input class="in" type="date" name="pub${i}" value="${R.addDays(pubBase, Math.floor(i / 2) * 2)}" style="min-height:38px;flex:1"></label></section>`;
-  }).join('');
-  return `<form data-form="reparto" style="display:flex;flex-direction:column;gap:12px"><input type="hidden" name="r" value="${rod.id}"><input type="hidden" name="n" value="${n}">
-    <div class="between" style="align-items:center"><b class="num" style="font-size:19px">Reparte los videos</b><span class="row" style="gap:6px" data-owncount>${ps.map((m) => `<span class="cnt13" style="background:${m.role === 'admin' ? '#2A2010' : '#131A2A'};color:${m.role === 'admin' ? '#FFD08A' : '#A9C7FF'}">${av(m, 20)}<b data-n="${m.id}">0</b></span>`).join('')}</span></div>
-    ${h ? banner('fm', `Guillermo trabaja por ${esc(st.member(h.hired_by).name)}`, 'Asigna sus videos y marca sus guiones y storyboards "con Guillermo".') : ''}
-    ${rows}<button class="hb x-green">${icon.check}Confirmar reparto</button></form>`;
 }
 // Rodaje por dentro (G/H): "Por grabar" / "✓ Grabado" para los dos; sin guion, Reprogramar.
 function vShoot(e) {
@@ -1813,7 +2027,14 @@ function vShoot(e) {
   const myS = st.eventStatus(e, me.id, now);
   const amHere = ['puntual', 'tarde'].indexOf(myS.k) !== -1;
   let html = `${backTo('#/videos', 'Etapas')}${statusBanners(e)}`;
-  html += `<section class="evcard rod"><div class="row" style="gap:12px">${calTile(e.starts_at, 'rod')}<div style="flex:1;min-width:0"><b class="num" style="font-size:17px;display:block">Rodaje · ${R.limaTime(start)}</b><span class="muted" style="display:block;margin-top:2px">${evTitle(e, c).vt}${e.note ? ' · ' + esc(e.note) : ''}</span></div><span class="small" style="font-weight:700;color:var(--tx4)">${today ? (now >= start ? 'HOY · EN CURSO' : 'HOY') : now > start ? 'PASÓ' : R.fmtDay(R.limaDate(start)).toUpperCase()}</span></div>${arrivalsRow(e, now)}</section>`;
+  // 1.6 (ProduccionJ): indicador tipo REC, rojo como en una cámara; si vas tarde, toda la tarjeta en rojo.
+  const lv = isPartner(me) ? liveOf(e, now) : liveOf(e, now, null);
+  const rec = !active(e) ? '' : lv.k === 'done' ? `<span class="recp done">${icon.tick}${vids.length ? 'GRABADO' : 'PASÓ'}</span>`
+    : lv.k === 'late' ? `<span class="recp late"><span class="rd"><i></i></span>${lv.t}</span>`
+    : lv.k === 'live' || lv.k === 'absent' ? `<span class="recp rec"><span class="rd"><i></i></span>REC · RODANDO</span>`
+    : lv.k === 'soon' ? `<span class="recp soon"><span class="rd"><i></i></span>${lv.t}</span>`
+    : `<span class="recp later">${R.limaDate(start) === R.addDays(R.limaDate(now), 1) ? 'MAÑANA' : R.fmtDay(R.limaDate(start)).replace(/ \w+$/, '').toUpperCase()} · ${R.limaTime(start)}</span>`;
+  html += `<section class="evcard ${lv.k === 'late' ? 'late' : 'rod'}"><div class="row" style="gap:12px">${calTile(e.starts_at, 'rod')}<div style="flex:1;min-width:0"><b class="num" style="font-size:17px;display:block">Rodaje · ${R.limaTime(start)}</b><span class="muted" style="display:block;margin-top:2px">${evTitle(e, c).vt}${e.note ? ' · ' + esc(e.note) : ''}</span></div>${rec}</div>${arrivalsRow(e, now)}</section>`;
   html += adminConfirm(e) + myArrival(e, now);
   if (active(e) && now < new Date(start.getTime() - R.RULES.open * 60000) && (R.rsvpState(e, me.id, c, now).open && !R.rsvpState(e, me.id, c, now).k || R.rsvpState(e, me.id, c, now).missed)) html += confCard(e, now, true);
   html += teamMsgs(now).filter((t) => vids.some((v) => t.indexOf('video ' + v.num + ' ') !== -1)).map(msgCard).join('');
@@ -2192,7 +2413,7 @@ function logText2(l) {
   if (T === 'events.update' && n.ended_at && !o.ended_at) return { k: 'plan', t: `${who} finalizó ${evn(n)}`, s: 'terminó a las ' + R.limaTime(n.ended_at) };
   if (T === 'events.update' && n.end_requested_at && !o.end_requested_at) return { k: 'plan', t: `${who} pidió finalizar ${evn(n)}`, s: 'a las ' + R.limaTime(n.end_requested_at) };
   if (T === 'events.update' && n.starts_at !== o.starts_at) return { k: 'plan', t: `${who} cambió ${evn(o)}`, s: 'nueva hora: ' + R.fmtWhen(n.starts_at) };
-  if (T === 'events.update' && n.rodaje_id !== o.rodaje_id) return null;
+  if (T === 'events.update' && (n.rodaje_id !== o.rodaje_id || JSON.stringify(n.rodaje_ids || null) !== JSON.stringify(o.rodaje_ids || null))) return null;
   if (T === 'events.update' && (n.video_ids || []).length > (o.video_ids || []).length) return { k: 'plan', t: `${who} asignó videos a ${evn(n)}` };
   if (T === 'events.delete') return { k: 'plan', t: `${who} borró ${evn(o)}`, s: 'estaba vacío' };
   if (T === 'projects.update' && n.status !== o.status && (n.status === 'archivado' || o.status === 'archivado')) return { k: 'pay', t: `${who} ${n.status === 'archivado' ? 'archivó' : 'reabrió'} el proyecto ${esc(n.client)} · ${esc(n.name)}` };
@@ -2244,24 +2465,251 @@ function logText2(l) {
   return logText(l);
 }
 
+// ---------- 1.6 · Historial C: tocar un registro → de qué se trata, rastro y corregir ----------
+const fixedRefs = () => { const m = {}; for (const l of S.data.log) if (l.type === 'correction' && l.data) m[Number(l.data.ref)] = l; return m; };
+const TIPO = { unmark: 'Desmarcar', who: 'Cambiar quién lo hizo', video: 'Cambiar a qué video corresponde', time: 'Cambiar la hora', arrival: 'Cambiar la llegada', rsvp: 'Quitar la confirmación de asistencia', reopen: 'Reabrir la reunión' };
+// De qué se trata un registro: un video, una reunión o rodaje, o el equipo.
+function logSubject(l) {
+  const n = (l.data && (l.data.new || l.data.old)) || {};
+  const T = l.type;
+  if (T === 'correction' || T === 'correction.obs') { const r = S.data.log.find((x) => x.id === Number(l.data.ref)); return r ? logSubject(r) : { k: 'team' }; }
+  if (/^(tasks|claims)\./.test(T) || T === 'video.reprogramado') { const v = S.data.videos.find((x) => x.id === n.video_id); if (v) return { k: 'video', v }; }
+  if (/^videos\./.test(T)) { const v = S.data.videos.find((x) => x.id === n.id); if (v) return { k: 'video', v }; }
+  if (/^attendance\./.test(T) || /^hires\./.test(T)) { const e = evById(n.event_id); if (e) return { k: 'event', e }; }
+  if (/^events\./.test(T)) { const e = evById(n.id); if (e) return { k: 'event', e }; }
+  return { k: 'team' };
+}
+function logIcon(x) {
+  const T = x.l.type, n = (x.l.data && (x.l.data.new || x.l.data.old)) || {};
+  if (T === 'correction') return ['corr', icon.back.replace('M15 6l-6 6 6 6', 'M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5')];
+  if (/^tasks\./.test(T)) { const k = R.STAGE_OF[n.kind]; return [k === 'prod' ? 'prod' : k === 'post' ? 'post' : 'pre', stageIc(k === 'prod' ? 'prod' : k === 'post' ? 'post' : 'pre', 17)]; }
+  if (x.k === 'att') return ['att', pinIc.replace('width="18" height="18"', 'width="17" height="17"')];
+  if (/^events\./.test(T)) return [n.kind === 'rodaje' ? 'prod' : 'pre', stageIc(n.kind === 'rodaje' ? 'prod' : 'pre', 17)];
+  if (x.k === 'plan') return ['pre', stageIc('pre', 17)];
+  if (x.k === 'pay') return ['pay', icon.pie('var(--mint)')];
+  return ['team', icon.users];
+}
+function histRows() {
+  const fx = fixedRefs();
+  return S.data.log.slice().reverse().filter((l) => !(l.data && l.data.fix)).map((l) => {
+    let x;
+    if (l.type === 'correction') { const who = st.member(l.actor); x = { k: 'team', t: `${esc(first(who))} corrigió: ${esc(l.data.text || TIPO[l.data.kind] || 'un registro')}`, s: esc(l.data.motivo || ''), corr: true }; }
+    else if (l.type === 'correction.obs') x = { k: 'team', t: `${esc(first(st.member(l.actor)))} hizo una observación a una corrección`, s: esc((l.data || {}).text || '') };
+    else x = logText2(l) || {};
+    return Object.assign({ l, fixed: fx[l.id] }, x);
+  }).filter((x) => x.t);
+}
 function vHistory() {
   const F = [['all', 'Todo'], ['task', 'Tareas'], ['att', 'Asistencia'], ['plan', 'Reparto'], ['pay', 'Pagos'], ['team', 'Equipo']];
-  const rows = S.data.log.slice().reverse().map((l) => Object.assign({ l }, logText2(l) || {})).filter((x) => x.t && (ui.histF === 'all' || x.k === ui.histF));
+  const rows = histRows().filter((x) => ui.histF === 'all' || x.k === ui.histF);
   const pendC = S.data.corrections.filter((x) => x.status === 'pendiente');
-  let html = `<div><h1>Historial</h1><p class="sub">Todo queda registrado con fecha y hora. Nadie puede borrarlo ni editarlo. Si algo está mal, se pide una corrección; lo vacío (una reunión o un proyecto sin datos) sí se puede borrar, y queda anotado aquí.</p></div>`;
-  if (pendC.length) html += `<section class="card" style="border-color:#4A3414;background:#1C130A"><p class="lbl" style="color:#FFC978">Correcciones pendientes</p>${pendC.map((c) => `<div><b class="small">${esc(st.member(c.requested_by).name)}:</b> <span class="small">${esc(c.text)}</span>${c.requested_by !== S.me.id ? `<div class="grid2" style="margin-top:8px"><button class="btn sm b-amber" data-act="corr" data-id="${c.id}" data-s="aprobada">Aprobar</button><button class="btn sm b-ghost" data-act="corr" data-id="${c.id}" data-s="rechazada">Rechazar</button></div>` : '<p class="muted" style="margin:4px 0 0">Esperando respuesta</p>'}</div>`).join('')}${st.isAdmin() ? '<p class="muted" style="margin:0">Al aprobar, se aplica el cambio (por ejemplo, desmarcar y volver a marcar la tarea). El original queda en el historial.</p>' : ''}</section>`;
+  let html = `<div><h1>Historial</h1><p class="sub">Toca un registro para ver de dónde viene y qué sigue. Nada se borra: si algo está mal, ${S.me.role === 'admin' ? 'lo corriges y' : 'pides una corrección y'} queda registrado.</p></div>`;
+  if (pendC.length) html += `<section class="card" style="border-color:#4A3414;background:#1C130A"><p class="lbl" style="color:#FFC978">Correcciones pedidas</p>${pendC.map((c) => `<div><b class="small">${esc(st.member(c.requested_by).name)}:</b> <span class="small">${esc(c.text)}</span>${c.requested_by !== S.me.id && st.isAdmin() ? `<div class="grid2" style="margin-top:8px"><button class="btn sm b-amber" data-act="histOpen" data-id="${c.log_id}" data-req="${c.id}">Revisar y corregir</button><button class="btn sm b-ghost" data-act="corr" data-id="${c.id}" data-s="rechazada">Rechazar</button></div>` : '<p class="muted" style="margin:4px 0 0">Esperando respuesta</p>'}</div>`).join('')}</section>`;
   html += `<div class="row" style="flex-wrap:wrap;gap:6px">${F.map(([k, t]) => `<button class="btn sm ${ui.histF === k ? 'b-amber' : 'b-ghost'}" data-act="histF" data-k="${k}">${t}</button>`).join('')}</div>`;
   let lastDay = '';
-  html += `<section class="card" style="padding:6px 16px"><div class="list">${rows.map((x) => {
+  html += `<section class="card hlist">${rows.map((x) => {
     const day = R.limaDate(x.l.at);
-    const head = day !== lastDay ? `<p class="lbl" style="padding:12px 0 2px">${R.fmtDay(day)}</p>` : '';
+    const head = day !== lastDay ? `<p class="lbl" style="padding:12px 4px 6px">${R.fmtDay(day)}</p>` : '';
     lastDay = day;
     const a = st.member(x.l.actor);
-    return head + `<div class="li" style="align-items:flex-start">${x.l.actor ? av(a, 28) : '<span class="av" style="width:28px;height:28px;background:#22242C;color:#C9C9D1;font-size:9px">App</span>'}<span class="t"><b style="font-weight:600">${x.t}</b><span>${R.limaTime(x.l.at)}${x.s ? ' · ' + x.s : ''}</span>${x.photo ? `<button class="btn sm b-ghost" data-act="photo" data-p="${esc(x.photo)}" style="margin-top:6px">Ver foto</button>` : ''}</span><button class="btn sm b-ghost" data-act="askCorr" data-id="${x.l.id}" style="min-height:30px;padding:0 8px;font-size:11px">Corregir</button></div>`;
-  }).join('') || '<p class="empty">Sin registros.</p>'}</div></section>`;
+    const col = x.l.actor ? COLOR[a.role] || ['#22242C', '#C9C9D1'] : ['#22242C', '#C9C9D1'];
+    const [ik, ic] = logIcon(x);
+    return head + `<button type="button" class="hrow" data-act="histOpen" data-id="${x.l.id}"><span class="hic"><span class="hib k-${ik}">${ic}</span><i style="background:${col[0]};color:${col[1]}">${x.l.actor ? esc(ini(a.name)).charAt(0) : 'A'}</i></span>
+      <span class="htx"><b class="${x.fixed ? 'struck' : ''}">${x.t}</b><span>${R.limaTime(x.l.at)}${x.s ? ' · ' + x.s : ''}</span>${x.fixed ? '<em class="htag red">Corregido</em>' : x.corr ? '<em class="htag red">Corrección</em>' : ''}</span>${icon.chev}</button>`;
+  }).join('') || '<p class="empty">Sin registros.</p>'}</section>`;
   return html;
 }
-
+// Qué correcciones tiene sentido ofrecer para un registro (6.1), con lo que bloquea o avisa.
+function corrOptions(l) {
+  const out = [];
+  const n = (l.data && l.data.new) || {};
+  const c = st.ctx(l.project_id || S.projectId);
+  if (l.type === 'tasks.insert') {
+    const t = S.data.tasks.find((x) => x.id === n.id);
+    if (!t) return { none: 'Esa tarea ya no existe: se desmarcó o se corrigió antes.' };
+    if (t.void) return { none: 'Esa tarea ya no cuenta (el video pasó a otra persona).' };
+    if (t.split) return { none: 'El storyboard repartido va con el rodaje: corrige el rodaje.' };
+    const later = R.laterStep(t, S.data.tasks);
+    const v = S.data.videos.find((x) => x.id === t.video_id);
+    const cl = (c.claims || []).find((x) => x.video_id === t.video_id && x.kind === t.kind && x.member_id !== t.done_by && (x.status || 'activa') === 'activa');
+    const warnCl = cl ? `${first(st.member(cl.member_id))} había tomado esta tarea: su compromiso no se quita.` : '';
+    out.push({ k: 'unmark', block: later ? `No se puede desmarcar: ${later}. Usa “cambiar quién lo hizo” o “cambiar la hora”.` : '', warn: warnCl });
+    const others = st.partners().filter((m) => m.id !== t.done_by);
+    out.push({ k: 'who', block: t.hire_id ? 'Lo hizo Guillermo: corrige la contratación.' : !others.length ? 'No hay otro socio.' : '', opts: others.map((m) => ({ v: m.id, t: first(m) })) });
+    const kindPre = { rodaje: 'guion', montaje: 'rodaje', acabado: 'montaje' };
+    const targets = t.kind === 'rodaje' ? [] : c.videos.filter((x) => x.id !== t.video_id && !S.data.tasks.some((y) => y.video_id === x.id && y.kind === t.kind && !y.void) && (!kindPre[t.kind] || S.data.tasks.some((y) => y.video_id === x.id && y.kind === kindPre[t.kind] && !y.void))).sort((a, b) => a.num - b.num);
+    out.push({ k: 'video', block: t.kind === 'rodaje' ? 'El rodaje no se cambia de video: desmárcalo.' : later ? `No se puede: ${later}.` : !targets.length ? 'No hay otro video donde quepa.' : '', opts: targets.map((x) => ({ v: x.id, t: 'Video ' + x.num + (x.title ? ' · ' + x.title : '') })) });
+    out.push({ k: 'time', cur: t.done_at });
+    return { list: out, task: t, video: v };
+  }
+  if (/^attendance\./.test(l.type)) {
+    const a = S.data.attendance.find((x) => x.id === n.id);
+    if (!a) return { none: 'Ese registro ya no existe.' };
+    const e = evById(a.event_id);
+    const dep = e && (S.data.attendance.some((x) => x.event_id === e.id && x.member_id !== a.member_id && x.notice && x.notice.decision) || wasReprogrammed(e) || e.status === 'reprogramado') ? 'Esa llegada influyó en otra decisión (tomar el día o reprogramar): esa decisión no se deshace sola; corrígela aparte si hace falta.' : '';
+    if (n.arrived_at || n.claimed_at || a.arrived_at) out.push({ k: 'arrival', cur: a.arrived_at, warn: dep });
+    if (a.rsvp) out.push({ k: 'rsvp' });
+    return out.length ? { list: out, att: a, event: e } : { none: 'Este registro de asistencia no tiene nada que corregir.' };
+  }
+  if (l.type === 'events.update' && n.ended_at && !((l.data.old || {}).ended_at)) {
+    const e = evById(n.id);
+    const rf = e && R.firstRodaje(e, S.data.events);
+    const other = e && S.data.events.some((x) => x.id !== e.id && R.liveMeeting(x) && R.meetRods(x).some((id) => R.meetHas(e, id)));
+    out.push({ k: 'reopen', block: !e || !e.ended_at ? 'La reunión ya está abierta.' : new Date(e.starts_at).getTime() + 6 * 3600e3 <= Date.now() ? 'Ya se cerró sola (6 horas después de empezar).' : !rf || new Date(rf.starts_at) <= new Date() ? 'Su rodaje ya pasó.' : other ? 'Ya hay otra reunión abierta para ese rodaje.' : '' });
+    return { list: out, event: e };
+  }
+  if (l.type === 'videos.insert') return { none: 'Para cambiar el dueño de un video con tareas marcadas, primero corrige esas tareas (o usa “cambiar quién lo hizo” en cada una).' };
+  return { none: 'Este tipo de registro no se corrige.' };
+}
+// Simula la corrección y compara dinero y puntos de cada socio (todo se recalcula desde los registros).
+function corrEffect(l, tipo, args) {
+  const p = projOf(l.project_id || S.projectId);
+  if (!p) return '';
+  const c0 = st.ctx(p.id);
+  const c1 = JSON.parse(JSON.stringify(c0));
+  const n = (l.data && l.data.new) || {};
+  const now = new Date();
+  if (['unmark', 'who', 'video', 'time'].indexOf(tipo) !== -1) {
+    const t = c1.tasks.find((x) => x.id === n.id); if (!t) return '';
+    if (tipo === 'unmark') { c1.tasks = c1.tasks.filter((x) => x.id !== t.id && !(t.kind === 'rodaje' && x.video_id === t.video_id && x.split)); }
+    if (tipo === 'who' && args.member) t.done_by = args.member;
+    if (tipo === 'video' && args.video) t.video_id = args.video;
+    if (tipo === 'time' && args.at) t.done_at = args.at;
+  } else if (tipo === 'arrival' || tipo === 'rsvp') {
+    const a = c1.attendance.find((x) => x.id === n.id); if (!a) return '';
+    if (tipo === 'rsvp') { a.rsvp = null; a.rsvp_at = null; }
+    else if (args.at) { a.arrived_at = args.at; a.claimed_at = a.claimed_at || args.at; } else { a.arrived_at = null; a.claimed_at = null; }
+  } else if (tipo === 'reopen') { const e = c1.events.find((x) => x.id === n.id); if (e) { e.ended_at = null; e.end_requested_at = null; } }
+  const parts = st.partners().map((m) => {
+    const m0 = ((R.payouts(p, c0, now).porMiembro || {})[m.id] || {}).total || 0, m1 = ((R.payouts(p, c1, now).porMiembro || {})[m.id] || {}).total || 0;
+    const k0 = R.streak(m.id, c0, now).pts, k1 = R.streak(m.id, c1, now).pts;
+    const dm = Math.round((m1 - m0) * 100) / 100, dk = k1 - k0;
+    const bits = [];
+    if (Math.abs(dm) >= 0.005) bits.push((dm > 0 ? '+' : '−') + R.money(Math.abs(dm)));
+    if (dk) bits.push((dk > 0 ? '+' : '−') + Math.abs(dk) + (Math.abs(dk) === 1 ? ' punto' : ' puntos'));
+    return bits.length ? `${first(m)}: ${bits.join(' · ')}` : '';
+  }).filter(Boolean);
+  return parts.length ? 'Efecto: ' + parts.join(' · ') + '.' : 'No cambia el dinero ni los puntos.';
+}
+function corrText(l, tipo, args, o) {
+  const n = (l.data && l.data.new) || {};
+  const vn = (id) => (S.data.videos.find((x) => x.id === id) || {}).num || '?';
+  const K = (k) => (R.KIND_LABEL[k] || k).toLowerCase();
+  if (tipo === 'unmark') return `Desmarcó el ${K(n.kind)} del video ${vn(n.video_id)}`;
+  if (tipo === 'who') return `El ${K(n.kind)} del video ${vn(n.video_id)} lo hizo ${first(st.member(args.member))}`;
+  if (tipo === 'video') return `El ${K(n.kind)} era del video ${vn(args.video)} (no del ${vn(n.video_id)})`;
+  if (tipo === 'time') return `Hora del ${K(n.kind)} del video ${vn(n.video_id)}: ${R.fmtWhen(args.at)}`;
+  if (tipo === 'arrival') return args.at ? `Llegada de ${first(st.member(o.att.member_id))}: ${R.limaTime(args.at)}` : `${first(st.member(o.att.member_id))} no llegó`;
+  if (tipo === 'rsvp') return `Se quitó la confirmación de ${first(st.member(o.att.member_id))}`;
+  if (tipo === 'reopen') return 'Reabrió la reunión';
+  return TIPO[tipo];
+}
+function whatLine(l) {
+  const n = (l.data && l.data.new) || {}, o = (l.data && l.data.old) || {};
+  const p = projOf(l.project_id || S.projectId);
+  const x = l.type === 'correction' ? { t: `${first(st.member(l.actor))} corrigió: ${esc(l.data.text || '')}`, s: 'Motivo: ' + esc(l.data.motivo || '') } : logText2(l) || { t: esc(l.type) };
+  let extra = '';
+  if (l.type === 'tasks.insert' && p) {
+    const r = R.rates(p)[n.kind] || 0;
+    const v = S.data.videos.find((y) => y.id === n.video_id);
+    const st0 = v && R.videoState(v, st.ctx(p.id));
+    const due = st0 && (n.kind === 'guion' || n.kind === 'storyboard' ? st0.d.preDue : n.kind === 'acabado' ? st0.d.finalDue : null);
+    extra = ` · ${R.money(n.split ? r / 2 : r)} para ${first(st.member(n.done_by))}${due ? (new Date(n.done_at) <= due ? ' · a tiempo' : ' · fuera de plazo') : ''}`;
+  }
+  if (/^attendance\./.test(l.type) && n.arrived_at && !o.arrived_at) { const e = evById(n.event_id); if (e) { const s = R.attendanceStatus(e, n, new Date()); extra = ' · ' + s.label.toLowerCase() + (s.pts ? ` (${s.pts > 0 ? '+' : ''}${s.pts} ${Math.abs(s.pts) === 1 ? 'punto' : 'puntos'})` : ''); } }
+  return `${x.t}${x.s ? ' · ' + x.s : ''}${extra}.`;
+}
+// Rastro: del origen a lo que sigue (lo pendiente en gris punteado).
+function trail(l, subj) {
+  const nodes = [];
+  const fx = fixedRefs();
+  const rel = (y) => { const s2 = logSubject(y); return subj.k === 'video' ? s2.k === 'video' && s2.v.id === subj.v.id : subj.k === 'event' ? s2.k === 'event' && s2.e.id === subj.e.id : y.id === l.id; };
+  let logs = S.data.log.filter((y) => !(y.data && y.data.fix) && y.type !== 'correction.obs' && rel(y));
+  if (subj.k === 'video') {
+    const rod = R.rodajeOf(subj.v, st.ctx(subj.v.project_id)) || S.data.events.find((e) => (e.video_ids || []).indexOf(subj.v.id) !== -1);
+    const plan = rod && S.data.log.find((y) => y.type === 'events.insert' && y.data.new && y.data.new.id === rod.id);
+    if (plan) logs.unshift(plan);
+  }
+  logs = logs.filter((y, i, a) => a.indexOf(y) === i).sort((a, b) => new Date(a.at) - new Date(b.at) || a.id - b.id);
+  for (const y of logs) {
+    const x = y.type === 'correction' ? { t: `${first(st.member(y.actor))} lo corrigió`, s: esc(y.data.text || '') + (y.data.motivo ? ' · ' + esc(y.data.motivo) : '') } : logText2(y);
+    if (!x) continue;
+    nodes.push({ t: x.t, sub: x.s || '', time: R.fmtWhen(y.at), on: y.id === l.id, red: y.type === 'correction', struck: !!fx[y.id] });
+  }
+  if (subj.k === 'video') {
+    const s = R.videoState(subj.v, st.ctx(subj.v.project_id));
+    const nx = [];
+    if (!s.g) nx.push(['Guion', s.d.preDue]);
+    if (!s.s) nx.push(['Storyboard', s.d.preDue]);
+    if (!s.r) nx.push(['Rodaje', s.rodaje ? new Date(s.rodaje.starts_at) : null]);
+    if (!s.mo) nx.push(['Montaje', s.d.montajeDue]);
+    if (!s.ac) nx.push(['Video final', s.d.finalDue]);
+    if (!s.delivered) nx.push(['Publicación', R.at(subj.v.publish_date, '12:00')]);
+    for (const [t, d] of nx) nodes.push({ t, time: d ? (t === 'Publicación' ? R.fmtDay(subj.v.publish_date) : 'hasta ' + R.fmtWhen(d)) : 'sin fecha', next: true });
+  } else if (subj.k === 'event' && subj.e.kind === 'reunion' && !subj.e.ended_at && active(subj.e)) nodes.push({ t: 'Finalizar la reunión', time: 'se cierra sola a las ' + R.limaTime(R.meetingEnd(subj.e)), next: true });
+  return nodes;
+}
+function histSheet() {
+  const h = ui.hist; const l = S.data.log.find((x) => x.id === h.id);
+  if (!l) return '<p class="empty">Registro no encontrado.</p><button class="btn b-ghost" data-act="close">Cerrar</button>';
+  const subj = logSubject(l);
+  const fx = fixedRefs()[l.id];
+  const me = S.me, admin = me.role === 'admin';
+  const p = projOf(l.project_id || S.projectId);
+  const paid = p && p.settlement && p.settlement.paid_at;
+  const sent = p && p.settlement && p.settlement.sent_at;
+  let hd;
+  if (subj.k === 'video') {
+    const v = subj.v, o = st.member(v.owner), s = R.videoState(v, st.ctx(v.project_id));
+    hd = { ic: 'k-pre', svg: icon.vids, kind: 'Video ' + v.num, title: v.title ? esc(v.title) : 'Video ' + v.num, chips: [['Dueño: ' + first(o), 'c-info'], s.rodaje ? ['Rodaje ' + R.fmtDay(R.limaDate(s.rodaje.starts_at)), 'c-late'] : null, ['Publica ' + R.fmtDay(v.publish_date), 'c-mute']].filter(Boolean), go: ['#/v/' + v.id, 'Ir al video ' + v.num] };
+  } else if (subj.k === 'event') {
+    const e = subj.e;
+    hd = { ic: e.kind === 'rodaje' ? 'k-prod' : 'k-pre', svg: stageIc(e.kind === 'rodaje' ? 'prod' : 'pre', 20), kind: e.kind === 'rodaje' ? 'Rodaje' : 'Reunión', title: R.fmtWhen(e.starts_at), chips: [[evTitle(e, st.ctx(e.project_id)).vt || 'sin videos', 'c-mute'], !active(e) ? [e.status === 'cancelado' ? 'Cancelado' : 'Reprogramado', 'c-bad'] : e.ended_at ? ['Finalizada', 'c-ok'] : null].filter(Boolean), go: ['#/e/' + e.id, e.kind === 'rodaje' ? 'Ir al rodaje' : 'Ir a la reunión'] };
+  } else hd = { ic: 'k-team', svg: icon.users, kind: 'Equipo', title: esc((S.teams.find((t) => t.team_id === S.teamId) || {}).team || 'Equipo'), chips: [], go: [admin ? '#/admin/integrantes' : '#/equipo', admin ? 'Ir a Integrantes' : 'Ir a Equipo'] };
+  let html = `<div class="row" style="gap:12px;align-items:flex-start"><span class="hib big ${hd.ic}">${hd.svg}</span><div style="flex:1;min-width:0"><p class="lbl">${hd.kind}</p><b class="num" style="display:block;margin-top:3px;font-size:20px;line-height:1.2">${hd.title}</b>${hd.chips.length ? `<div class="row" style="gap:6px;flex-wrap:wrap;margin-top:8px">${hd.chips.map(([t, k]) => `<span class="chip ${k}">${esc(t)}</span>`).join('')}</div>` : ''}</div></div>
+    <div class="hwhat"><p class="lbl" style="color:#FFC978">Lo que tocaste</p><p>${whatLine(l)}</p></div>`;
+  if (fx) html += `<div class="hcd"><b>${first(st.member(fx.actor))} lo corrigió · ${R.fmtWhen(fx.at)}</b><span>${esc(fx.data.text || '')}${fx.data.motivo ? ' · Motivo: ' + esc(fx.data.motivo) : ''}</span></div>`;
+  const oc = l.type === 'correction' ? { none: 'Una corrección no se corrige: si hace falta, corrige el registro de nuevo desde su rastro.' } : corrOptions(l);
+  const reqd = S.data.corrections.find((c) => c.log_id === l.id && c.status === 'pendiente');
+  if (!fx && l.type !== 'correction' && l.type !== 'correction.obs') {
+    if (paid) html += `<p class="muted" style="margin:0">El proyecto ya se pagó: este registro no se corrige; el ajuste va como nota en el siguiente proyecto.</p>`;
+    else if (!h.open) html += oc.none ? `<p class="muted" style="margin:0">${oc.none}</p>` : admin ? `<button class="hb x-ghost hcbtn" data-act="corrOpen">${icon.pen('currentColor', 16)}Corregir este registro</button>` : reqd ? banner('wait', 'Pediste una corrección', `${LN()} la revisa.`) : `<button class="hb x-ghost hcbtn" data-act="corrOpen">${icon.pen('currentColor', 16)}Pedir corrección a ${LN()}</button>`;
+    else html += corrPanel(l, oc, sent);
+  }
+  const nodes = trail(l, subj);
+  html += `<p class="lbl">Rastro</p><div class="trail">${nodes.map((n, i) => `<div class="tn${n.on ? ' on' : ''}${n.next ? ' nx' : ''}${n.red ? ' red' : ''}" style="animation-delay:${(i * 0.04).toFixed(2)}s"><span class="tdot"><i></i>${i < nodes.length - 1 ? '<u></u>' : ''}</span><div><small>${n.time}</small><b class="${n.struck ? 'struck' : ''}">${n.t}</b>${n.sub ? `<span>${n.sub}</span>` : ''}</div></div>`).join('')}</div>
+    <div class="row" style="gap:10px"><button type="button" class="btn b-ghost" data-act="close" style="flex:1">Cerrar</button><a class="hb x-amber" href="${hd.go[0]}" style="flex:1.4">${hd.go[1]}${arrow}</a></div>`;
+  return html;
+}
+function corrPanel(l, oc, sent) {
+  const h = ui.hist; const admin = S.me.role === 'admin';
+  const opts = oc.list;
+  if (!h.tipo || !opts.some((o) => o.k === h.tipo && !o.block)) { const f = opts.find((o) => !o.block); h.tipo = f ? f.k : null; }
+  const cur = opts.find((o) => o.k === h.tipo);
+  const args = h.args || (h.args = {});
+  let field = '';
+  if (cur && cur.opts) { if (!cur.opts.some((x) => x.v === args[cur.k === 'who' ? 'member' : 'video'])) args[cur.k === 'who' ? 'member' : 'video'] = cur.opts[0] && cur.opts[0].v; field = `<div class="row" style="gap:6px;flex-wrap:wrap">${cur.opts.map((x) => `<button type="button" class="btn sm ${args[cur.k === 'who' ? 'member' : 'video'] === x.v ? 'b-amber' : 'b-ghost'}" data-act="corrArg" data-k="${cur.k === 'who' ? 'member' : 'video'}" data-v="${x.v}">${esc(x.t)}</button>`).join('')}</div>`; }
+  if (cur && (cur.k === 'time' || (cur.k === 'arrival' && !args.none))) {
+    const base = args.at || cur.cur || new Date().toISOString();
+    if (!args.at) args.at = base;
+    const d = R.limaDate(args.at), t = roundTime(R.limaTime(args.at));
+    field = `<div class="row" style="gap:8px"><span style="flex:1.4;min-width:0">${fDate('cr-d', 'cd', d, { title: 'Fecha', accent: 'amber', ic: '#FFB547', day: (x) => (x > R.limaDate(new Date()) ? { off: true, why: 'Elige un día que ya pasó' } : {}), onSet: (v) => { args.at = R.at(v, roundTime(R.limaTime(args.at))).toISOString(); sheetHtml = histSheet(); } })}</span><span style="flex:1;min-width:0">${fTime('cr-t', 'ct', t, { title: 'Hora', accent: 'amber', onSet: (v) => { args.at = R.at(R.limaDate(args.at), v).toISOString(); sheetHtml = histSheet(); } })}</span></div>`;
+  }
+  if (cur && cur.k === 'arrival') field = `<div class="seg"><button type="button" class="${args.none ? '' : 'on'}" data-act="corrArg" data-k="none" data-v="">Llegó a otra hora</button><button type="button" class="${args.none ? 'on' : ''}" data-act="corrArg" data-k="none" data-v="1">No llegó</button></div>` + (args.none ? '' : field);
+  const a2 = cur && cur.k === 'arrival' && args.none ? {} : Object.assign({}, args); delete a2.none;
+  const eff = cur && !cur.block ? corrEffect(l, cur.k, a2) : '';
+  const o = corrOptions(l);
+  const text = cur ? corrText(l, cur.k, a2, o) : '';
+  const late = cur && (cur.k === 'time' || cur.k === 'arrival') && a2.at && new Date(a2.at) > new Date();
+  const ok = cur && !cur.block && !late;
+  return `<section class="cpanel"><b class="num" style="font-size:17px">${admin ? 'Corregir este registro' : 'Pedir corrección a ' + LN()}</b>
+    <div class="cpopts">${opts.map((x) => `<button type="button" class="cpopt${x.k === h.tipo ? ' on' : ''}${x.block ? ' off' : ''}" data-act="corrTipo" data-k="${x.k}" ${x.block ? 'disabled' : ''}><span class="rdo"><i></i></span><span><b>${TIPO[x.k]}</b>${x.block ? `<small>${esc(x.block)}</small>` : ''}</span></button>`).join('')}</div>
+    ${field}
+    ${cur ? `<div class="cpwhat"><b>${esc(text)}</b><span>${esc(eff)}</span></div>` : ''}
+    ${[cur && cur.warn, sent && admin ? `La liquidación ya se envió: al corregir vuelve a borrador y ${first(st.partners().find((m) => m.role === 'socio') || { name: 'tu socio' })} tiene que confirmarla de nuevo.` : ''].filter(Boolean).map((w) => `<p class="small" style="margin:0;font-weight:600;color:#FFC978">${esc(w)}</p>`).join('')}
+    <label class="field"><span>Motivo (obligatorio)</span><textarea class="in" data-corrmot="1" rows="2" placeholder="Ej.: lo marcó por error, aún no estaba listo">${esc(h.motivo || '')}</textarea></label>
+    <div class="row" style="gap:8px"><button type="button" class="btn b-ghost" data-act="corrCancel" style="flex:1">Cancelar</button><button type="button" class="hb x-red" data-act="corrGo" style="flex:1.6" ${ok ? '' : 'disabled'}>${admin ? 'Corregir · queda registrado' : 'Enviar pedido'}</button></div></section>`;
+}
 // ---------- Equipo ----------
 function vTeam() {
   const me = S.me;
@@ -2400,7 +2848,7 @@ function sheetReprog(v) {
   return `<form data-form="reprog" style="display:contents"><input type="hidden" name="v" value="${v.id}">
     <h2>Reprogramar entrega · video ${v.num}</h2>
     <p class="sub" style="margin:0">Hoy publica ${R.fmtDay(v.publish_date)}. Elige la fecha que acordaste con el cliente: los plazos de montaje y video final se mueven con ella.</p>
-    <label class="field"><span>Nueva fecha de publicación</span><input class="in" type="date" name="d" min="${tomorrow}" value="${def}" required></label>
+    ${fDate('rprog-d', 'd', def, { label: 'Nueva fecha de publicación', title: 'Nueva publicación', sub: 'Video ' + v.num, accent: 'amber', ic: '#FFB547', day: (d) => (d < tomorrow ? { off: true, why: 'Elige desde mañana' } : {}), okText: (d) => `Publica el ${R.fmtDay(d)} · los plazos de montaje y video final se mueven con esta fecha.` })}
     <label class="field"><span>Nota (opcional)</span><input class="in" name="note" maxlength="140" placeholder="Ej.: lo acordé con el cliente por WhatsApp"></label>
     ${lateMine ? pmsg('red', 'La entrega ya venció y estaba en tus manos: resta 3 puntos de racha.') : s.overdue ? pmsg('amber', 'La entrega ya venció.') : ''}
     <button class="hb x-amber">Reprogramar entrega</button><button type="button" class="btn b-ghost" data-act="close">Cancelar</button></form>`;
@@ -2620,7 +3068,7 @@ function vNewProject() {
     <label class="field"><span>Nombre del proyecto</span><input class="in" name="name" required placeholder="Noviembre"></label>
     <div class="grid2"><label class="field"><span>Presupuesto (S/)</span><input class="in" name="budget" type="number" step="0.01" min="1" required value="1000"></label>
     <label class="field"><span>Videos</span><input class="in" name="videos" type="number" min="1" required value="16"></label></div>
-    <label class="field"><span>Empieza</span><input class="in" name="start" type="date" required value="2026-11-09"></label>
+    ${fDate('np-start', 'start', R.limaDate(new Date()), { label: 'Empieza', title: 'Inicio del servicio', accent: 'amber', ic: '#FFB547', okText: (d) => `Empieza el ${R.fmtDay(d)} · el primer rodaje puede ser desde el ${R.fmtDay(R.addDays(d, 1))}.` })}
     <p class="muted" style="margin:0">Reparto: preproducción 25 % · rodaje 35 % · montaje 16 % · acabado 24 %.</p>
     <button class="btn b-amber">Crear proyecto</button></form>`;
 }
@@ -2734,14 +3182,16 @@ const LOOK_DEF = {
     stPre: '#12805A', stRod: '#A15F00', stPost: '#B4452A', bdPre: '#6EE7B7', bdRod: '#FFB547', bdPost: '#FF8A65', stOn: 100, stOff: 22, bdOp: 55, fgOn: '#FFFFFF',
     r1: ['#17130C', '#3A3220', '#FFB547', '#FFD08A'], r2: ['#1C130A', '#4A3414', '#FF9F2E', '#FFC978'], r3: ['#0C1720', '#1E3A52', '#5CC8FF', '#A8E1FF'], r4: ['#160F22', '#3E2C63', '#B98CFF', '#D6C2FF'],
     meta: ['#16140F', '#3A3220', '#FFB547', '#2A2518'], wallet: ['#121A16', '#1F3A2C', '#6EE7B7', '#F4F4F5'],
-    opRacha: 100, opHero: 100, opAct: 100, opMeta: 100, opWallet: 100, opCards: 100
+    opRacha: 100, opHero: 100, opAct: 100, opMeta: 100, opWallet: 100, opCards: 100,
+    actBg: '#15161C', actBd: '#262830', heroOwn: false, heroBg: '#15161C', heroBd: '#3A3D46'
   },
   light: {
     main: '#D98A00', u0: '#D93B2B', u1: '#E07B00', u2: '#8B8B94',
     stPre: '#12805A', stRod: '#A15F00', stPost: '#B4452A', bdPre: '#12805A', bdRod: '#A15F00', bdPost: '#B4452A', stOn: 100, stOff: 12, bdOp: 45, fgOn: '#FFFFFF',
     r1: ['#FFF4E0', '#F2D9A6', '#E08A00', '#7A4A00'], r2: ['#FFEBD6', '#F5C99A', '#E06F00', '#7A3D00'], r3: ['#E3F3FC', '#A9D7F0', '#1E88C7', '#0B4A70'], r4: ['#F1E9FF', '#D4C0FA', '#7C4DDB', '#3E2273'],
     meta: ['#FFF7E8', '#EFD9AE', '#D98A00', '#F1E3C4'], wallet: ['#E9F7F0', '#B7E2CC', '#0F8A5F', '#0B1F15'],
-    opRacha: 100, opHero: 100, opAct: 100, opMeta: 100, opWallet: 100, opCards: 100
+    opRacha: 100, opHero: 100, opAct: 100, opMeta: 100, opWallet: 100, opCards: 100,
+    actBg: '#FFFFFF', actBd: '#E4E2DC', heroOwn: false, heroBg: '#FFFFFF', heroBd: '#D4D2CC'
   }
 };
 function lookFor(mode, saved) {
@@ -2769,6 +3219,9 @@ function applyLook13() {
   for (let n = 1; n <= 4; n++) { const r = L['r' + n]; d.setProperty(`--r${n}-bg`, r[0]); d.setProperty(`--r${n}-bd`, r[1]); d.setProperty(`--r${n}-c`, r[2]); d.setProperty(`--r${n}-t`, r[3]); }
   // 1.5 · Opacidad de las tarjetas (Inicio y demás secciones).
   [['opRacha', 'racha'], ['opHero', 'hero'], ['opAct', 'act'], ['opMeta', 'meta'], ['opWallet', 'wallet'], ['opCards', 'cards']].forEach(([k, n]) => d.setProperty('--op-' + n, (L[k] == null ? 100 : L[k]) + '%'));
+  // 1.6 · Los dos cuadros de "Tus actividades": color de fondo y borde (el aviso, por defecto, con el color de la urgencia).
+  d.setProperty('--act-bg', L.actBg); d.setProperty('--act-bd', L.actBd); d.setProperty('--hero-bg', L.heroBg); d.setProperty('--hero-bd', L.heroBd);
+  if (L.heroOwn) document.documentElement.setAttribute('data-heroown', ''); else document.documentElement.removeAttribute('data-heroown');
 }
 const SUG = {
   main: ['#FFB547', '#FF8A65', '#6EE7B7', '#8AB4FF', '#B98CFF', '#F5C542'],
@@ -2800,12 +3253,13 @@ function vAdminLook() {
   const tileP = (K, ic, on) => `<span class="stile" style="min-height:70px;border-radius:16px;cursor:default;background:${over(L['st' + K], surf, on ? L.stOn : L.stOff)};border-color:${over(L['bd' + K], surf, L.bdOp)};color:${on ? L.fgOn : (isL ? '#15161C' : '#F4F4F5')}">${ic(on ? L.fgOn : L['bd' + K], 20)}<span style="font-size:10px">${{ Pre: 'Preproducción', Rod: 'Rodaje', Post: 'Posproducción' }[K]}</span></span>`;
   html += `<section class="card" style="gap:12px;background:${isL ? '#F6F5F2' : '#0B0C10'}"><p class="lbl">Vista previa · ${mode === 'dark' ? 'noche' : 'día'}</p>
     <div class="racha" style="background:${over(lvP[0], (isL ? '#F6F5F2' : '#0B0C10'), L.opRacha == null ? 100 : L.opRacha)};border-color:${lvP[1]};padding:12px 14px"><div class="rfire" style="width:60px;height:70px">${icon.flame(lvP[2], 44)}</div><div class="rtx"><p class="lbl" style="color:${lvP[3]}">Tu racha</p><b class="num" style="font-size:32px;line-height:1;color:${lvP[3]}">15</b><span class="rlv" style="--lvc:${lvP[2]};--lvt:${lvP[3]};--lvchip:${over(lvP[2], lvP[0], 18)}">Nivel 3 · Responsable</span></div></div>
-    <div class="actbox" style="background:${over(surf, (isL ? '#F6F5F2' : '#0B0C10'), L.opAct == null ? 100 : L.opAct)};padding:10px"><div class="dsqs">${[['HOY', 'u0'], ['DOM', 'u1'], ['LUN', 'u2'], ['MAR', null]].map(([d, k], i) => `<div class="dsq ${k ? '' : 'd-none'} ${i === 0 ? 'on' : ''}" style="${k ? `--uc:${L[k]}` : ''}"><span class="dw">${d}</span><b class="num">${i + 1}</b></div>`).join('')}</div><div class="small" style="padding:2px 4px 4px;font-weight:600">Tus actividades del día</div></div>
+    ${sec === 'act' ? `<section class="hero h-urg" style="animation:none;background:${over(L.heroOwn ? L.heroBg : (isL ? '#FFF1EF' : '#1A1111'), (isL ? '#F6F5F2' : '#0B0C10'), L.opHero == null ? 100 : L.opHero)};border-color:${L.heroOwn ? over(L.u0, L.heroBg, 70) : (isL ? '#F5C6C0' : '#5C2420')};padding:12px 14px;gap:8px"><div class="row" style="gap:8px"><span class="hdot" style="background:${L.u0}"></span><span class="lbl" style="color:${L.u0}">Vence en 3 h · 18:00</span></div><b class="num" style="font-size:17px;color:${isL ? '#15161C' : '#F4F4F5'}">Storyboard · video 6</b></section>` : ''}
+    <div class="actbox" style="background:${over(L.actBg, (isL ? '#F6F5F2' : '#0B0C10'), L.opAct == null ? 100 : L.opAct)};border-color:${L.actBd};padding:10px"><div class="dsqs">${[['HOY', 'u0'], ['DOM', 'u1'], ['LUN', 'u2'], ['MAR', null]].map(([d, k], i) => `<div class="dsq ${k ? '' : 'd-none'} ${i === 0 ? 'on' : ''}" style="${k ? `--uc:${L[k]}` : ''}"><span class="dw">${d}</span><b class="num">${i + 1}</b></div>`).join('')}</div><div class="small" style="padding:2px 4px 4px;font-weight:600">Tus actividades del día</div></div>
     <div class="stiles">${tileP('Pre', icon.pen, stage === 'Pre')}${tileP('Rod', icon.cam, stage === 'Rod')}${tileP('Post', icon.cut, stage === 'Post')}</div>
     <div class="grid2"><div style="border-radius:16px;padding:12px;background:${over(L.meta[0], (isL ? '#F6F5F2' : '#0B0C10'), L.opMeta == null ? 100 : L.opMeta)};border:1px solid ${L.meta[1]}"><p class="lbl" style="color:${L.meta[2]}">Meta del equipo</p><b class="num" style="font-size:24px;color:${isL ? '#15161C' : '#F4F4F5'}">56%</b><div style="height:8px;border-radius:9px;background:${L.meta[3]};margin-top:6px"><div style="width:56%;height:100%;border-radius:9px;background:${L.meta[2]}"></div></div></div>
       <div style="border-radius:16px;padding:12px;background:${over(L.wallet[0], (isL ? '#F6F5F2' : '#0B0C10'), L.opWallet == null ? 100 : L.opWallet)};border:1px solid ${L.wallet[1]}"><p class="lbl" style="color:${L.wallet[2]}">En la billetera</p><b class="num" style="font-size:24px;color:${L.wallet[3]}">S/ 156.25</b></div></div>
     <span class="hb" style="min-height:44px;background:${over(L.main, surf, 18)};border:1px solid ${over(L.main, surf, 45)};color:${L.main};font-size:14px">Botón principal</span></section>`;
-  const SECS = [['main', 'Principal'], ['etapas', 'Etapas'], ['urg', 'Urgencia'], ['racha', 'Racha'], ['meta', 'Meta del equipo'], ['wallet', 'Billetera'], ['opac', 'Opacidad']];
+  const SECS = [['main', 'Principal'], ['etapas', 'Etapas'], ['urg', 'Urgencia'], ['act', 'Tus actividades'], ['racha', 'Racha'], ['meta', 'Meta del equipo'], ['wallet', 'Billetera'], ['opac', 'Opacidad']];
   html += `<div class="row" style="gap:6px;flex-wrap:wrap">${SECS.map(([k, t]) => `<button class="btn sm ${sec === k ? 'x-amber' : 'b-ghost'}" data-act="lkSec" data-k="${k}">${t}</button>`).join('')}</div>`;
   let body = '';
   if (sec === 'main') body = colorRow('Color principal', 'main', L.main, SUG.main, warnLow(L.main, surf));
@@ -2826,9 +3280,14 @@ function vAdminLook() {
   }
   if (sec === 'meta') body = colorRow('Fondo', 'meta.0', L.meta[0], isL ? SUG.bgl : SUG.bg) + colorRow('Borde', 'meta.1', L.meta[1], SUG.bd) + colorRow('Barra y título', 'meta.2', L.meta[2], SUG.rc, warnLow(L.meta[2], L.meta[0])) + colorRow('Fondo de la barra', 'meta.3', L.meta[3], isL ? SUG.bgl : SUG.bg);
   if (sec === 'wallet') body = colorRow('Fondo', 'wallet.0', L.wallet[0], isL ? SUG.bgl : SUG.bg) + colorRow('Borde', 'wallet.1', L.wallet[1], SUG.bd) + colorRow('Título', 'wallet.2', L.wallet[2], SUG.rc, warnLow(L.wallet[2], L.wallet[0])) + colorRow('Monto', 'wallet.3', L.wallet[3], SUG.tx, warnLow(L.wallet[3], L.wallet[0]));
-  if (sec === 'opac') body = `<p class="muted" style="margin:0;line-height:1.45">Qué tan sólido se ve el fondo de cada tarjeta. Al bajarlo se funde con el fondo de la pantalla.</p>`
-    + rangeRow('Racha', 'opRacha', L.opRacha == null ? 100 : L.opRacha) + rangeRow('Aviso urgente', 'opHero', L.opHero == null ? 100 : L.opHero)
-    + rangeRow('Tus actividades (días y tareas)', 'opAct', L.opAct == null ? 100 : L.opAct) + rangeRow('Meta del equipo', 'opMeta', L.opMeta == null ? 100 : L.opMeta)
+  if (sec === 'act') body = `<p class="lbl" style="color:var(--tx2)">Aviso urgente (el cuadro grande de arriba)</p>
+    <div class="seg"><button class="${L.heroOwn ? '' : 'on'}" data-act="lkOwn" data-k="0">Color de la urgencia</button><button class="${L.heroOwn ? 'on' : ''}" data-act="lkOwn" data-k="1">Color propio</button></div>
+    ${L.heroOwn ? colorRow('Fondo', 'heroBg', L.heroBg, isL ? SUG.bgl : SUG.bg) + colorRow('Borde (cuando no es urgente)', 'heroBd', L.heroBd, SUG.bd) + '<p class="muted" style="margin:0;line-height:1.45">Cuando algo es urgente, el borde, el punto y el texto siguen mostrando el color de la urgencia, para no perder el aviso.</p>' : '<p class="muted" style="margin:0;line-height:1.45">Toma el color de la urgencia: rojo si vence hoy, naranja si es próximo.</p>'}
+    ${rangeRow('Opacidad del aviso', 'opHero', L.opHero == null ? 100 : L.opHero)}
+    <p class="lbl" style="color:var(--tx2);margin-top:6px">Días y actividades (el fondo de los cuadrados y la lista)</p>
+    ${colorRow('Fondo', 'actBg', L.actBg, isL ? SUG.bgl : SUG.bg)}${colorRow('Borde', 'actBd', L.actBd, SUG.bd)}${rangeRow('Opacidad', 'opAct', L.opAct == null ? 100 : L.opAct)}`;
+  if (sec === 'opac') body = `<p class="muted" style="margin:0;line-height:1.45">Qué tan sólido se ve el fondo de cada tarjeta. Al bajarlo se funde con el fondo de la pantalla. Los dos cuadros de "Tus actividades" están en su propia sección.</p>`
+    + rangeRow('Racha', 'opRacha', L.opRacha == null ? 100 : L.opRacha) + rangeRow('Meta del equipo', 'opMeta', L.opMeta == null ? 100 : L.opMeta)
     + rangeRow('Billetera', 'opWallet', L.opWallet == null ? 100 : L.opWallet) + rangeRow('Tarjetas de las demás secciones', 'opCards', L.opCards == null ? 100 : L.opCards);
   html += `<section class="card" style="gap:16px">${body}</section>`;
   html += `<div class="row" style="gap:10px"><button class="btn b-ghost" style="flex:1" data-act="lkReset">Restaurar</button><button class="btn x-amber" style="flex:2" data-act="lookSave" ${changed ? '' : 'disabled'}>Guardar para los dos</button></div><p class="muted" style="margin:-6px 0 0;text-align:center">Restaurar vuelve esta sección (${mode === 'dark' ? 'noche' : 'día'}) a los colores de fábrica. Queda en el historial.</p>`;
@@ -2967,7 +3426,7 @@ function vProposal(id) {
 // ==================================================================
 // Hojas (formularios emergentes)
 // ==================================================================
-function openSheet(html) { sheetHtml = html; render(); }
+function openSheet(html) { if (html !== sheetHtml) ui.fv = {}; sheetHtml = html; render(); }
 function closeSheet() { sheetHtml = null; render(); }
 
 function sheetMark(v, k, hireId) {
@@ -3006,10 +3465,41 @@ function sheetNotice(e, fmOnly) {
   <button class="btn b-blue">Enviar aviso</button><button type="button" class="btn b-ghost" data-act="close">Cancelar</button></form>`;
 }
 
-const dateTimeSheet = (form, title, text, hidden, d, t, btn) => `<form data-form="${form}" style="display:contents">${Object.entries(hidden).map(([k, v]) => `<input type="hidden" name="${k}" value="${esc(v)}">`).join('')}<h2>${title}</h2>${text ? `<p class="sub" style="margin:0">${text}</p>` : ''}
-  <div class="grid2"><label class="field"><span>Fecha</span><input class="in" type="date" name="d" required value="${d}"></label><label class="field"><span>Hora</span><input class="in" type="time" name="t" required value="${t}"></label></div>
-  ${form === 'reday' || form === 'cancelEv' ? '<label class="field"><span>Nota (opcional)</span><input class="in" name="note" placeholder="Ej.: lluvia, locación cerrada"></label>' : ''}
-  <button class="btn b-amber">${btn}</button><button type="button" class="btn b-ghost" data-act="close">Cancelar</button></form>`;
+// 1.6 · Hoja de fecha y hora con las reglas de la semana (calendario propio, ruedas y alerta en vivo).
+// ui.dt = { form, title, text, hidden, kind: 'rodaje'|'reunion', e (evento que se mueve), rods (ids que prepara la reunión),
+//           d, t, m: { e, d, t } (reunión que se mueve con el rodaje), note, btn, pid, replaces }
+function dtCheck() {
+  const x = ui.dt, p = projOf(x.pid);
+  let events = S.data.events.filter((e) => e.project_id === x.pid);
+  if (x.replaces) events = events.map((e) => (e.id === x.replaces ? Object.assign({}, e, { status: 'reprogramado' }) : e.kind === 'reunion' && R.meetHas(e, x.replaces) ? Object.assign({}, e, { rodaje_ids: R.meetRods(e).map((id) => (id === x.replaces ? 'nuevo-r0' : id)) }) : e));
+  const input = x.kind === 'rodaje'
+    ? { rodajes: [{ id: x.e && !x.replaces && x.form === 'moveEv' ? x.e.id : undefined, date: x.d, time: x.t }], meetings: x.m ? [{ id: x.m.e.id, date: x.m.d, time: x.m.t, rods: R.meetRods(x.m.e) }] : [] }
+    : { rodajes: [], meetings: [{ id: x.e ? x.e.id : undefined, date: x.d, time: x.t, rods: x.rods }] };
+  const merge = x.form === 'repro' && events.find((e) => e.kind === 'rodaje' && active(e) && e.id !== x.e.id && R.limaDate(e.starts_at) === x.d);
+  if (merge) return { p, events, input, chk: { errors: {}, warns: {}, info: { r0: `Ese día ya hay un rodaje (${R.limaTime(merge.starts_at)}): los videos se suman a ese` }, join: false, ok: true } };
+  return { p, events, input, chk: R.checkWeek(Object.assign({ project: p, events }, input)) };
+}
+function dtSheet() {
+  const x = ui.dt;
+  const { p, events, input, chk } = dtCheck();
+  const isR = x.kind === 'rodaje';
+  const dots = evDots(x.pid);
+  const ds = (kind, idx) => (d) => R.dayStatus(d, kind, { project: p, events, rodajes: input.rodajes, meetings: input.meetings, idx });
+  const re = (v) => { ui.dt.d = v; sheetHtml = dtSheet(); };
+  const firstRod = !isR ? x.rods.map(evById).filter(Boolean).sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at))[0] : null;
+  let html = `<div style="display:contents">${Object.entries(x.hidden || {}).map(([k, v]) => `<input type="hidden" name="${k}" value="${esc(v)}">`).join('')}<h2>${x.title}</h2>${x.text ? `<p class="sub" style="margin:0">${x.text}</p>` : ''}
+  <div class="row" style="gap:8px"><span style="flex:1.4;min-width:0">${fDate('dt-d', 'd', x.d, { label: isR ? 'Fecha del rodaje' : 'Fecha de la reunión', title: isR ? 'Fecha del rodaje' : 'Fecha de la reunión', sub: isR ? 'Empieza el ' + R.fmtDay(String(p.start_date).slice(0, 10)) : firstRod ? 'Para el rodaje del ' + R.fmtDay(R.limaDate(firstRod.starts_at)) : '', accent: isR ? 'amber' : 'blue', ic: isR ? '#FFB547' : '#8AB4FF', cls: chk.errors[isR ? 'r0' : 'm0'] ? 'bad' : '', day: ds(x.kind, 0), dots, onSet: re })}</span>
+  <span style="flex:1;min-width:0">${fTime('dt-t', 't', x.t, { label: 'Hora', title: isR ? 'Hora del rodaje' : 'Hora de la reunión', sub: R.fmtDay(x.d), accent: isR ? 'amber' : 'blue', onSet: (v) => { ui.dt.t = v; sheetHtml = dtSheet(); } })}</span></div>`;
+  if (x.m) html += `<div class="wkm"><span class="small" style="font-weight:700;color:#A9C7FF">Su reunión de preproducción · se mueve junto</span><div class="row" style="gap:8px"><span style="flex:1.4;min-width:0">${fDate('dt-md', 'md', x.m.d, { title: 'Fecha de la reunión', sub: 'Para el rodaje del ' + R.fmtDay(x.d), accent: 'blue', ic: '#8AB4FF', cls: chk.errors.m0 ? 'bad' : chk.warns.m0 === R.MSG_ONE_DAY ? 'warn' : '', day: ds('reunion', 0), dots, onSet: (v) => { ui.dt.m.d = v; sheetHtml = dtSheet(); } })}</span>
+    <span style="flex:1;min-width:0">${fTime('dt-mt', 'mt', x.m.t, { title: 'Hora de la reunión', sub: R.fmtDay(x.m.d), accent: 'blue', onSet: (v) => { ui.dt.m.t = v; sheetHtml = dtSheet(); } })}</span></div></div>`;
+  else if (isR && x.e && x.mEnded) html += `<p class="muted" style="margin:0">Su reunión del ${R.fmtWhen(x.mEnded.starts_at)} ya se hizo: no se mueve.</p>`;
+  else if (isR && x.e && x.mLocked) html += `<p class="muted" style="margin:0">Su reunión del ${R.fmtWhen(x.mLocked.starts_at)} ya tiene llegadas: no se mueve desde aquí.</p>`;
+  html += weekAlert(Object.assign({}, chk, { join: false }), isR ? ['r0'].concat(input.meetings.length ? ['m0'] : []) : ['m0']);
+  if (x.note) html += `<label class="field"><span>Nota (opcional)</span><input class="in" name="note" data-dtnote="1" value="${esc(x.noteV || '')}" placeholder="Ej.: lluvia, locación cerrada"></label>`;
+  html += `<button type="button" class="hb ${chk.ok ? 'x-amber' : 'x-off'}" data-act="dtSave" ${chk.ok ? '' : 'disabled'}>${x.btn}</button><button type="button" class="btn b-ghost" data-act="close">Cancelar</button></div>`;
+  return html;
+}
+function openDt(o) { ui.dt = o; openSheet(dtSheet()); }
 
 // ==================================================================
 // Animaciones: +S/ al marcar y −S/ al deshacer
@@ -3084,6 +3574,7 @@ function render() {
   if (key === ui.lastKey) $app.setAttribute('data-settled', ''); else $app.removeAttribute('data-settled');
   ui.lastKey = key; ui.lastHtml = html;
   $app.innerHTML = html;
+  syncPicked();
   syncOpts();
   syncOwn();
   animateCounts();
@@ -3092,6 +3583,14 @@ function render() {
   if (r[0] !== 'resumen') ui.animKey = null;
 }
 
+// 1.6: lo elegido en el calendario o la hora de una hoja se conserva si la pantalla se vuelve a dibujar.
+function syncPicked() {
+  for (const [k, v] of Object.entries(ui.fv || {})) {
+    const inp = document.querySelector(`[data-pkv="${k}"]`); if (!inp || inp.value === v) continue;
+    inp.value = v; const b = document.querySelector(`button[data-pk="${k}"]`);
+    if (b) { const t = b.querySelector('b'); if (t) t.textContent = (ui.pk[k] || {}).kind === 'time' ? v : R.fmtDay(v); b.classList.remove('ph'); }
+  }
+}
 function syncOwn() {
   document.querySelectorAll('label.own').forEach((l) => { const i = l.querySelector('input'); l.classList.toggle('on-' + l.dataset.k, !!(i && i.checked)); });
   document.querySelectorAll('[data-owncount] [data-n]').forEach((b) => { b.textContent = document.querySelectorAll(`label.own input[value="${b.dataset.n}"]:checked`).length; });
@@ -3102,6 +3601,85 @@ function syncOpts() {
 const evById = (id) => S.data.events.find((x) => x.id === id);
 
 const ACT = {
+  // ---------- 1.6 · fechas, semana y reparto ----------
+  pick: (el) => pickField(el),
+  histOpen: (el) => { ui.hist = { id: Number(el.dataset.id), req: el.dataset.req || null, open: !!el.dataset.req }; openSheet(histSheet()); },
+  corrOpen: () => { ui.hist.open = true; ui.hist.args = {}; openSheet(histSheet()); },
+  corrCancel: () => { ui.hist.open = false; openSheet(histSheet()); },
+  corrTipo: (el) => { ui.hist.tipo = el.dataset.k; ui.hist.args = {}; openSheet(histSheet()); },
+  corrArg: (el) => { ui.hist.args = ui.hist.args || {}; if (el.dataset.k === 'none') { ui.hist.args.none = !!el.dataset.v; if (!el.dataset.v) delete ui.hist.args.none; } else ui.hist.args[el.dataset.k] = el.dataset.v; openSheet(histSheet()); },
+  corrGo: async () => {
+    const h = ui.hist; const l = S.data.log.find((x) => x.id === h.id);
+    const mot = ((document.querySelector('[data-corrmot]') || {}).value || '').trim();
+    h.motivo = mot;
+    if (!mot) { st.toast('Escribe el motivo', 'bad'); return; }
+    const args = Object.assign({}, h.args || {}); const none = args.none; delete args.none;
+    if (h.tipo === 'arrival' && none) delete args.at;
+    const o = corrOptions(l);
+    const text = corrText(l, h.tipo, args, o);
+    if (S.me.role !== 'admin') { await st.requestCorrection(l.id, `${text} · ${mot}`); ui.hist.open = false; openSheet(histSheet()); return; }
+    if (!confirm(`¿${text}? Queda registrado con tu motivo; el original no se borra.`)) return;
+    try { await st.correctRecord(l.id, h.tipo, Object.assign({ text }, args), mot, h.req); } catch (e) { return; }
+    ui.hist.open = false; ui.hist.args = {}; openSheet(histSheet());
+  },
+  seenCorr: (el) => { try { const k = 'ra-seen-corr'; const a = JSON.parse(localStorage.getItem(k) || '[]'); a.push(Number(el.dataset.id)); localStorage.setItem(k, JSON.stringify(a.slice(-200))); } catch (e) { /* */ } render(); },
+  obsCorr: async (el) => { const t = prompt('Tu observación sobre esta corrección (queda en el historial):', ''); if (!t || !t.trim()) return; await st.observeCorrection(Number(el.dataset.id), t.trim()); ACT.seenCorr(el); },
+  editStart: () => {
+    const p = st.project();
+    const evs = S.data.events.filter((e) => e.project_id === p.id && active(e));
+    const firstR = evs.filter((e) => e.kind === 'rodaje').map((e) => R.limaDate(e.starts_at)).sort()[0];
+    const firstM = evs.filter((e) => e.kind === 'reunion').map((e) => R.limaDate(e.starts_at)).sort()[0];
+    const max = [firstR ? R.addDays(firstR, -1) : null, firstM].filter(Boolean).sort()[0];
+    openSheet(`<form data-form="startDate" style="display:contents"><h2>Fecha de inicio del servicio</h2><p class="sub" style="margin:0">Solo el líder la cambia y queda en el historial. Ninguna reunión puede quedar antes del inicio, y el rodaje va al menos un día después.</p>
+      ${fDate('st-d', 'd', String(p.start_date).slice(0, 10), { label: 'Empieza', title: 'Inicio del servicio', accent: 'amber', ic: '#FFB547', dots: evDots(p.id), day: (d) => (max && d > max ? { off: true, why: firstR && R.addDays(firstR, -1) === max ? `Hay un rodaje el ${R.fmtDay(firstR)}: el inicio va como tarde el ${R.fmtDay(max)}` : `Hay una reunión el ${R.fmtDay(firstM)}: el inicio va como tarde ese día` } : {}), okText: (d) => `Empieza el ${R.fmtDay(d)}` })}
+      <button class="hb x-amber">Guardar fecha</button><button type="button" class="btn b-ghost" data-act="close">Cancelar</button></form>`);
+  },
+  wkNav: (el) => { const tab = ui.stage || 'pre'; ui.wkOff = ui.wkOff || {}; const d = Number(el.dataset.d); ui.wkOff[tab] = d === 0 ? 0 : (ui.wkOff[tab] || 0) + d; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); },
+  toHero: () => { const h = document.getElementById('hero'); if (h) { h.scrollIntoView({ behavior: 'smooth', block: 'center' }); h.classList.remove('flash'); void h.offsetWidth; h.classList.add('flash'); } },
+  wkAdd: () => { const w = ui.wk; const last = w.rods[w.rods.length - 1]; let d = R.addDays(last.d, 1); const busy = (x) => S.data.events.some((e) => e.project_id === w.pid && active(e) && e.kind === 'rodaje' && R.limaDate(e.starts_at) === x) || w.rods.some((r) => r.d === x); while (busy(d)) d = R.addDays(d, 1); w.rods.push({ d, t: last.t }); if (!w.one) w.meets.push(Object.assign({}, w.meets[w.meets.length - 1])); render(); },
+  wkDel: (el) => { const w = ui.wk; const i = Number(el.dataset.i); w.rods.splice(i, 1); if (!w.one && w.meets.length > 1) w.meets.splice(i, 1); if (w.rods.length === 1) { w.one = true; w.meets = [w.meets[0]]; } render(); },
+  wkOne: (el) => { const w = ui.wk; w.one = el.dataset.k === '1'; if (w.one) w.meets = [w.meets[0]]; else while (w.meets.length < w.rods.length) w.meets.push(Object.assign({}, w.meets[w.meets.length - 1])); render(); },
+  wkJoin: () => { const w = ui.wk; w.one = true; w.meets = [w.meets[0]]; render(); },
+  wkSave: async () => {
+    const w = ui.wk; if (!w) return;
+    const inp = wkInput();
+    try { await st.planWeek(inp); } catch (e) { return; }
+    ui.wk = null; ui.stage = 'pre';
+    // 1.4: ¿un rodaje o una reunión nuevos caen el último día de apoyo de un video ya repartido?
+    const c = st.ctx();
+    const days = inp.rodajes.map((r) => [r.date, 'rodaje']).concat(inp.meetings.map((m) => [m.date, 'reunión']));
+    const vids = c.videos.filter((v) => { const x = R.videoState(v, c); return !x.mo && !x.delivered; });
+    const list = choquesDe(vids.map((v) => ({ video: v, num: v.num, owner: v.owner, publish_date: v.publish_date, apoyo_due: v.apoyo_due })), days)
+      .filter((x) => x.kind === 'clash' && days.some(([d]) => d === x.apoyoDay));
+    if (list.length) { ui.choque = { mode: 'plan', list, picks: {} }; openSheet(sheetChoque()); return; }
+    location.hash = '#/videos';
+  },
+  repN: (el) => {
+    const t = ui.rep.tandas[Number(el.dataset.t)];
+    if (Number(el.dataset.d) > 0) t.rows.push({}); else if (t.rows.length > 1) t.rows.pop();
+    const ps = st.partners(); repDefaults(ps, ps.find((m) => m.role === 'admin') || S.me, ps.find((m) => m.role === 'socio'));
+    render();
+  },
+  repOwn: (el) => {
+    const row = ui.rep.tandas[Number(el.dataset.t)].rows[Number(el.dataset.i)];
+    const ps = st.partners(); const k = ps.findIndex((m) => m.id === row.owner);
+    row.owner = ps[(k + 1) % ps.length].id; row.ownSet = true; render();
+  },
+  repSave: async () => {
+    const rep = ui.rep; if (!rep) return;
+    const tandas = rep.tandas.map((t) => ({ rod: evById(t.rod), rows: t.rows.map((r) => ({ publish_date: r.pub, owner: r.owner, title: (r.title || '').trim() })) }));
+    for (const t of tandas) { const rd = R.limaDate(t.rod.starts_at); if (t.rows.some((v) => !v.publish_date || v.publish_date <= rd)) { st.toast('La publicación debe ser después del rodaje (' + R.fmtDay(rd) + ')', 'bad'); return; } }
+    const p = projOf(tandas[0].rod.project_id);
+    const left = p.videos_total - S.data.videos.filter((v) => v.project_id === p.id).length;
+    if (tandas.reduce((a, t) => a + t.rows.length, 0) > left) { st.toast(`Solo quedan ${left} videos por repartir`, 'bad'); return; }
+    // 1.4: aviso de choque (apoyo en día de rodaje o reunión, o poco tiempo entre rodaje y publicación).
+    let base = S.data.videos.filter((x) => x.project_id === p.id).reduce((m, x) => Math.max(m, x.num), 0);
+    const flat = [];
+    tandas.forEach((t, ti) => t.rows.forEach((v) => flat.push(Object.assign({}, v, { num: ++base, rodajeDate: R.limaDate(t.rod.starts_at), _t: ti }))));
+    const list = choquesDe(flat);
+    if (list.length) { ui.choque = { mode: 'tandas', tandas, flat, list, picks: {} }; openSheet(sheetChoque()); return; }
+    await doRepartoTandas(tandas);
+  },
   close: closeSheet,
   closeBg: (el, e) => { if (e.target === el) closeSheet(); },
   pickProject: () => openSheet(`<h2>Proyectos</h2>${S.data.projects.filter((p) => p.status !== 'archivado').slice().reverse().map((p) => `<button class="btn ${p.id === S.projectId ? 'b-amber' : 'b-ghost'}" data-act="openProject" data-id="${p.id}">${esc(p.client)} · ${esc(p.name)}${p.status === 'cerrado' ? ' (cerrado)' : ''}</button>`).join('') || '<p class="empty">Sin proyectos.</p>'}${isAdminBtn('<a class="btn b-ghost" href="#/proyecto/nuevo" data-act="close">+ Nuevo proyecto</a>')}<a class="btn b-ghost" href="#/equipo" data-act="close">Archivados y ajustes</a>`),
@@ -3112,13 +3690,14 @@ const ACT = {
   theme: () => { try { localStorage.setItem('ra-theme', theme() === 'light' ? 'dark' : 'light'); } catch (e) { /* */ } render(); },
   title: async (el) => { const v = S.data.videos.find((x) => x.id === el.dataset.v); const t = prompt('Tema del video (por ejemplo: "Ansiedad en el trabajo"):', v.title || ''); if (t !== null) await st.setTitle(v, t); },
   lk: (el) => { lkSet(el.dataset.p, el.dataset.c); render(); },
+  lkOwn: (el) => { lkSet('heroOwn', el.dataset.k === '1'); render(); },
   lkMode: (el) => { ui.lk = Object.assign({}, ui.lk || {}, { mode: el.dataset.k }); render(); },
   lkSec: (el) => { ui.lk = Object.assign({ mode: theme() }, ui.lk || {}, { sec: el.dataset.k }); render(); },
   lkStage: (el) => { ui.lk = Object.assign({ mode: theme() }, ui.lk || {}, { stage: el.dataset.k }); render(); },
   lkLv: (el) => { ui.lk = Object.assign({ mode: theme() }, ui.lk || {}, { lv: Number(el.dataset.k) }); render(); },
   lkReset: () => {
     const mode = (ui.lk && ui.lk.mode) || theme(); const sec = (ui.lk && ui.lk.sec) || 'main';
-    const keys = { main: ['main'], urg: ['u0', 'u1', 'u2'], etapas: ['stPre', 'stRod', 'stPost', 'bdPre', 'bdRod', 'bdPost', 'stOn', 'stOff', 'bdOp', 'fgOn'], racha: ['r1', 'r2', 'r3', 'r4'], meta: ['meta'], wallet: ['wallet'] }[sec];
+    const keys = { main: ['main'], urg: ['u0', 'u1', 'u2'], etapas: ['stPre', 'stRod', 'stPost', 'bdPre', 'bdRod', 'bdPost', 'stOn', 'stOff', 'bdOp', 'fgOn'], racha: ['r1', 'r2', 'r3', 'r4'], meta: ['meta'], wallet: ['wallet'], act: ['heroOwn', 'heroBg', 'heroBd', 'opHero', 'actBg', 'actBd', 'opAct'], opac: ['opRacha', 'opMeta', 'opWallet', 'opCards'] }[sec] || [];
     keys.forEach((k) => lkSet(k, JSON.parse(JSON.stringify(LOOK_DEF[mode][k])))); render();
   },
   lookSave: async () => {
@@ -3153,7 +3732,7 @@ const ACT = {
   stage: (el) => {
     const k = el.dataset.k;
     if (k === 'rod' && ui.stage === 'rod') { render(); return; }
-    ui.stage = k;
+    ui.stage = k; ui.wkOff = {};
     if (k === 'rod') { const now = new Date(); const r = weekRodaje(st.ctx(), now); if (r && now >= new Date(new Date(r.starts_at).getTime() - R.RULES.open * 60000) && R.limaDate(now) === R.limaDate(r.starts_at)) { location.hash = '#/e/' + r.id; return; } }
     render();
   },
@@ -3250,7 +3829,12 @@ const ACT = {
   choqueSave: async () => {
     const ch = ui.choque; if (!ch) return;
     sheetHtml = null;
-    if (ch.mode === 'reparto') {
+    if (ch.mode === 'tandas') {
+      const flat = ch.flat.map((r) => Object.assign({}, r));
+      ch.list.forEach((x, n) => Object.assign(flat[x.i], choqueApply(x, ch.picks[n])));
+      ui.choque = null;
+      await doRepartoTandas(ch.tandas.map((t, ti) => ({ rod: t.rod, rows: flat.filter((r) => r._t === ti).map((r) => ({ publish_date: r.publish_date, owner: r.owner, title: r.title, apoyo_due: r.apoyo_due })) })));
+    } else if (ch.mode === 'reparto') {
       const rows = ch.rows.map((r) => Object.assign({}, r));
       ch.list.forEach((x, n) => Object.assign(rows[x.i], choqueApply(x, ch.picks[n])));
       ui.choque = null;
@@ -3295,7 +3879,7 @@ const ACT = {
       ${isPartner(S.me) ? `<button class="btn b-ghost" data-act="reproNew" data-v="${v.id}">Programar un rodaje nuevo</button>` : ''}<button class="btn b-ghost" data-act="close">Cancelar</button>`);
   },
   reproGo: async (el) => { const v = S.data.videos.find((x) => x.id === el.dataset.v); sheetHtml = null; await st.moveVideo(v, el.dataset.e); },
-  reproNew: (el) => { const v = S.data.videos.find((x) => x.id === el.dataset.v); openSheet(dateTimeSheet('newRodV', 'Rodaje nuevo', `Para el video ${v.num}.`, { v: v.id }, R.addDays(R.limaDate(new Date()), 2), '10:00', 'Programar')); },
+  reproNew: (el) => { const v = S.data.videos.find((x) => x.id === el.dataset.v); openDt({ form: 'newRodV', title: 'Rodaje nuevo', text: `Para el video ${v.num}.`, kind: 'rodaje', pid: v.project_id, v: v.id, d: R.addDays(R.limaDate(new Date()), 2), t: '10:00', btn: 'Programar' }); },
   undoQuick: async (el) => {
     const u = ui.undo; if (!u) return;
     ui.undo = null;
@@ -3331,12 +3915,43 @@ const ACT = {
     if (evById(e.id).ended_at) offerUndo('Reunión finalizada', () => st.undoEnd(evById(e.id)));
   },
   confirmEnd: async (el) => { const id = el.dataset.e; await st.confirmEnd(evById(id)); offerUndo('Reunión finalizada', () => st.undoEnd(evById(id))); },
-  extraMeet: (el) => { const r = evById(el.dataset.r); openSheet(dateTimeSheet('extraMeet', 'Otra reunión', `Antes de ${R.fmtWhen(R.preDueFor(r.starts_at))} (plazo de preproducción).`, { r: r.id }, R.limaDate(new Date()), '18:00', 'Agendar')); },
-  reday: (el) => { const e = evById(el.dataset.e); openSheet(dateTimeSheet('reday', 'Reprogramar el rodaje', 'Se crea un rodaje nuevo con los mismos videos. El anterior queda como "reprogramado" en el historial. Los plazos de preproducción se mueven con el rodaje.', { e: e.id, a: el.dataset.a || '' }, R.addDays(R.limaDate(e.starts_at), 1), R.limaTime(e.starts_at), 'Reprogramar')); },
-  moveEv: (el) => { const e = evById(el.dataset.e); openSheet(dateTimeSheet('moveEv', 'Cambiar fecha u hora', 'Solo mientras nadie haya marcado su llegada. Queda en el historial.', { e: e.id }, R.limaDate(e.starts_at), R.limaTime(e.starts_at), 'Guardar')); },
+  extraMeet: (el) => { const m0 = el.dataset.m ? evById(el.dataset.m) : null; const rods = m0 ? R.meetRods(m0).filter((id) => { const r = evById(id); return r && active(r) && new Date(r.starts_at) > new Date(); }) : [el.dataset.r]; const f = rods.map(evById).sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at))[0]; const now = new Date(); openDt({ form: 'extraMeet', title: 'Otra reunión', text: `Antes de ${R.fmtWhen(R.preDueFor(f.starts_at))} (plazo de preproducción${rods.length > 1 ? ' del primer rodaje' : ''}).`, kind: 'reunion', pid: f.project_id, rods, d: R.limaDate(now), t: nextSlot(now), btn: 'Agendar' }); },
+  reday: (el) => { const e = evById(el.dataset.e); openDt({ form: 'reday', title: 'Reprogramar el rodaje', text: 'Se crea un rodaje nuevo con los mismos videos. El anterior queda como "reprogramado" en el historial. Los plazos de preproducción se mueven con el rodaje.', kind: 'rodaje', pid: e.project_id, e, replaces: e.id, a: el.dataset.a || '', d: R.addDays(R.limaDate(e.starts_at), 1), t: roundTime(R.limaTime(e.starts_at)), note: true, btn: 'Reprogramar' }); },
+  moveEv: (el) => {
+    const e = evById(el.dataset.e);
+    const o = { form: 'moveEv', title: 'Cambiar fecha u hora', text: 'Solo mientras nadie haya marcado su llegada. Queda en el historial.', kind: e.kind, pid: e.project_id, e, d: R.limaDate(e.starts_at), t: roundTime(R.limaTime(e.starts_at)), rods: R.meetRods(e), btn: 'Guardar' };
+    if (e.kind === 'rodaje') {
+      const ms = st.meetingsOf(e.id).sort((a, b) => new Date(b.starts_at) - new Date(a.starts_at));
+      const live = ms.find((m) => R.liveMeeting(m) && !S.data.attendance.some((a) => a.event_id === m.id && (a.arrived_at || a.claimed_at)));
+      if (live) { o.m = { e: live, d: R.limaDate(live.starts_at), t: roundTime(R.limaTime(live.starts_at)) }; o.text = 'El rodaje y su reunión se guardan juntos. Solo mientras nadie haya marcado su llegada. Queda en el historial.'; }
+      else { o.mEnded = ms.find((m) => m.ended_at); o.mLocked = !o.mEnded && ms.find((m) => R.liveMeeting(m)); }
+    }
+    openDt(o);
+  },
+  dtSave: async () => {
+    const x = ui.dt; if (!x) return;
+    const note = (document.querySelector('[data-dtnote]') || {}).value || '';
+    const { chk } = dtCheck();
+    if (!chk.ok) { st.toast(Object.values(chk.errors)[0], 'bad'); return; }
+    sheetHtml = null; render();
+    try {
+      if (x.form === 'moveEv') await st.moveEvent(x.e, x.d, x.t, x.m ? { e: x.m.e, date: x.m.d, time: x.m.t } : null);
+      else if (x.form === 'extraMeet') await st.extraMeeting(x.rods, x.d, x.t);
+      else if (x.form === 'newRodV') { const id = await st.newRodaje([], x.d, x.t); const v = S.data.videos.find((y) => y.id === x.v); if (id && v) await st.moveVideo(v, id); }
+      else if (x.form === 'newRod') { const c = st.ctx(); const ids = c.videos.filter((v) => !R.rodajeOf(v, c) && !R.videoState(v, c).r).map((v) => v.id); await st.newRodaje(ids, x.d, x.t); }
+      else if (x.form === 'repro') { const e = evById(x.e.id); const left = e.video_ids.filter((id) => !S.data.tasks.find((t) => t.video_id === id && t.kind === 'rodaje')); await st.reprogram(e, left, x.d, x.t); }
+      else if (x.form === 'reday') {
+        const nu = await st.reprogramDay(x.e, x.d, x.t, note.trim());
+        const a = x.a && S.data.attendance.find((y) => y.id === x.a);
+        if (a && !a.notice.decision) await st.decideNotice(a, 'reday');
+        if (nu && nu.id) location.hash = '#/e/' + nu.id;
+      }
+      ui.dt = null;
+    } catch (e) { openSheet(dtSheet()); }
+  },
   cancelEv: async (el) => { const e = evById(el.dataset.e); const note = prompt(`¿Cancelar ${e.kind === 'rodaje' ? 'el rodaje' : 'la reunión'} del ${R.fmtWhen(e.starts_at)}? Queda en el historial. Escribe el motivo (opcional):`, ''); if (note === null) return; await st.cancelEvent(e, note.trim()); offerUndo('Cancelado', () => st.undoCancel(evById(e.id))); },
   delEv: async (el) => { const e = evById(el.dataset.e); if (!confirm('¿Borrar? Está vacío, así que no se pierde ningún registro.')) return; await st.deleteEvent(e); location.hash = '#/videos'; },
-  newRod: () => openSheet(dateTimeSheet('newRod', 'Programar rodaje', 'Para los videos que se quedaron sin rodaje.', {}, R.addDays(R.limaDate(new Date()), 2), '10:00', 'Programar')),
+  newRod: () => openDt({ form: 'newRod', title: 'Programar rodaje', text: 'Para los videos que se quedaron sin rodaje.', kind: 'rodaje', pid: S.projectId, d: R.addDays(R.limaDate(new Date()), 2), t: '10:00', btn: 'Programar' }),
   delProject: async (el) => { const p = projOf(el.dataset.id); if (!confirm(`¿Borrar el proyecto ${p.client} · ${p.name}? Está vacío.`)) return; await st.deleteProject(p); if (S.projectId === p.id) { const n = S.data.projects.find((x) => x.status !== 'archivado'); st.switchProject(n ? n.id : null); } },
   archProject: async (el) => { const p = projOf(el.dataset.id); const on = !!el.dataset.on; if (on && !confirm(`¿Archivar ${p.client} · ${p.name}? Deja de aparecer en el selector; su historial se conserva y puedes reabrirlo.`)) return; await st.archiveProject(p, on); if (on && S.projectId === p.id) { const n = S.data.projects.find((x) => x.status !== 'archivado' && x.id !== p.id); if (n) st.switchProject(n.id); } },
   practiceOn: () => { if (confirm('Entrarás a un espacio de práctica en este celular. Tus datos reales no cambian. ¿Entrar?')) st.setPractice(true); },
@@ -3346,16 +3961,13 @@ const ACT = {
   repro: (el) => {
     const e = evById(el.dataset.e);
     const left = e.video_ids.filter((id) => !S.data.tasks.find((t) => t.video_id === id && t.kind === 'rodaje'));
-    openSheet(`<form data-form="repro" style="display:contents"><input type="hidden" name="e" value="${e.id}"><h2>Reprogramar</h2><p class="sub" style="margin:0">${left.length} videos pasan al nuevo rodaje. Conservan su dueño y su valor (5.10).</p>
-    <div class="grid2"><label class="field"><span>Fecha</span><input class="in" type="date" name="d" required value="${R.addDays(R.limaDate(e.starts_at), 1)}"></label><label class="field"><span>Hora</span><input class="in" type="time" name="t" required value="10:00"></label></div>
-    <button class="btn b-amber">Reprogramar</button><button type="button" class="btn b-ghost" data-act="close">Cancelar</button></form>`);
+    openDt({ form: 'repro', title: 'Reprogramar', text: `${left.length} videos pasan al nuevo rodaje. Conservan su dueño y su valor (5.10). Si ese día ya hay un rodaje, se suman a ese.`, kind: 'rodaje', pid: e.project_id, e, replaces: null, d: R.addDays(R.limaDate(e.starts_at), 1), t: '10:00', btn: 'Reprogramar' });
   },
   tol: (el) => { const e = evById(el.dataset.e); const v = prompt('Tolerancia en minutos (acordada con tu socio):', e.tolerance_min); if (v && Number(v) > 0) st.setTolerance(e, Number(v)); },
   sendSettle: async () => { const p = st.project(); if (confirm('¿Enviar la liquidación? Tu socio la revisará y confirmará.')) await st.sendSettlement(p); },
   confirmSettle: async () => { await st.confirmSettlement(st.project()); },
   observe: async () => { const t = prompt('¿Qué no cuadra? Ej.: "El rodaje del video 3 lo grabé yo."'); if (t) await st.observeSettlement(st.project(), t); },
   histF: (el) => { ui.histF = el.dataset.k; render(); },
-  askCorr: async (el) => { const t = prompt('Describe la corrección. El registro original no se borra; tu compañero tendrá que aprobarla.'); if (t) await st.requestCorrection(Number(el.dataset.id), t); },
   corr: async (el) => { const c = S.data.corrections.find((x) => x.id === el.dataset.id); await st.decideCorrection(c, el.dataset.s); },
   rename: async (el) => { const m = st.member(el.dataset.id); const n = prompt('Nombre (así aparecerá en avisos, recibos e historial):', m.name); if (n && n.trim() && n.trim() !== m.name) await st.renameMember(m.id, n); },
   // ---------- 1.4 · Integrantes C ----------
@@ -3488,6 +4100,7 @@ const ACT = {
 };
 
 const FORM = {
+  startDate: async (f) => { const p = st.project(); sheetHtml = null; await st.setStartDate(p, f.d); ui.wk = null; },
   sendCode: async (f) => {
     ui.email = f.email.trim().toLowerCase();
     if (st.isDemo()) { await st.verifyCode(ui.email, '000000'); return; }
@@ -3551,34 +4164,6 @@ const FORM = {
     sheetHtml = null;
     await st.sendNotice(e, { reason: f.reason, fm_kind: f.reason === 'fm' ? f.fm_kind : null, choice: f.choice || null });
   },
-  repro: async (f) => {
-    const e = evById(f.e);
-    const left = e.video_ids.filter((id) => !S.data.tasks.find((t) => t.video_id === id && t.kind === 'rodaje'));
-    sheetHtml = null;
-    await st.reprogram(e, left, f.d, f.t);
-  },
-  reday: async (f) => {
-    const e = evById(f.e);
-    sheetHtml = null;
-    const nu = await st.reprogramDay(e, f.d, f.t, (f.note || '').trim());
-    const a = f.a && S.data.attendance.find((x) => x.id === f.a);
-    if (a && !a.notice.decision) await st.decideNotice(a, 'reday');
-    if (nu && nu.id) location.hash = '#/e/' + nu.id;
-  },
-  moveEv: async (f) => { const e = evById(f.e); sheetHtml = null; if (e.kind === 'reunion' && e.rodaje_id) { const r = evById(e.rodaje_id); if (r && R.at(f.d, f.t) >= R.preDueFor(r.starts_at)) throw new Error('La reunión tiene que ser antes del plazo de preproducción'); } await st.moveEvent(e, f.d, f.t); },
-  extraMeet: async (f) => { const r = evById(f.r); sheetHtml = null; await st.extraMeeting(r, f.d, f.t); },
-  newRodV: async (f) => {
-    const v = S.data.videos.find((x) => x.id === f.v);
-    sheetHtml = null;
-    const r = await st.newRodaje(v.project_id, [], f.d, f.t);
-    if (r && r.id) await st.moveVideo(v, r.id);
-  },
-  newRod: async (f) => {
-    const c = st.ctx();
-    const ids = c.videos.filter((v) => !R.rodajeOf(v, c) && !R.videoState(v, c).r).map((v) => v.id);
-    sheetHtml = null;
-    await st.newRodaje(S.projectId, ids, f.d, f.t);
-  },
   reprog: async (f) => {
     const v = S.data.videos.find((x) => x.id === f.v);
     const s0 = R.videoState(v, st.ctx(v.project_id), new Date());
@@ -3596,10 +4181,17 @@ const FORM = {
   }
 };
 
+async function doRepartoTandas(tandas) {
+  await st.repartoTandas(tandas.map((t) => ({ rodaje: t.rod, videos: t.rows })));
+  ui.rep = null; ui.stage = 'pre';
+  const mt = st.meetingsOf(tandas[0].rod.id).find((e) => !e.ended_at);
+  location.hash = mt ? '#/e/' + mt.id : '#/videos';
+  render();
+}
 async function doReparto(rod, videos) {
   await st.reparto(rod, videos);
   ui.stage = 'pre';
-  const mt = S.data.events.find((e) => e.kind === 'reunion' && e.rodaje_id === rod.id && active(e) && !e.ended_at);
+  const mt = st.meetingsOf(rod.id).find((e) => !e.ended_at);
   location.hash = mt ? '#/e/' + mt.id : '#/videos';
 }
 // 1.5 · Sin zoom con dos dedos (Safari ignora user-scalable=no): la app siempre encaja en la pantalla.
@@ -3632,6 +4224,8 @@ document.addEventListener('input', (e) => {
   if (d.inv) { ui.inv = ui.inv || {}; ui.inv[d.inv] = t.type === 'checkbox' ? t.checked : t.value; }
   if (d.job && ui.job) ui.job[d.job] = t.value;
   if (d.obs) { ui.obs = ui.obs || {}; ui.obs[d.obs] = t.value; }
+  if (d.corrmot && ui.hist) ui.hist.motivo = t.value;
+  if (d.rept && ui.rep) { const [ti, i] = d.rept.split(':').map(Number); const row = ui.rep.tandas[ti] && ui.rep.tandas[ti].rows[i]; if (row) row.title = t.value; }
   if (t.name === 'invname') ui.invName = t.value;
 });
 document.addEventListener('change', (e) => { const d = e.target.dataset || {}; if (d.inv && e.target.type === 'checkbox') { ui.inv = ui.inv || {}; ui.inv.apoyo = e.target.checked; } });
@@ -3646,9 +4240,9 @@ document.addEventListener('submit', async (e) => {
   catch (err) { console.error(err); st.toast(err.message || 'Algo salió mal', 'bad'); }
   finally { if (btn && document.body.contains(btn)) btn.disabled = false; render(); }
 });
-window.addEventListener('hashchange', () => { sheetHtml = null; const r = location.hash.replace(/^#\/?/, '').split('/'); if (r[0] === 'i') ui.inviteCode = r[1]; render(); window.scrollTo(0, 0); });
+window.addEventListener('hashchange', () => { sheetHtml = null; ui.fv = {}; const r = location.hash.replace(/^#\/?/, '').split('/'); if (r[0] === 'i') ui.inviteCode = r[1]; render(); window.scrollTo(0, 0); });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.teamId) st.load().catch(() => {}); });
-setInterval(() => { if (document.visibilityState === 'visible' && S.teamId && !sheetHtml && !document.activeElement.matches('input,textarea,select')) st.load().catch(() => {}); }, 60000);
+setInterval(() => { if (document.visibilityState === 'visible' && S.teamId && !sheetHtml && !pickerOpen() && !document.activeElement.matches('input,textarea,select')) st.load().catch(() => {}); }, 60000);
 
 st.onChange(render);
 { const r = location.hash.replace(/^#\/?/, '').split('/'); if (r[0] === 'i') ui.inviteCode = r[1]; }
