@@ -111,7 +111,7 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 
 ### Plazos y orden (configurables en Administrador → Reglas, con aprobación del socio)
 - **Guion y storyboard**: hasta el **día antes del rodaje a las 18:00**. **Desde la 1.2: vencido el plazo, el dueño ya NO puede marcarlo**; pasa a su compañero como "Tomar" (cobra él) y al dueño le resta 3 puntos. El dueño puede deshacer su preproducción hasta el plazo.
-- **Rodaje**: se marca solo el día del rodaje, desde 15 min antes, con guion y storyboard hechos y la **llegada confirmada**.
+- **Rodaje**: se marca desde 15 min antes hasta su fin (1.6.1: las 23:59 de su día, o 12/24 h según la regla `rdur`), con guion hecho y la **llegada confirmada**. Lo no grabado queda sin rodaje; el líder puede registrar "Sí se grabó" hasta un día después.
 - **Montaje**: con apoyo, ver "Entregas al límite"; si no, junto con el final. Requiere rodaje.
 - **Video final**: 1 día antes de publicar a las **23:59** (1.4). Requiere montaje.
 - **Deshacer (1.4)**: todo se puede deshacer **10 min, y nunca después del plazo de esa acción** (`undo_limit()` / `R.undoUntil`): tareas, Tomar, entrega y corrección, aprobar / pedir cambios (`review_undo`), llegada y su confirmación, finalizar reunión, cancelar, respuesta a un aviso. El administrador puede desmarcar tareas siempre (corrección, queda en el historial). Guion y storyboard: hasta su plazo. En la app: "Deshacer" en la barra de abajo 8 s y en la tarjeta los 10 min.
@@ -143,7 +143,7 @@ Seguridad: en `js/config.js` solo va la clave **publishable** (pública). Nunca 
 
 ### Ajustes y propuestas (1.2)
 - `teams.settings` (jsonb): `rules`, `pct`, `look` (color principal y colores de urgencia), `reminders`.
-- **Con aprobación del socio** (tabla `proposals`): reglas de registro y porcentajes. El administrador propone; el socio aprueba o rechaza desde su Inicio; queda en el historial. Porcentajes nuevos rigen desde el **próximo proyecto**.
+- **Con aprobación** (tabla `proposals`): reglas de registro y porcentajes. El administrador propone; el socio aprueba o rechaza desde su Inicio; queda en el historial. 1.6.1: las **reglas** las aprueban solo los socios **sin apoyo** (si todos tienen apoyo, el líder las guarda directo); los **porcentajes** siempre los aprueba el otro socio. Porcentajes nuevos rigen desde el **próximo proyecto**.
 - **Libres** (solo administrador, RPC `save_settings`): apariencia y recordatorios.
 - **Día/noche**: botón sol/luna arriba, por celular (`localStorage['ra-theme']`).
 
@@ -193,7 +193,7 @@ El canvas está en la cuenta de Williams (enlace arriba). Para leerlo o editarlo
 2. **Rediseñar con el estilo de los bocetos**: reunión/rodaje por dentro (`ProduccionC`, `AvisoA`), Cierre (`CierreA`), Equipo/integrantes, Entrar.
 3. Colaborador externo: hecho en la 1.4. Falta el aviso al celular (`NotifColabA`) y que el editor suba archivos desde la app (hoy marca y sube a Drive por fuera).
 4. **Acuerdo**: agregar la regla de la 1.2 (preproducción vencida pasa al compañero; el dueño ya no la puede marcar).
-5. **Pregunta abierta para Williams**: si la preproducción vence y nadie la toma antes del rodaje, el video no se puede grabar. ¿Se deja así o la app debe avisar?
+5. ~~Pregunta abierta: preproducción vencida y nadie la toma~~ → resuelto en la 1.6.1: el video queda sin rodaje con aviso urgente y se reprograma (el guion vuelve a tener plazo).
 6. Mejoras menores: el ícono de "Equipo" (personas) abre la pantalla antigua; textos del modo práctica.
 
 ## 8. Historial de versiones
