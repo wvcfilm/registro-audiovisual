@@ -238,6 +238,7 @@ class DemoAPI {
       if (new Date(dst.starts_at) <= new Date()) throw new Error('Ese rodaje ya empezó');
       for (const e of this.db.events.filter((x) => x.kind === 'rodaje' && (x.status || 'activo') === 'activo' && x.id !== dst.id && x.video_ids.indexOf(v.id) !== -1)) e.video_ids = e.video_ids.filter((id) => id !== v.id);
       if (dst.video_ids.indexOf(v.id) === -1) dst.video_ids = dst.video_ids.concat([v.id]);
+      this.clearUnshot(dst);
       this.log(v.team_id, v.project_id, 'video.reprogramado', { video: v.num, to: dst.starts_at });
       this.persist(); return null;
     }
@@ -287,9 +288,101 @@ class DemoAPI {
       return nu.id;
     });
     if (fn === 'correct_record') return this.tx(() => this.correct(a));
+    // 1.6.1 · fin del rodaje, "Sí se grabó" después, reprogramar varios y "No me llegó el video" (igual que la base)
+    if (fn === 'close_rodajes') return this.tx(async () => {
+      const pr = this.db.projects.find((x) => x.id === a.p);
+      if (!pr || !this.partner(pr.team_id)) throw new Error('Sin permiso');
+      let n = 0;
+      const now = new Date();
+      for (const r of this.db.events.filter((e) => e.project_id === pr.id && e.kind === 'rodaje' && (e.status || 'activo') === 'activo' && !e.closed_at).sort((x, y) => new Date(x.starts_at) - new Date(y.starts_at))) {
+        if (now <= R.rodajeEnd(r)) continue;
+        const miss = (r.video_ids || []).filter((id) => !this.db.tasks.some((t) => t.video_id === id && t.kind === 'rodaje' && !t.void));
+        r.closed_at = now.toISOString(); r.video_ids = (r.video_ids || []).filter((id) => miss.indexOf(id) === -1);
+        if (miss.length) {
+          for (const v of this.db.videos.filter((x) => miss.indexOf(x.id) !== -1)) v.unshot = { rodaje: r.id, at: r.starts_at, closed: now.toISOString() };
+          this.log(pr.team_id, pr.id, 'rodaje.sin_grabar', { rodaje: r.id, at: r.starts_at, videos: this.db.videos.filter((x) => miss.indexOf(x.id) !== -1).map((x) => x.num).sort((x, y) => x - y) }, null);
+          n += miss.length;
+        }
+      }
+      return n;
+    });
+    if (fn === 'late_shot') return this.tx(async () => {
+      const v = this.db.videos.find((x) => x.id === a.v);
+      const me = v && this.me(v.team_id);
+      if (!me || me.role !== 'admin') throw new Error('Solo el líder registra un rodaje después');
+      if (this.db.tasks.some((t) => t.video_id === v.id && t.kind === 'rodaje' && !t.void)) throw new Error('Ese video ya figura grabado');
+      const live = (e) => e.kind === 'rodaje' && (e.status || 'activo') === 'activo' && (e.video_ids || []).indexOf(v.id) !== -1;
+      let r;
+      if (v.unshot) {
+        r = this.db.events.find((e) => e.id === v.unshot.rodaje);
+        if (this.db.events.some(live)) throw new Error('El video ya tiene otro rodaje');
+      } else r = this.db.events.filter(live).sort((x, y) => new Date(x.starts_at) - new Date(y.starts_at))[0];
+      if (!r) throw new Error('Este video no tuvo rodaje');
+      const now = new Date();
+      if (new Date(r.starts_at) > now) throw new Error('El video ya tiene otro rodaje programado');
+      if (now <= R.rodajeEnd(r)) throw new Error('El rodaje sigue: márcalo como siempre');
+      if (now > R.lateShotUntil(r)) throw new Error('Ya pasó el plazo (hasta un día después del rodaje)');
+      if (!this.db.tasks.some((t) => t.video_id === v.id && t.kind === 'guion' && !t.void)) throw new Error('Sin guion no se graba');
+      const m = this.db.members.find((x) => x.id === a.who && x.team_id === v.team_id && x.active && (x.role === 'admin' || x.role === 'socio'));
+      if (!m) throw new Error('Elige quién lo grabó');
+      const arrived = (id) => this.db.attendance.some((x) => x.event_id === r.id && x.member_id === id && x.arrived_at);
+      if (!arrived(m.id)) throw new Error(m.name + ' no tiene la llegada registrada en ese rodaje');
+      const ow = this.db.members.find((x) => x.id === v.owner);
+      if (m.id !== v.owner && arrived(v.owner)) throw new Error((ow ? ow.name : 'El dueño') + ' estuvo en el rodaje: el video va a su nombre');
+      if ((r.video_ids || []).indexOf(v.id) === -1) r.video_ids = (r.video_ids || []).concat([v.id]);
+      v.unshot = null;
+      this.late = true;
+      try { await this.insert('tasks', { team_id: v.team_id, project_id: v.project_id, video_id: v.id, kind: 'rodaje', done_by: m.id }); } finally { this.late = false; }
+      this.log(v.team_id, v.project_id, 'rodaje.tarde', { video: v.num, member: m.id, rodaje: r.id, at: r.starts_at }, me.id);
+      return null;
+    });
+    if (fn === 'move_videos') return this.tx(async () => {
+      if (!(a.vids || []).length) throw new Error('Elige al menos un video');
+      const v0 = this.db.videos.find((x) => x.id === a.vids[0]);
+      if (!v0 || !this.partner(v0.team_id)) throw new Error('Sin permiso');
+      let dst = a.to_rodaje;
+      if (!dst) {
+        if (!a.new_at) throw new Error('Elige la fecha del rodaje');
+        if (new Date(a.new_at) <= new Date()) throw new Error('Elige una fecha que no haya pasado');
+        const rl = ((this.db.teams.find((t) => t.id === v0.team_id) || {}).settings || {}).rules || {};
+        dst = (await this.insert('events', { team_id: v0.team_id, project_id: v0.project_id, kind: 'rodaje', starts_at: a.new_at, tolerance_min: Number(rl.tol) || 45, video_ids: [], note: 'Reprogramado' }, true)).id;
+      }
+      for (const id of a.vids) await this.rpc('move_video', { v: id, to_rodaje: dst });
+      this.checkEvents(v0.project_id, this.db.events.filter((e) => e.project_id === v0.project_id).map((e) => e.id));
+      return dst;
+    });
+    if (fn === 'review_missing' || fn === 'review_missing_undo') return this.tx(async () => {
+      const v = this.db.videos.find((x) => x.id === a.v);
+      const me = v && this.me(v.team_id);
+      if (!me || me.role !== 'admin') throw new Error(fn === 'review_missing' ? 'Solo el líder revisa las entregas' : 'Sin permiso');
+      const now = new Date().toISOString();
+      const own = (k) => this.db.tasks.filter((t) => t.video_id === v.id && t.kind === k && t.done_by === v.owner);
+      const logT = (t, old) => this.log(t.team_id, t.project_id, 'tasks.update', { new: JSON.parse(JSON.stringify(t)), old });
+      if (fn === 'review_missing') {
+        const k = own('acabado').find((t) => !t.void);
+        if (!k || k.review !== 'pendiente') throw new Error('No hay una entrega por revisar');
+        let old = JSON.parse(JSON.stringify(k));
+        Object.assign(k, { review: 'no_llego', review_at: now, review_by: me.id, void: true, voided_at: now }); logT(k, old);
+        for (const t of own('montaje').filter((x) => !x.void)) { old = JSON.parse(JSON.stringify(t)); Object.assign(t, { void: true, voided_at: now }); logT(t, old); }
+        this.log(v.team_id, v.project_id, 'video.no_llego', { video: v.num, member: v.owner }, me.id);
+        return R.videoState(v, this.ctxFor(v.project_id), new Date()).post.phase;
+      }
+      const k = own('acabado').filter((t) => t.void && t.review === 'no_llego').sort((x, y) => new Date(y.review_at) - new Date(x.review_at))[0];
+      if (!k || k.review_by !== me.id || !R.within(k.review_at)) throw new Error('Solo se deshace en los primeros 10 minutos');
+      if (this.db.tasks.some((t) => t.video_id === v.id && (t.kind === 'montaje' || t.kind === 'acabado') && !t.void)) throw new Error('Ya se volvió a entregar o se tomó el video');
+      for (const t of own('montaje').filter((x) => x.void && x.voided_at === k.voided_at)) { const old = JSON.parse(JSON.stringify(t)); Object.assign(t, { void: false, voided_at: null }); logT(t, old); }
+      const old = JSON.parse(JSON.stringify(k));
+      Object.assign(k, { void: false, voided_at: null, review: 'pendiente', review_at: null, review_by: null }); logT(k, old);
+      return null;
+    });
     throw new Error('Función desconocida: ' + fn);
   }
   // ---------- 1.6 ----------
+  // 1.6.1: un video que vuelve a tener rodaje ya no está "sin rodaje".
+  clearUnshot(e) {
+    if (e.kind !== 'rodaje' || (e.status || 'activo') !== 'activo') return;
+    for (const v of this.db.videos.filter((x) => x.unshot && (e.video_ids || []).indexOf(x.id) !== -1)) v.unshot = null;
+  }
   // Todo o nada (como una transacción de la base).
   async tx(fn) {
     const snap = JSON.stringify(this.db), lid = this.logId;
@@ -517,11 +610,14 @@ class DemoAPI {
       }
     }
     if (table === 'log') { const r = Object.assign({ id: ++this.logId, at: new Date().toISOString() }, row); this.db.log.push(r); this.persist(); return r; }
-    if (table === 'tasks' && this.db.tasks.find((t) => t.video_id === row.video_id && t.kind === row.kind && !t.void)) throw new Error('Esa tarea ya está marcada');
     let voidOwn = null;
     if (table === 'tasks') {
       row = Object.assign({}, row, { review: null, review_at: null, review_by: null, review_note: null, review_round: 0, redelivered_at: null, void: false });
       const v = this.db.videos.find((x) => x.id === row.video_id);
+      if (!this.seeding && !this.late && v && !row.split && row.kind === 'rodaje') {
+        const cm = R.canMark(v, 'rodaje', this.me(row.team_id), this.ctxFor(v.project_id), new Date());
+        if (!cm.ok) throw new Error(cm.why || 'Todavía no se puede marcar');
+      }
       if (!this.seeding && v && !row.split && (row.kind === 'montaje' || row.kind === 'acabado')) {
         const me = this.me(row.team_id);
         const cm = R.canMark(v, row.kind, me, this.ctxFor(v.project_id), new Date());
@@ -530,7 +626,23 @@ class DemoAPI {
         if (row.kind === 'montaje' && cm.take && v.owner !== me.id) voidOwn = v;
       }
     }
+    // 1.6.1: igual que la base: si el video pasó a otra persona, lo del dueño se anula y no cuenta como "ya marcado".
+    if (table === 'tasks' && this.db.tasks.find((t) => t.video_id === row.video_id && t.kind === row.kind && !t.void && !(voidOwn && t.done_by === voidOwn.owner))) throw new Error('Esa tarea ya está marcada');
     if (table === 'attendance' && this.db.attendance.find((t) => t.event_id === row.event_id && t.member_id === row.member_id)) throw new Error('Ya existe');
+    // 1.6.1 (igual que la base): las reglas las aprueban los socios sin apoyo; si todos tienen apoyo, el líder las cambia directo.
+    if (table === 'proposals' && !this.seeding) {
+      const me = this.me(row.team_id);
+      if (this.db.proposals.some((x) => x.team_id === row.team_id && x.kind === row.kind && x.status === 'pendiente' && (row.kind !== 'apoyo' || (x.data || {}).member === (row.data || {}).member))) throw new Error('Ya hay una propuesta pendiente de ese tipo: retírala primero');
+      if (row.kind === 'pct') { const d = row.data || {}; if ((Number(d.pre) || 0) + (Number(d.rod) || 0) + (Number(d.mon) || 0) + (Number(d.aca) || 0) !== 100) throw new Error('Los porcentajes tienen que sumar 100'); }
+      if (row.kind === 'rules' && row.data && 'rdur' in row.data && [0, 720, 1440].indexOf(Number(row.data.rdur)) === -1) throw new Error('La duración del rodaje es hasta las 23:59, 12 horas o 24 horas');
+      const t = this.db.teams.find((x) => x.id === row.team_id);
+      row = Object.assign({}, row, { status: 'pendiente', proposed_by: me.id, decided_by: null, decided_at: null });
+      if (row.kind === 'rules' && !R.rulesApprovers(this.db.members.filter((m) => m.team_id === row.team_id)).length) {
+        if (me.role !== 'admin') throw new Error('Las reglas las cambia el líder');
+        row.status = 'aprobada'; row.decided_by = me.id; row.decided_at = new Date().toISOString();
+        t.settings = Object.assign({}, t.settings || {}); t.settings.rules = Object.assign({}, t.settings.rules || {}, row.data);
+      }
+    }
     if (table === 'claims') {
       const me = this.me(row.team_id);
       if (!me || row.member_id !== me.id) throw new Error('Solo puedes tomar a tu nombre');
@@ -566,6 +678,7 @@ class DemoAPI {
     if (table === 'jobs') for (const vid of r.video_ids) this.db.job_items.push({ id: uuid(), team_id: r.team_id, job_id: r.id, video_id: vid, stage: 'montaje', obs1: [], obs2: [], prev: null });
     this.db[table].push(r);
     this.log(r.team_id, this.projectOf(table, r), table + '.insert', { new: r, old: null });
+    if (table === 'events') this.clearUnshot(r);
     // 1.5 (igual que la base): el apoyo queda fijado en el video al grabarse.
     if (table === 'tasks' && r.kind === 'rodaje') { const v = this.db.videos.find((x) => x.id === r.video_id); const ow = v && this.db.members.find((m) => m.id === v.owner); if (v && v.apoyo_fixed == null) v.apoyo_fixed = !!(ow && ow.role === 'socio' && ow.apoyo); }
     // 1.3 (igual que la base): grabar sin storyboard lo reparte mitad y mitad y lo cierra.
@@ -620,12 +733,14 @@ class DemoAPI {
       if (patch.status === 'retirada' && me.id !== old.proposed_by) throw new Error('Solo quien propuso puede retirarla');
       if ((patch.status === 'aprobada' || patch.status === 'rechazada') && me.id === old.proposed_by) throw new Error('La aprueba tu compañero');
       if ((patch.status === 'aprobada' || patch.status === 'rechazada') && old.kind === 'apoyo' && me.id !== old.data.member) throw new Error('La acepta el socio al que le cambia');
+      if ((patch.status === 'aprobada' || patch.status === 'rechazada') && old.kind === 'rules' && me.role === 'socio' && me.apoyo) throw new Error('Las reglas las aprueba un socio sin apoyo');
       patch = Object.assign({}, patch, { decided_by: me.id, decided_at: new Date().toISOString() });
       if (patch.status === 'aprobada' && old.kind === 'apoyo') { const tm = this.db.members.find((m) => m.id === old.data.member); if (tm) { const o2 = JSON.parse(JSON.stringify(tm)); tm.apoyo = !!old.data.apoyo; this.log(tm.team_id, null, 'members.update', { new: JSON.parse(JSON.stringify(tm)), old: o2 }); } }
       else if (patch.status === 'aprobada') { const t = this.db.teams.find((x) => x.id === r.team_id); t.settings = Object.assign({}, t.settings || {}); t.settings[old.kind] = Object.assign({}, t.settings[old.kind] || {}, old.data); }
     }
     Object.assign(r, patch);
     this.log(r.team_id, this.projectOf(table, r), table + '.update', { new: r, old });
+    if (table === 'events' && 'video_ids' in patch) this.clearUnshot(r);
     this.persist(); return JSON.parse(JSON.stringify(r));
   }
   async remove(table, id) {

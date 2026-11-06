@@ -81,6 +81,11 @@ const as = (who) => api.switchUser(who === 'W' ? ids.uw : ids.ua);
 const ctxNow = () => api.ctxFor(ids.P);
 const proj = () => api.db.projects.find((p) => p.id === ids.P);
 const mem = (id) => api.db.members.find((m) => m.id === id);
+// Llegada de los dos al rodaje (como en la base: el rodaje se marca con la llegada confirmada).
+async function arrive(rodId, day) {
+  setNow(day + 'T09:59:00');
+  for (const [w, id] of [['W', ids.W], ['A', ids.A]]) { as(w); await api.insert('attendance', { team_id: ids.team, event_id: rodId, member_id: id, claimed_at: at(day, '09:58'), arrived_at: at(day, '09:58'), confirmed_by: ids.W }); }
+}
 async function task(by, v, kind, when) { setNow(when); as(by === ids.W ? 'W' : 'A'); return api.insert('tasks', { team_id: ids.team, project_id: ids.P, video_id: v.id, kind, done_by: by }); }
 
 test('1.6 · simulación: semana con 2 rodajes y 1 reunión, reparto 3 y 3, dinero exacto y puntos de reunión', async () => {
@@ -124,6 +129,7 @@ test('1.6 · simulación: semana con 2 rodajes y 1 reunión, reparto 3 y 3, dine
   assert.equal(R.fmtWhen(dl(vids[0]).preDue), 'mié 11 nov · 18:00');
   assert.equal(R.fmtWhen(dl(vids[3]).preDue), 'jue 12 nov · 18:00');
   // Rodajes, montaje y final de todos: el dinero de 6 videos cuadra exacto (6 × S/ 62.50).
+  await arrive(rids[0], '2026-11-12'); await arrive(rids[1], '2026-11-13');
   for (const v of vids.slice(0, 3)) await task(v.owner, v, 'rodaje', '2026-11-12T11:00:00');
   for (const v of vids.slice(3)) await task(v.owner, v, 'rodaje', '2026-11-13T11:00:00');
   for (const v of vids) {
@@ -171,6 +177,7 @@ test('1.6 · simulación: corregir un registro (cadena, dinero, una sola vez, li
   const g1 = await task(ids.A, v1, 'guion', '2026-11-10T11:00:00');
   await task(ids.A, v1, 'storyboard', '2026-11-10T11:10:00');
   const g2 = await task(ids.A, v2, 'guion', '2026-11-10T11:20:00');
+  await arrive(r1, '2026-11-12');
   await task(ids.A, v1, 'rodaje', '2026-11-12T11:00:00');
   setNow('2026-11-12T15:00:00');
   const logOf = (t) => api.db.log.find((l) => l.type === 'tasks.insert' && l.data.new.id === t.id).id;

@@ -452,7 +452,7 @@ begin
     end if;
   elsif new.kind = 'acabado' then
     if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje') then raise exception 'Primero tiene que estar el montaje'; end if;
-    if me <> v.owner and mrole <> 'admin' then raise exception 'El video final lo hace el dueño o el líder'; end if;
+    if me <> v.owner and mrole <> 'admin' then raise exception 'El corte final lo hace el dueño o el líder'; end if;
   end if;
   new.done_at := now();
   return new;
@@ -641,7 +641,7 @@ begin
     end if;
   elsif new.kind = 'acabado' then
     if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje') then raise exception 'Primero tiene que estar el montaje'; end if;
-    if me <> v.owner and mrole <> 'admin' then raise exception 'El video final lo hace el dueño o el líder'; end if;
+    if me <> v.owner and mrole <> 'admin' then raise exception 'El corte final lo hace el dueño o el líder'; end if;
   end if;
   new.done_at := now();
   return new;
@@ -904,7 +904,7 @@ begin
     end if;
   elsif new.kind = 'acabado' then
     if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje') then raise exception 'Primero tiene que estar el montaje'; end if;
-    if me <> v.owner and mrole <> 'admin' then raise exception 'El video final lo hace el dueño o el líder'; end if;
+    if me <> v.owner and mrole <> 'admin' then raise exception 'El corte final lo hace el dueño o el líder'; end if;
   end if;
   new.split := false; new.split_with := null;
   new.done_at := now();
@@ -1166,7 +1166,7 @@ begin
       ph := post_phase(v.id);
       if me = v.owner then
         if ph = 'pasado' then raise exception 'El video pasó al líder: ya no puedes entregarlo'; end if;
-        if ph = 'apoyo' then raise exception 'Tu video final lo hace el líder como apoyo'; end if;
+        if ph = 'apoyo' then raise exception 'Tu corte final lo hace el líder como apoyo'; end if;
         if ph in ('revision', 'cambios', 'aprobado') then raise exception 'Ya entregaste este video'; end if;
         new.review := 'pendiente'; -- entrega por su cuenta: el administrador la revisa
       elsif mrole = 'admin' then
@@ -1176,10 +1176,10 @@ begin
           raise exception 'Tu socio entrega este video por su cuenta: revísalo cuando lo entregue';
         end if;
       else
-        raise exception 'El video final lo hace el dueño o el líder';
+        raise exception 'El corte final lo hace el dueño o el líder';
       end if;
     elsif me <> v.owner and mrole <> 'admin' then
-      raise exception 'El video final lo hace el dueño o el líder';
+      raise exception 'El corte final lo hace el dueño o el líder';
     end if;
   end if;
   new.split := false; new.split_with := null;
@@ -1974,13 +1974,13 @@ begin
         if ph in ('revision', 'cambios', 'aprobado', 'entregado') then raise exception 'Ya entregaste este video'; end if;
         if vowner.role <> 'admin' then new.review := 'pendiente'; end if; -- el líder revisa la entrega del socio
       else
-        if ph <> 'pasado' or pass_to(v.id) is distinct from me then raise exception 'El video final lo hace su dueño'; end if;
+        if ph <> 'pasado' or pass_to(v.id) is distinct from me then raise exception 'El corte final lo hace su dueño'; end if;
         if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje' and not void and done_by = me) then raise exception 'Primero haz el montaje'; end if;
       end if;
     elsif md = 'apoyo' then
       if me = v.owner then
         if ph = 'pasado' then raise exception 'El video pasó al líder: ya no puedes entregarlo'; end if;
-        if ph = 'apoyo' then raise exception 'Tu video final lo hace el líder como apoyo'; end if;
+        if ph = 'apoyo' then raise exception 'Tu corte final lo hace el líder como apoyo'; end if;
         if ph in ('revision', 'cambios', 'aprobado') then raise exception 'Ya entregaste este video'; end if;
         new.review := 'pendiente';
       elsif mrole = 'admin' then
@@ -1990,10 +1990,10 @@ begin
           raise exception 'Tu socio entrega este video por su cuenta: revísalo cuando lo entregue';
         end if;
       else
-        raise exception 'El video final lo hace el dueño o el líder';
+        raise exception 'El corte final lo hace el dueño o el líder';
       end if;
     elsif me <> v.owner then
-      raise exception 'El video final lo hace su dueño';
+      raise exception 'El corte final lo hace su dueño';
     end if;
   end if;
   new.split := false; new.split_with := null;
@@ -2296,7 +2296,7 @@ begin
   end if;
   if coalesce((r->>'pmon')::int, 720) >= coalesce((r->>'pfin')::int, 1080) or coalesce((r->>'pfin')::int, 1080) >= coalesce((r->>'prev')::int, 1140)
      or coalesce((r->>'prev')::int, 1140) >= coalesce((r->>'pfix')::int, 1260) or coalesce((r->>'pfix')::int, 1260) >= 1439 then
-    raise exception 'Las horas sin apoyo tienen que ir en orden: montaje, video final, revisión, corrección';
+    raise exception 'Las horas sin apoyo tienen que ir en orden: montaje, corte final, revisión, corrección';
   end if;
 end $$;
 
@@ -2696,3 +2696,348 @@ begin
 end $$;
 
 grant execute on function plan_week, move_event, reprogram_day, correct_record, meeting_problem, rodaje_problem to authenticated;
+
+
+-- =====================================================================
+-- Versión 1.6.1: fin del rodaje (duración máxima), videos sin rodaje, "Sí se grabó" después,
+-- reprogramar varios videos, "No me llegó el video", reglas que aprueban solo los socios sin apoyo.
+-- =====================================================================
+alter table tasks drop constraint if exists tasks_review_chk;
+alter table tasks add constraint tasks_review_chk check (review is null or review in ('pendiente', 'aprobada', 'cambios', 'rechazada', 'no_llego'));
+alter table events add column if not exists closed_at timestamptz;   -- rodaje cerrado: lo no grabado quedó sin rodaje
+alter table videos add column if not exists unshot jsonb;            -- {rodaje, at, closed}: quedó sin grabar en ese rodaje
+
+-- Hasta cuándo dura un rodaje: hasta las 23:59 de su día (rdur 0) o 12 / 24 horas desde que empieza.
+create or replace function rodaje_end(r events) returns timestamptz
+language sql stable security definer set search_path = public as $$
+  select case when rule_int(r.team_id, 'rdur', 0) > 0 then r.starts_at + make_interval(mins => rule_int(r.team_id, 'rdur', 0))
+              else lima_at(lima_day(r.starts_at), '23:59') + interval '59 seconds' end
+$$;
+
+-- ---------- Marcar tareas: el rodaje se marca hasta que termina (ya no solo el mismo día) ----------
+create or replace function guard_task() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  me uuid := my_member(new.team_id); mrole text; v videos; vowner members; r events; h hires;
+  due timestamptz; att attendance; oatt attendance; ph text; md text; meapoyo boolean;
+begin
+  -- 1.6.1: "Sí se grabó" registrado después por el líder (late_shot ya revisó todo).
+  if coalesce(current_setting('ra.late', true), '') = '1' and new.kind = 'rodaje' and not coalesce(new.split, false) then
+    new.void := false; new.split := false; new.split_with := null; new.done_at := now();
+    return new;
+  end if;
+  if new.split then
+    if pg_trigger_depth() < 2 then raise exception 'El storyboard repartido lo registra la app al grabar'; end if;
+    new.done_at := now();
+    return new;
+  end if;
+  if new.done_by is distinct from me then raise exception 'Solo puedes marcar tus propias tareas'; end if;
+  select role, coalesce(apoyo, false) into mrole, meapoyo from members where id = me;
+  if mrole = 'colaborador' then
+    if coalesce(current_setting('app.job', true), '') <> '1' or new.kind not in ('montaje', 'acabado') then raise exception 'Los colaboradores entregan desde su encargo'; end if;
+    new.void := false; new.review := null; new.review_round := 0; new.split := false; new.done_at := now();
+    return new;
+  end if;
+  md := video_mode(new.video_id);
+  if new.kind in ('montaje', 'acabado') and md = 'colab' then raise exception 'Este video lo edita un colaborador'; end if;
+  new.void := false; new.voided_at := null; new.review := null; new.review_at := null; new.review_by := null;
+  new.review_note := null; new.review_round := 0; new.redelivered_at := null;
+  select * into v from videos where id = new.video_id;
+  select * into vowner from members where id = v.owner;
+  if new.hire_id is not null then
+    select * into h from hires where id = new.hire_id;
+    if h.status <> 'aceptada' or h.present <> new.done_by then raise exception 'Contratación de Guillermo no válida'; end if;
+    if new.kind not in ('guion', 'storyboard') then raise exception 'Guillermo solo hace guiones y storyboards'; end if;
+  end if;
+  if new.kind in ('guion', 'storyboard') then
+    due := pre_due(v.id);
+    if me = v.owner and new.hire_id is null and due is not null and now() > due then
+      raise exception 'Venció el plazo: esta tarea pasó a tu compañero';
+    end if;
+    if me <> v.owner and new.hire_id is null then
+      if due is null or now() <= due then raise exception 'La preproducción de tu compañero solo se puede tomar después de su plazo'; end if;
+      if not has_claim(v.id, new.kind, me) then raise exception 'Primero tómala (o pasó el límite para entregarla)'; end if;
+    end if;
+  elsif new.kind = 'rodaje' then
+    r := video_rodaje(v.id);
+    if r.id is null then raise exception 'Este video no tiene rodaje agendado'; end if;
+    if now() < r.starts_at - make_interval(mins => rule_int(new.team_id, 'open', 15)) then
+      raise exception 'El rodaje se marca desde que se abre la llegada';
+    end if;
+    if now() > rodaje_end(r) then
+      raise exception 'El rodaje ya terminó: reprograma el video';
+    end if;
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'guion') then
+      raise exception 'Sin guion no se graba: reprograma el video';
+    end if;
+    select * into att from attendance where event_id = r.id and member_id = me;
+    if att.arrived_at is null then raise exception 'Primero tu llegada al rodaje tiene que estar confirmada'; end if;
+    if me <> v.owner then
+      select * into oatt from attendance where event_id = r.id and member_id = v.owner;
+      if oatt.arrived_at is not null then raise exception 'El dueño del video está en el rodaje: lo marca él'; end if;
+      if (oatt.notice->>'sent_at') is not null
+         and (oatt.notice->>'sent_at')::timestamptz <= confirm_due(r.id)
+         and coalesce(oatt.notice->>'choice', '') <> 'other' then
+        raise exception 'Avisó a tiempo: sus videos se reprograman, salvo que acepte que los grabes';
+      end if;
+    end if;
+  elsif new.kind = 'montaje' then
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'rodaje' and not void) then raise exception 'Primero tiene que grabarse el video'; end if;
+    ph := post_phase(v.id);
+    if md = 'pareja' then
+      if me = v.owner then
+        if ph = 'pasado' then raise exception 'Este video ya lo tomó otra persona'; end if;
+      else
+        if ph <> 'pasado' then raise exception 'Todavía es de su dueño: si no entrega a las 18:00, podrás tomarlo'; end if;
+        if pass_to(v.id) is distinct from me then raise exception 'Este video lo tomó otra persona'; end if;
+        update tasks set void = true, voided_at = now() where video_id = v.id and kind in ('montaje', 'acabado') and done_by = v.owner and not void;
+      end if;
+    elsif md = 'apoyo' then
+      if me = v.owner then
+        if ph = 'pasado' then raise exception 'El video pasó al líder: ya no puedes entregarlo'; end if;
+      elsif mrole <> 'admin' then
+        raise exception 'Este montaje le corresponde al dueño del video';
+      elsif ph <> 'pasado' then
+        raise exception 'Todavía es de tu socio: si no entrega, podrás tomarlo desde las 08:00';
+      else
+        if exists (select 1 from claims where video_id = v.id and kind = 'montaje' and status = 'activa' and member_id <> me) then raise exception 'Ya lo tomó otra persona'; end if;
+        update tasks set void = true, voided_at = now() where video_id = v.id and kind in ('montaje', 'acabado') and done_by = v.owner and not void;
+      end if;
+    elsif me <> v.owner then
+      raise exception 'Este montaje le corresponde al dueño del video';
+    end if;
+  elsif new.kind = 'acabado' then
+    if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje' and not void) then raise exception 'Primero tiene que estar el montaje'; end if;
+    ph := post_phase(v.id);
+    if md = 'pareja' then
+      if me = v.owner then
+        if ph = 'pasado' then raise exception 'Este video ya lo tomó otra persona'; end if;
+        if ph in ('revision', 'cambios', 'aprobado', 'entregado') then raise exception 'Ya entregaste este video'; end if;
+        if vowner.role <> 'admin' then new.review := 'pendiente'; end if; -- el líder revisa la entrega del socio
+      else
+        if ph <> 'pasado' or pass_to(v.id) is distinct from me then raise exception 'El corte final lo hace su dueño'; end if;
+        if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje' and not void and done_by = me) then raise exception 'Primero haz el montaje'; end if;
+      end if;
+    elsif md = 'apoyo' then
+      if me = v.owner then
+        if ph = 'pasado' then raise exception 'El video pasó al líder: ya no puedes entregarlo'; end if;
+        if ph = 'apoyo' then raise exception 'Tu corte final lo hace el líder como apoyo'; end if;
+        if ph in ('revision', 'cambios', 'aprobado') then raise exception 'Ya entregaste este video'; end if;
+        new.review := 'pendiente';
+      elsif mrole = 'admin' then
+        if ph = 'pasado' then
+          if not exists (select 1 from tasks where video_id = v.id and kind = 'montaje' and not void and done_by = me) then raise exception 'Primero haz el montaje'; end if;
+        elsif ph <> 'apoyo' then
+          raise exception 'Tu socio entrega este video por su cuenta: revísalo cuando lo entregue';
+        end if;
+      else
+        raise exception 'El corte final lo hace el dueño o el líder';
+      end if;
+    elsif me <> v.owner then
+      raise exception 'El corte final lo hace su dueño';
+    end if;
+  end if;
+  new.split := false; new.split_with := null;
+  new.done_at := now();
+  return new;
+end $$;
+
+drop trigger if exists tasks_guard on tasks;
+create trigger tasks_guard before insert on tasks for each row execute function guard_task();
+
+-- Un video que vuelve a tener rodaje ya no está "sin rodaje".
+create or replace function clear_unshot() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.kind = 'rodaje' and new.status = 'activo' and coalesce(array_length(new.video_ids, 1), 0) > 0
+     and (tg_op = 'INSERT' or new.video_ids is distinct from old.video_ids) then
+    update videos set unshot = null where id = any(new.video_ids) and unshot is not null;
+  end if;
+  return null;
+end $$;
+drop trigger if exists events_unshot on events;
+create trigger events_unshot after insert or update on events for each row execute function clear_unshot();
+
+-- Cerrar los rodajes que ya terminaron: lo que no se grabó queda sin rodaje (y se vuelve a programar).
+create or replace function close_rodajes(p uuid) returns int
+language plpgsql security definer set search_path = public as $$
+declare pr projects; r events; miss uuid[]; n int := 0;
+begin
+  select * into pr from projects where id = p;
+  if pr.id is null or not is_partner(pr.team_id) then raise exception 'Sin permiso'; end if;
+  for r in select * from events where project_id = p and kind = 'rodaje' and status = 'activo' and closed_at is null order by starts_at loop
+    if now() <= rodaje_end(r) then continue; end if;
+    select coalesce(array_agg(x), '{}') into miss from unnest(r.video_ids) x
+      where not exists (select 1 from tasks where video_id = x and kind = 'rodaje' and not void);
+    update events set closed_at = now(), video_ids = array(select x from unnest(video_ids) x where not (x = any(miss))) where id = r.id;
+    if coalesce(array_length(miss, 1), 0) > 0 then
+      update videos set unshot = jsonb_build_object('rodaje', r.id, 'at', r.starts_at, 'closed', now()) where id = any(miss);
+      insert into log (team_id, project_id, actor, type, data) values (pr.team_id, p, null, 'rodaje.sin_grabar',
+        jsonb_build_object('rodaje', r.id, 'at', r.starts_at, 'videos', (select jsonb_agg(num order by num) from videos where id = any(miss))));
+      n := n + coalesce(array_length(miss, 1), 0);
+    end if;
+  end loop;
+  return n;
+end $$;
+
+-- "Sí se grabó": el líder lo registra hasta un día después de que terminó el rodaje.
+create or replace function late_shot(v uuid, who uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare vv videos; r events; m members; ow members;
+begin
+  select * into vv from videos where id = v;
+  if vv.id is null or not is_admin(vv.team_id) then raise exception 'Solo el líder registra un rodaje después'; end if;
+  if exists (select 1 from tasks where video_id = v and kind = 'rodaje' and not void) then raise exception 'Ese video ya figura grabado'; end if;
+  if vv.unshot is not null then
+    select * into r from events where id = (vv.unshot->>'rodaje')::uuid;
+    if exists (select 1 from events where kind = 'rodaje' and status = 'activo' and v = any(video_ids)) then raise exception 'El video ya tiene otro rodaje'; end if;
+  else
+    r := video_rodaje(v);
+  end if;
+  if r.id is null then raise exception 'Este video no tuvo rodaje'; end if;
+  if r.starts_at > now() then raise exception 'El video ya tiene otro rodaje programado'; end if;
+  if now() <= rodaje_end(r) then raise exception 'El rodaje sigue: márcalo como siempre'; end if;
+  if now() > rodaje_end(r) + interval '1 day' then raise exception 'Ya pasó el plazo (hasta un día después del rodaje)'; end if;
+  if not exists (select 1 from tasks where video_id = v and kind = 'guion' and not void) then raise exception 'Sin guion no se graba'; end if;
+  select * into m from members where id = who and team_id = vv.team_id and active and role in ('admin', 'socio');
+  if m.id is null then raise exception 'Elige quién lo grabó'; end if;
+  if not exists (select 1 from attendance where event_id = r.id and member_id = who and arrived_at is not null) then
+    raise exception '%', m.name || ' no tiene la llegada registrada en ese rodaje';
+  end if;
+  select * into ow from members where id = vv.owner;
+  if who <> vv.owner and exists (select 1 from attendance where event_id = r.id and member_id = vv.owner and arrived_at is not null) then
+    raise exception '%', ow.name || ' estuvo en el rodaje: el video va a su nombre';
+  end if;
+  if not (v = any(r.video_ids)) then update events set video_ids = array_append(video_ids, v) where id = r.id; end if;
+  update videos set unshot = null where id = v;
+  perform set_config('ra.late', '1', true);
+  insert into tasks (team_id, project_id, video_id, kind, done_by) values (vv.team_id, vv.project_id, v, 'rodaje', who);
+  perform set_config('ra.late', '', true);
+  insert into log (team_id, project_id, actor, type, data) values (vv.team_id, vv.project_id, my_member(vv.team_id), 'rodaje.tarde',
+    jsonb_build_object('video', vv.num, 'member', who, 'rodaje', r.id, 'at', r.starts_at));
+end $$;
+
+-- Reprogramar varios videos a la vez: a un rodaje que ya existe o a uno nuevo (todo o nada).
+create or replace function move_videos(vids uuid[], to_rodaje uuid default null, new_at timestamptz default null) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare vv videos; dst uuid := to_rodaje; x uuid;
+begin
+  if coalesce(array_length(vids, 1), 0) = 0 then raise exception 'Elige al menos un video'; end if;
+  select * into vv from videos where id = vids[1];
+  if vv.id is null or not is_partner(vv.team_id) then raise exception 'Sin permiso'; end if;
+  if dst is null then
+    if new_at is null then raise exception 'Elige la fecha del rodaje'; end if;
+    if new_at <= now() then raise exception 'Elige una fecha que no haya pasado'; end if;
+    insert into events (team_id, project_id, kind, starts_at, tolerance_min, video_ids, note)
+    values (vv.team_id, vv.project_id, 'rodaje', new_at, rule_int(vv.team_id, 'tol', 45), '{}', 'Reprogramado') returning id into dst;
+  end if;
+  foreach x in array vids loop
+    perform move_video(x, dst);
+  end loop;
+  set constraints events_dates immediate;
+  return dst;
+end $$;
+
+-- "No me llegó el video": el líder anula la entrega del socio. Antes de que pase al líder, el socio
+-- puede volver a entregar; después, el video pasa al líder (como cualquier entrega que no llegó).
+create or replace function review_missing(v uuid) returns text
+language plpgsql security definer set search_path = public as $$
+declare vv videos; k tasks; me uuid;
+begin
+  select * into vv from videos where id = v;
+  if vv.id is null or not is_admin(vv.team_id) then raise exception 'Solo el líder revisa las entregas'; end if;
+  me := my_member(vv.team_id);
+  select * into k from tasks where video_id = v and kind = 'acabado' and done_by = vv.owner and not void;
+  if k.id is null or k.review is distinct from 'pendiente' then raise exception 'No hay una entrega por revisar'; end if;
+  update tasks set review = 'no_llego', review_at = now(), review_by = me, void = true, voided_at = now() where id = k.id;
+  update tasks set void = true, voided_at = now() where video_id = v and kind = 'montaje' and done_by = vv.owner and not void;
+  insert into log (team_id, project_id, actor, type, data) values (vv.team_id, vv.project_id, me, 'video.no_llego', jsonb_build_object('video', vv.num, 'member', vv.owner));
+  return post_phase(v);
+end $$;
+-- Deshacer "No me llegó" (10 minutos y si nadie volvió a entregar).
+create or replace function review_missing_undo(v uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare vv videos; k tasks; me uuid;
+begin
+  select * into vv from videos where id = v;
+  if vv.id is null or not is_admin(vv.team_id) then raise exception 'Sin permiso'; end if;
+  me := my_member(vv.team_id);
+  select * into k from tasks where video_id = v and kind = 'acabado' and done_by = vv.owner and void and review = 'no_llego' order by review_at desc limit 1;
+  if k.id is null or k.review_by is distinct from me or now() > k.review_at + make_interval(mins => rule_int(vv.team_id, 'undo', 10)) then
+    raise exception 'Solo se deshace en los primeros 10 minutos';
+  end if;
+  if exists (select 1 from tasks where video_id = v and kind in ('montaje', 'acabado') and not void) then raise exception 'Ya se volvió a entregar o se tomó el video'; end if;
+  update tasks set void = false, voided_at = null where video_id = v and kind = 'montaje' and done_by = vv.owner and void and voided_at = k.voided_at;
+  update tasks set void = false, voided_at = null, review = 'pendiente', review_at = null, review_by = null where id = k.id;
+end $$;
+
+-- ---------- Propuestas (1.6.1): las reglas las aprueban los socios sin apoyo; los porcentajes, siempre el otro socio ----------
+create or replace function guard_proposal() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare me uuid := my_member(new.team_id); s int; tgt members; approvers boolean;
+begin
+  approvers := exists (select 1 from members where team_id = new.team_id and role = 'socio' and active and user_id is not null and not coalesce(apoyo, false));
+  if tg_op = 'INSERT' then
+    if exists (select 1 from proposals where team_id = new.team_id and kind = new.kind and status = 'pendiente'
+               and (new.kind <> 'apoyo' or data->>'member' = new.data->>'member')) then
+      raise exception 'Ya hay una propuesta pendiente de ese tipo: retírala primero';
+    end if;
+    if new.kind = 'pct' then
+      s := coalesce((new.data->>'pre')::int, 0) + coalesce((new.data->>'rod')::int, 0) + coalesce((new.data->>'mon')::int, 0) + coalesce((new.data->>'aca')::int, 0);
+      if s <> 100 then raise exception 'Los porcentajes tienen que sumar 100'; end if;
+    end if;
+    if new.kind = 'apoyo' then
+      select * into tgt from members where id = (new.data->>'member')::uuid and team_id = new.team_id;
+      if tgt.id is null or tgt.role <> 'socio' then raise exception 'Elige un socio'; end if;
+      if coalesce(tgt.apoyo, false) = (new.data->>'apoyo')::boolean then raise exception 'Ya está así'; end if;
+      new.old := jsonb_build_object('apoyo', coalesce(tgt.apoyo, false));
+    else
+      new.old := (select settings->new.kind from teams where id = new.team_id);
+    end if;
+    new.status := 'pendiente'; new.proposed_by := me; new.decided_by := null; new.decided_at := null; new.created_at := now();
+    if new.kind = 'rules' and not approvers then
+      -- Todos los socios tienen apoyo: el líder cambia las reglas directo (queda en el historial).
+      if not is_admin(new.team_id) then raise exception 'Las reglas las cambia el líder'; end if;
+      new.status := 'aprobada'; new.decided_by := me; new.decided_at := now();
+      update teams set settings = jsonb_set(coalesce(settings, '{}'), array['rules'], coalesce(settings->'rules', '{}') || new.data) where id = new.team_id;
+    end if;
+    return new;
+  end if;
+  if new.data is distinct from old.data or new.kind is distinct from old.kind then raise exception 'Una propuesta no se edita: retírala y haz otra'; end if;
+  if new.status is distinct from old.status then
+    if old.status <> 'pendiente' then raise exception 'Esa propuesta ya se decidió'; end if;
+    if new.status = 'retirada' and me <> old.proposed_by then raise exception 'Solo quien propuso puede retirarla'; end if;
+    if new.status in ('aprobada', 'rechazada') and me = old.proposed_by then raise exception 'La aprueba tu compañero'; end if;
+    if new.status in ('aprobada', 'rechazada') and old.kind = 'apoyo' and me::text <> old.data->>'member' then raise exception 'La acepta el socio al que le cambia'; end if;
+    if new.status in ('aprobada', 'rechazada') and old.kind = 'rules'
+       and exists (select 1 from members where id = me and role = 'socio' and coalesce(apoyo, false)) then
+      raise exception 'Las reglas las aprueba un socio sin apoyo';
+    end if;
+    new.decided_by := me; new.decided_at := now();
+    if new.status = 'aprobada' then
+      if old.kind = 'apoyo' then
+        update members set apoyo = (old.data->>'apoyo')::boolean where id = (old.data->>'member')::uuid;
+      else
+        update teams set settings = jsonb_set(coalesce(settings, '{}'), array[new.kind], coalesce(settings->new.kind, '{}') || new.data) where id = new.team_id;
+      end if;
+    end if;
+  end if;
+  return new;
+end $$;
+
+-- ---------- Reglas (1.6.1): duración máxima del rodaje ----------
+create or replace function check_rules(r jsonb) returns void
+language plpgsql immutable as $$
+begin
+  if r ? 'mon' and (r->>'mon')::int < 2 then raise exception 'El apoyo tiene que ser de al menos 2 días'; end if;
+  if coalesce((r->>'self')::int, 480) >= coalesce((r->>'auto')::int, 720) or coalesce((r->>'auto')::int, 720) >= coalesce((r->>'fix')::int, 1020) or coalesce((r->>'fix')::int, 1020) >= 1439 then
+    raise exception 'Las horas tienen que ir en orden: entrega por su cuenta, pasa al líder, corregir';
+  end if;
+  if coalesce((r->>'pmon')::int, 720) >= coalesce((r->>'pfin')::int, 1080) or coalesce((r->>'pfin')::int, 1080) >= coalesce((r->>'prev')::int, 1140)
+     or coalesce((r->>'prev')::int, 1140) >= coalesce((r->>'pfix')::int, 1260) or coalesce((r->>'pfix')::int, 1260) >= 1439 then
+    raise exception 'Las horas sin apoyo tienen que ir en orden: montaje, corte final, revisión, corrección';
+  end if;
+  if r ? 'rdur' and (r->>'rdur')::int not in (0, 720, 1440) then raise exception 'La duración del rodaje es hasta las 23:59, 12 horas o 24 horas'; end if;
+end $$;
+
+grant execute on function rodaje_end, close_rodajes, late_shot, move_videos, review_missing, review_missing_undo to authenticated;

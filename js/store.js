@@ -1,6 +1,7 @@
 // Estado de la app y operaciones del día a día.
 import { api, TABLES, isPractice, hasServer } from './api.js';
 import { setRules, DEFAULT_PCT, DEFAULT_RULES, at, addDays, payouts, attendanceStatus, memberStatus, videoState, limaDate, adminAbsent, leaderAway, preDueFor, meetingOf as rMeetingOf, rodajeOf, takeLimit, claimOf, checkWeek, meetHas } from './rules.js';
+import * as R from './rules.js';
 
 export const S = {
   ready: false, session: null, teams: [], teamId: null, me: null, projectId: null,
@@ -94,6 +95,20 @@ export async function load() {
     S.projectId = (S.data.projects.find((p) => p.id === saved) || open[open.length - 1] || S.data.projects[S.data.projects.length - 1] || {}).id || null;
   }
   emit();
+  closeEnded();
+}
+
+// 1.6.1 · Un rodaje que terminó (hasta las 23:59 o la duración máxima) deja sin rodaje lo que no se grabó.
+// Lo hace la base (close_rodajes); la app lo pide al cargar, una vez por rodaje.
+const closing = new Set();
+async function closeEnded() {
+  if (!S.me || !(S.me.role === 'admin' || S.me.role === 'socio')) return;
+  const now = new Date();
+  const due = S.data.events.filter((e) => e.kind === 'rodaje' && (e.status || 'activo') === 'activo' && !e.closed_at && now > R.rodajeEnd(e) && !closing.has(e.id));
+  const pids = [...new Set(due.map((e) => e.project_id))].filter((pid) => { const p = S.data.projects.find((x) => x.id === pid); return p && p.status === 'abierto'; });
+  if (!pids.length) return;
+  due.forEach((e) => closing.add(e.id));
+  try { for (const pid of pids) await api.rpc('close_rodajes', { p: pid }); await load(); } catch (e) { /* se reintenta en la próxima carga */ due.forEach((x) => closing.delete(x.id)); }
 }
 
 async function run(fn, okMsg) {
@@ -243,7 +258,7 @@ export const saveLook = (v) => run(() => api.rpc('save_settings', { t: S.teamId,
 export const saveReminders = (v) => run(() => api.rpc('save_settings', { t: S.teamId, k: 'reminders', v }), 'Recordatorios guardados');
 export const proposals = () => (S.data.proposals || []);
 export const pendingProposal = (kind) => proposals().find((p) => p.kind === kind && p.status === 'pendiente') || null;
-export const propose = (kind, data) => run(() => api.insert('proposals', { team_id: S.teamId, kind, data, status: 'pendiente', proposed_by: S.me.id, old: (S.settings || {})[kind] || null }), 'Propuesta enviada: tu socio la verá en su Inicio');
+export const propose = (kind, data, okMsg) => run(() => api.insert('proposals', { team_id: S.teamId, kind, data, status: 'pendiente', proposed_by: S.me.id, old: (S.settings || {})[kind] || null }), okMsg || 'Propuesta enviada: tu socio la verá en su Inicio');
 export const proposeApoyo = (m, apoyo) => run(() => api.insert('proposals', { team_id: S.teamId, kind: 'apoyo', data: { member: m.id, apoyo: !!apoyo }, status: 'pendiente', proposed_by: S.me.id, old: { apoyo: !!m.apoyo } }), 'Propuesta enviada a ' + String(m.name).split(' ')[0] + ' · queda en el historial');
 export const decideProposal = (p, status) => run(() => api.update('proposals', p.id, { status }), status === 'aprobada' ? 'Aprobado: ya se aplica' : status === 'retirada' ? 'Propuesta retirada' : 'Propuesta rechazada');
 export const setTitle = (video, title) => run(() => api.update('videos', video.id, { title: title.trim() || null }), 'Tema guardado');
@@ -400,6 +415,11 @@ export function setRsvp(event, k, extra = {}) {
 
 // Reprogramar un video (sin guion no se graba): pasa a otro rodaje y se reabre el plazo de su dueño.
 export const moveVideo = (video, rodajeId) => run(() => api.rpc('move_video', { v: video.id, to_rodaje: rodajeId }), 'Video reprogramado');
+// 1.6.1 · Reprogramar varios videos a la vez (a un rodaje que ya existe o a uno nuevo), "Sí se grabó" y "No me llegó".
+export const moveVideos = (ids, rodajeId, newAt) => run(() => api.rpc('move_videos', { vids: ids, to_rodaje: rodajeId || null, new_at: newAt || null }), ids.length > 1 ? 'Videos reprogramados' : 'Video reprogramado');
+export const lateShot = (video, who) => run(() => api.rpc('late_shot', { v: video.id, who }), 'Registrado: el video sí se grabó · queda en el historial');
+export const reviewMissing = (video) => run(() => api.rpc('review_missing', { v: video.id }), null);
+export const reviewMissingUndo = (video) => run(() => api.rpc('review_missing_undo', { v: video.id }), 'Deshecho: la entrega vuelve a estar por revisar');
 
 // WhatsApp de cada integrante (9 dígitos, empieza con 9).
 export const PHONE_RE = /^9\d{8}$/;
