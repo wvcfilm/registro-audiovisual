@@ -49,10 +49,10 @@ export const DEFAULT_PCT = { pre: 25, rod: 35, mon: 16, aca: 24 };
 // 1.3: take = horas antes del rodaje hasta las que se puede tomar la preproducción del compañero;
 // conf = horas antes de la reunión para confirmar asistencia; madr = fin de la madrugada (minutos: 300 = 05:00).
 // 1.4 · Entregas al límite (minutos del día): monh = hora del apoyo (21:00), self = entrega por su cuenta (08:00),
-// auto = pasa solo al administrador (12:00), fix = corregir cambios (17:00). El video final y la revisión vencen a las 23:59.
+// auto = pasa solo al administrador (12:00), fix = corregir cambios (17:00). El corte final y la revisión vencen a las 23:59.
 // cli = días de apoyo propios de un cliente ({ "PerteneSer": 3 }).
-export const DEFAULT_RULES = { open: 15, punt: 10, tol: 45, pre: 1080, mon: 2, fin: 1, undo: 10, avr: 1080, avm: 24, take: 5, conf: 12, madr: 300, monh: 1260, self: 480, auto: 720, fix: 1020, cli: {}, pmon: 720, pfin: 1080, prev: 1140, pfix: 1260 };
-// 1.5 · Socios sin apoyo (y el líder si hay alguno): montaje 12:00 (solo aviso), video final 18:00, revisión 19:00,
+export const DEFAULT_RULES = { open: 15, punt: 10, tol: 45, pre: 1080, mon: 2, fin: 1, undo: 10, avr: 1080, avm: 24, take: 5, conf: 12, madr: 300, monh: 1260, self: 480, auto: 720, fix: 1020, cli: {}, pmon: 720, pfin: 1080, prev: 1140, pfix: 1260, rdur: 0 };
+// 1.5 · Socios sin apoyo (y el líder si hay alguno): montaje 12:00 (solo aviso), corte final 18:00, revisión 19:00,
 // corrección 21:00; desde las 18:00 el otro lo toma directo hasta las 23:59.
 // Puntos de racha nuevos (1.3).
 export const PTS = { rescue: 3, claimFail: -4, noConfirm: -2, handoff: -3 };
@@ -60,7 +60,7 @@ export const RULES = Object.assign({}, DEFAULT_RULES);
 export function setRules(r) { Object.assign(RULES, DEFAULT_RULES, r || {}); if (!RULES.cli || typeof RULES.cli !== 'object') RULES.cli = {}; }
 export const hm = (mins) => String(Math.floor(mins / 60)).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0');
 export const KINDS = ['guion', 'storyboard', 'rodaje', 'montaje', 'acabado'];
-export const KIND_LABEL = { guion: 'Guion', storyboard: 'Storyboard', rodaje: 'Rodaje', montaje: 'Montaje', acabado: 'Video final' };
+export const KIND_LABEL = { guion: 'Guion', storyboard: 'Storyboard', rodaje: 'Rodaje', montaje: 'Montaje', acabado: 'Corte final' };
 export const STAGE_OF = { guion: 'pre', storyboard: 'pre', rodaje: 'prod', montaje: 'post', acabado: 'post' };
 
 export function rates(project) {
@@ -87,6 +87,27 @@ export function meetingOf(video, ctx) {
   return (ctx.events || []).filter((e) => e.kind === 'reunion' && active(e) && (e.video_ids || []).indexOf(video.id) !== -1)
     .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at))[0] || null;
 }
+// 1.6.1 · Hasta cuándo dura un rodaje: hasta las 23:59 de su día (rdur 0) o rdur minutos desde que empieza.
+export function rodajeEnd(r) {
+  const n = Number(RULES.rdur) || 0;
+  return n > 0 ? new Date(new Date(r.starts_at).getTime() + n * 60000) : new Date(at(limaDate(r.starts_at), '23:59').getTime() + 59000);
+}
+// Hasta cuándo el líder puede marcar "Sí se grabó" en un video que quedó sin grabar (hasta el día siguiente).
+export const lateShotUntil = (r) => new Date(rodajeEnd(r).getTime() + 864e5);
+// 1.6.1 · Videos sin guion de un rodaje que se mueve: ¿con la nueva fecha se pueden grabar?
+// ok: su dueño vuelve a tener plazo · take: solo su compañero puede tomarlo · bad: ya no se graba.
+// from: primer día de rodaje con el que el dueño vuelve a tener plazo.
+export function guionRisk(videoIds, startISO, ctx, now = new Date()) {
+  const vs = (ctx.videos || []).filter((v) => (videoIds || []).indexOf(v.id) !== -1
+    && !(ctx.tasks || []).some((t) => t.video_id === v.id && (t.kind === 'guion' || t.kind === 'rodaje') && !t.void));
+  const today = limaDate(now);
+  const from = addDays(today, limaTime(now) < hm(RULES.pre) ? 1 : 2);
+  if (!vs.length) return { level: null, nums: [], from };
+  const start = new Date(startISO);
+  const pre = preDueFor(start);
+  const take = new Date(start.getTime() - RULES.take * 3600e3);
+  return { level: now <= pre ? 'ok' : now <= take ? 'take' : 'bad', nums: vs.map((v) => v.num).sort((a, b) => a - b), videos: vs, pre, take, from };
+}
 export function preDueFor(rodajeStart) { return at(addDays(limaDate(rodajeStart), -1), hm(RULES.pre)); }
 
 // Días de apoyo de un video: los del cliente si tiene plazo propio; si no, los del equipo.
@@ -107,6 +128,8 @@ export function modeOf(video, ctx) {
   return apoyoOf(video, owner) ? 'apoyo' : 'pareja';
 }
 // Quién puede tomar la edición de un video en modo pareja: el líder o un socio sin apoyo (nunca el dueño ni un socio con apoyo).
+// 1.6.1 · Quiénes aprueban las reglas: los socios sin apoyo (los porcentajes, siempre el otro socio).
+export const rulesApprovers = (members) => (members || []).filter((m) => isSocio(m) && m.user_id && !m.apoyo);
 export const canTakeEdit = (me, video) => !!me && me.id !== video.owner && (me.role === 'admin' || (me.role === 'socio' && !me.apoyo));
 export function deadlines(video, ownerMember, opts = {}) {
   const pub = video.publish_date;
@@ -591,7 +614,7 @@ export function deliveries(memberId, ctx, now = new Date()) {
 const PRE = { guion: 1, storyboard: 1 };
 // ---------- 1.3 · Tomar = comprometerse y luego entregar ----------
 // Hasta cuándo se puede tomar (y entregar) lo del compañero: preproducción hasta 5 h antes del rodaje;
-// montaje que pasó al administrador (5.7) hasta el plazo del video final.
+// montaje que pasó al administrador (5.7) hasta el plazo del corte final.
 export function takeLimit(video, kind, ctx) {
   if (PRE[kind]) { const r = rodajeOf(video, ctx); return r ? new Date(new Date(r.starts_at).getTime() - RULES.take * 3600 * 1000) : null; }
   if (kind === 'montaje') return dl(video, ctx).finalDue;
@@ -637,10 +660,12 @@ export function canMark(video, kind, me, ctx, now = new Date(), opts = {}) {
     const r = st.rodaje;
     if (!r) return { ok: false, why: 'Primero agenda el rodaje' };
     const open = new Date(new Date(r.starts_at).getTime() - RULES.open * 60000);
-    if (now < open) return { ok: false, why: `Se habilita el ${fmtWhen(open)}` };
-    if (limaDate(now) !== limaDate(r.starts_at)) return { ok: false, why: 'El día del rodaje ya pasó: reprográmalo' };
     // 1.3: sin guion no se graba (se reprograma); sin storyboard sí se graba y su valor se reparte.
-    if (!st.g) return { ok: false, noGuion: true, why: 'Sin guion no se graba: reprográmalo' };
+    // 1.6.1: se avisa apenas el guion ya no se puede hacer (pasó el límite para tomarlo y nadie lo tomó, o ya abrió el rodaje).
+    const tl = takeLimit(video, 'guion', ctx);
+    if (!st.g && (now >= open || (tl && now > tl && !claimOf(video, 'guion', ctx)))) return { ok: false, noGuion: true, why: 'Sin guion no se graba: reprográmalo' };
+    if (now < open) return { ok: false, why: `Se habilita el ${fmtWhen(open)}` };
+    if (now > rodajeEnd(r)) return { ok: false, ended: true, why: 'El rodaje ya terminó: reprográmalo' };
     const mine = (ctx.attendance || []).find((a) => a.event_id === r.id && a.member_id === me.id);
     if (!mine || !mine.arrived_at) return { ok: false, why: mine && mine.claimed_at ? 'Tu llegada espera que ' + adminName(ctx) + ' la confirme' : 'Primero registra tu llegada al rodaje' };
     const split = !st.s;
@@ -682,7 +707,7 @@ export function canMark(video, kind, me, ctx, now = new Date(), opts = {}) {
     if (owner.apoyo && st.d.apoyoDue) {
       if (isOwner) {
         if (P.handoff) return { ok: false, gone: true, why: 'Lo hará ' + adminName(ctx) };
-        if (P.apoyoPath) return { ok: false, why: 'Tu video final lo hace ' + adminName(ctx) + ' como apoyo' };
+        if (P.apoyoPath) return { ok: false, why: 'Tu corte final lo hace ' + adminName(ctx) + ' como apoyo' };
         if (P.phase === 'revision') return { ok: false, review: true, why: 'Entregado · ' + adminName(ctx) + ' revisa tu video' };
         if (P.phase === 'cambios') return { ok: true, fix: true, due: st.d.fixDue };
         return { ok: true, self: true, due: P.phase === 'riesgo' ? st.d.autoDue : st.d.selfDue };
@@ -751,7 +776,7 @@ export function canUndo(task, me, ctx, now = new Date()) {
     const r = v ? rodajeOf(v, ctx) : null;
     return !r || now <= preDueFor(r.starts_at);
   }
-  // Lo que ya se revisó, o un montaje con su video final encima, no se deshace.
+  // Lo que ya se revisó, o un montaje con su corte final encima, no se deshace.
   if (task.kind === 'acabado' && ((task.review && task.review !== 'pendiente') || task.redelivered_at)) return false;
   if (task.kind === 'montaje' && (ctx.tasks || []).some((t) => t.video_id === task.video_id && t.kind === 'acabado' && !t.void)) return false;
   return now <= undoUntil(task, ctx);
@@ -912,6 +937,6 @@ export function laterStep(t, tasks) {
   const has = (k) => tasks.some((x) => x.video_id === t.video_id && x.kind === k && !x.void);
   if ((t.kind === 'guion' || t.kind === 'storyboard') && has('rodaje')) return 'el video ya se grabó';
   if (t.kind === 'rodaje' && (has('montaje') || has('acabado'))) return 'el video ya tiene edición';
-  if (t.kind === 'montaje' && has('acabado')) return 'el video final ya se entregó';
+  if (t.kind === 'montaje' && has('acabado')) return 'el corte final ya se entregó';
   return null;
 }
